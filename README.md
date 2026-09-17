@@ -12,10 +12,11 @@
 
 - spec 上连 UML/设计图，下连实现代码。
 - 同一算法在不同目录或项目中的不同语言实现相互关联。
+- 选择 programming-thinking 进行 Lean 程序性证明时，证明范围必须直接关联 UML 源码与实际实现，并按经证明的预构建严格一一对应地翻译代码。
 - 某类文件的受管内容必须被未过期的已确认标记覆盖。
 - 缺少关联可以先提醒，也可以使某个工作流检查失败；使用者可显式跳过或关闭检查用例。
 
-OMD 不理解或证明代码与文档的语义等价。人或 AI 负责判断、修改与说明，工具负责确定性跟踪和规则检查。
+OMD 核心不理解或证明代码与文档的语义等价。人或 AI 负责判断、修改与说明，工具负责确定性跟踪和规则检查。可选 Lean skill 负责明确模型内的证明，不把 link 检查当作语义证明。
 
 ## 已确定的基础
 
@@ -30,6 +31,12 @@ OMD 不理解或证明代码与文档的语义等价。人或 AI 负责判断、
 - **写入：** 单写者；旧版本 hash 不匹配即报错，不覆盖、不自动合并。
 
 用户已有 spec/绘图工具时沿用。尚未选型时推荐 OpenSpec 与 Mermaid；它们不是 OMD 核心依赖。
+
+## 可选的 programming-thinking skill（已确认契约，尚未实现）
+
+用 Lean 分析已有 UML 细节中的顺序状态机、逻辑链和分支遗漏，形成接近伪代码的预构建与程序性证明，再严格一一对应地翻译为实现。必须同时建立 Lean↔UML 源码、Lean↔实际实现的直接范围 link；缺失任一侧不能称为闭环交付。
+
+本 skill 不用于并发、多线程任务，不把文档转写或可运行示例当成证明，不将 Lean 设为全项目唯一事实源或核心依赖。完整适用条件、证明义务和防止误用的规则见 [programming-thinking 契约](docs/programming-thinking.md)；本次只写入设计文档，不机械复制现有通用 skill。
 
 ## 来源引用
 
@@ -51,6 +58,7 @@ command::<executable>::<JSON args 数组>
 | [交接说明](docs/handoff.md) | 新工具接手入口、已完成与未完成工作 |
 | [AGENTS.md](AGENTS.md) | AI 工具的阅读顺序与协作约定，不是产品 skill |
 | [需求基线](docs/requirements.md) | 用户确认的决定；R 编号用于追溯 |
+| [programming-thinking 契约](docs/programming-thinking.md) | 可选 Lean skill 的适用范围、证明义务、严格翻译与双侧 link；尚未实现 |
 | [来源与坐标](docs/source-model.md) | 已确认引用形式、编码、command 契约及解析边界 |
 | [存储与路径](docs/storage.md) | 已确认路径规则与明确标注的候选布局 |
 | [候选架构](docs/architecture.md) | 模块职责与流程建议，不是冻结实现 |

@@ -15,6 +15,7 @@
 5. [候选架构](architecture.md)：可改进的工程拆分，不取代用户决定。
 6. [验收场景](acceptance.md)：从确认要求导出的场景草案。
 7. [调研依据](research.md)：外部工具/规范的证据和适用边界。
+8. [programming-thinking 契约](programming-thinking.md)：可选 Lean skill 的适用范围、程序性证明、严格实现翻译与双侧范围 link。
 
 AI 工具也可从仓库根的 [AGENTS.md](../AGENTS.md) 开始；该文件整理阅读顺序与已有设计约束，不是 OMD 产品 skill。
 
@@ -26,6 +27,7 @@ AI 工具也可从仓库根的 [AGENTS.md](../AGENTS.md) 开始；该文件整�
 - 调研 OpenSpec、Mermaid、Git diff/hook、SQLite、文本选择器和跨平台目录资料；只引用与设计有关的能力边界。
 - 编写用于后续实现的验收场景；这些不是已运行测试。
 - 按项目所有者后续明确要求补建仓库 `AGENTS.md`，提供 AI 协作说明，不改变已确认的设计范围。
+- 按后续要求先行记录 programming-thinking 契约（R-24～R-28、S-28～S-37）：限定 UML 细节的顺序状态机/逻辑链证明，排除并发、多线程分析，要求严格对应实现及 Lean↔UML/实际实现的直接 link。没有机械复制通用 skill。
 
 ## 未执行
 
@@ -34,6 +36,7 @@ AI 工具也可从仓库根的 [AGENTS.md](../AGENTS.md) 开始；该文件整�
 - 未运行产品测试、构建、性能试验或 CI；没有可据此宣称的通过结果。
 - 未选择具体 Rust 依赖、最终 schema、完整引用文法或发布方式。
 - 未选择许可证。
+- 未交付可安装的 programming-thinking 产品 skill，未创建或运行 Lean 模型/证明，未生成真实双侧 link；本次交付是使用契约和验收草案。
 
 
 ## 交付中的状态标签
