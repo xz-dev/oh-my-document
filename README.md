@@ -49,6 +49,7 @@ command::<executable>::<JSON args 数组>
 | 文档 | 用途与状态 |
 | --- | --- |
 | [交接说明](docs/handoff.md) | 新工具接手入口、已完成与未完成工作 |
+| [AGENTS.md](AGENTS.md) | AI 工具的阅读顺序与协作约定，不是产品 skill |
 | [需求基线](docs/requirements.md) | 用户确认的决定；R 编号用于追溯 |
 | [来源与坐标](docs/source-model.md) | 已确认引用形式、编码、command 契约及解析边界 |
 | [存储与路径](docs/storage.md) | 已确认路径规则与明确标注的候选布局 |
