@@ -1,0 +1,83 @@
+{
+  "version": 1,
+  "sources": [
+    {
+      "id": 1,
+      "url": "https://raw.githubusercontent.com/Fission-AI/OpenSpec/main/README.md",
+      "title": "OpenSpec README",
+      "accessed": "2026-09-17"
+    },
+    {
+      "id": 2,
+      "url": "https://raw.githubusercontent.com/Fission-AI/OpenSpec/main/docs/getting-started.md",
+      "title": "OpenSpec Getting Started",
+      "accessed": "2026-09-17"
+    },
+    {
+      "id": 3,
+      "url": "https://mermaid.js.org/syntax/flowchart.html",
+      "title": "Mermaid Flowcharts Syntax",
+      "accessed": "2026-09-17"
+    },
+    {
+      "id": 4,
+      "url": "https://git-scm.com/docs/githooks",
+      "title": "Git githooks",
+      "accessed": "2026-09-17"
+    },
+    {
+      "id": 5,
+      "url": "https://git-scm.com/docs/git-diff",
+      "title": "Git git-diff",
+      "accessed": "2026-09-17"
+    },
+    {
+      "id": 6,
+      "url": "https://www.w3.org/TR/annotation-model",
+      "title": "W3C Web Annotation Data Model",
+      "accessed": "2026-09-17"
+    },
+    {
+      "id": 7,
+      "url": "https://github.com/mermaid-js/mermaid-cli",
+      "title": "mermaid-cli repository",
+      "accessed": "2026-09-17"
+    },
+    {
+      "id": 8,
+      "url": "https://raw.githubusercontent.com/mermaid-js/mermaid-cli/master/README.md",
+      "title": "mermaid-cli README",
+      "accessed": "2026-09-17"
+    },
+    {
+      "id": 9,
+      "url": "https://www.sqlite.org/fileformat.html",
+      "title": "SQLite Database File Format",
+      "accessed": "2026-09-17"
+    },
+    {
+      "id": 10,
+      "url": "https://git-scm.com/docs/gitattributes",
+      "title": "Git gitattributes",
+      "accessed": "2026-09-17"
+    },
+    {
+      "id": 11,
+      "url": "https://www.sqlite.org/whentouse.html",
+      "title": "Appropriate Uses For SQLite",
+      "accessed": "2026-09-17"
+    },
+    {
+      "id": 12,
+      "url": "https://specifications.freedesktop.org/basedir/latest",
+      "title": "XDG Base Directory Specification",
+      "accessed": "2026-09-17"
+    },
+    {
+      "id": 13,
+      "url": "https://docs.rs/directories/latest/directories/struct.ProjectDirs.html",
+      "title": "directories::ProjectDirs Rust documentation",
+      "accessed": "2026-09-17"
+    }
+  ]
+}
