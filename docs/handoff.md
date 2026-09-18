@@ -1,5 +1,7 @@
 # 设计调研交接
 
+> **状态更新（2026-09-18）：** 设计审阅已完成。所有实现级决定（D-01 至 D-21）与工程默认（ED-01 至 ED-19）已记录在 [openspec/changes/define-tracking-contracts](../openspec/changes/define-tracking-contracts/)（proposal.md + design.md）。端到端生命周期已按最终模型纸面走查无矛盾。docs/ 原始文档保留为基线与历史参考，实施时以 change 目录两份文件为准。
+
 ## 本次交付是什么
 
 本次以项目经理/调研角色收拢 oh-my-document 的交互设计，发布文档到本仓库。项目所有者将切换到自己电脑上的工具继续工作。
