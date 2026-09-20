@@ -180,6 +180,20 @@ fn log_chain(store: &Store, root: &Path, node_or_commit: &str) -> Vec<String> {
 /// Render the mount tree as nested JSON from `start` (or the implicit root).
 /// Tree shows mount hierarchy: root → file nodes → range children. Only
 /// mounted nodes expand — never unpublished material as history.
+/// Resolve a link endpoint arg to its canonical `range:` key.
+/// Accepts `file@mode:s-e`, `range:file@mode:s-e`, or a bare range key.
+/// Non-range args pass through verbatim (they'll fail the range check).
+fn resolve_range_key(r: &str) -> String {
+    let bare = r.strip_prefix("range:").unwrap_or(r);
+    if let Some(at) = bare.find('@') {
+        let (path, span) = bare.split_at(at);
+        if let Some((mode, s, e)) = omd::relations::node::parse_range_arg(&span[1..]) {
+            return omd::relations::node::range_key(path, mode, s, e);
+        }
+    }
+    r.to_string()
+}
+
 fn mount_tree(store: &Store, start: Option<&str>, max_depth: usize, file_only: bool) -> serde_json::Value {
     let mounts = &store.state().mounts;
     let tips = &store.state().tips;
@@ -357,19 +371,9 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                 // of the same range (`a.md@0-1`, `range:a.md@text:0-1`)
                 // resolve to the same canonical key and are duplicates.
                 // Opposite directions are NOT duplicates.
-                let resolve_range = |r: &str| -> String {
-                    // A `path@mode:s-e` or `range:path@mode:s-e` arg → its
-                    // canonical `range:path@mode:s-e` key.
-                    let bare = r.strip_prefix("range:").unwrap_or(r);
-                    if let Some(at) = bare.find('@') {
-                        let (path, span) = bare.split_at(at);
-                        if let Some((mode, s, e)) = omd::relations::node::parse_range_arg(&span[1..]) {
-                            return omd::relations::node::range_key(path, mode, s, e);
-                        }
-                    }
-                    // Non-range arg (a commit id / file ref) — use verbatim.
-                    r.to_string()
-                };
+                // Resolve range shorthand (file@mode:s-e / range:file@mode:s-e)
+                // to the canonical `range:` key for dedup + link endpoints.
+                let resolve_range = resolve_range_key;
                 let mut seen_from = std::collections::HashSet::new();
                 for r in link_from {
                     if !seen_from.insert(resolve_range(r)) {
@@ -593,12 +597,20 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                 ).map_err(|e| e.to_string())?
             };
             // Create the requested links inside the block, then close it.
+            // --link-from/--link-to connect RANGE nodes: the committing node
+            // must itself be a range (use --range on this commit), and each
+            // endpoint arg resolves to its canonical `range:` key.
             if combo {
+                if !omd::relations::node::is_range_key(&node) {
+                    return Err("--link-from/--link-to require --range: links connect ranges, not whole files".into());
+                }
                 for r in link_from {
-                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, clock, &node, r, &node, "combo" , &Expected::default()).map_err(|e| e.to_string())?;
+                    let src = resolve_range_key(r);
+                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, clock, &node, &src, &node, "combo", &Expected::default()).map_err(|e| e.to_string())?;
                 }
                 for r in link_to {
-                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, clock, &node, &node, r, "combo", &Expected::default()).map_err(|e| e.to_string())?;
+                    let tgt = resolve_range_key(r);
+                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, clock, &node, &node, &tgt, "combo", &Expected::default()).map_err(|e| e.to_string())?;
                 }
                 let mut pl = serde_json::Map::new();
                 pl.insert("path".into(), path.clone().into());
