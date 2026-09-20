@@ -413,6 +413,14 @@ pub fn commit_link(
     }
     store.lock()?;
     store.check_expected(expected)?;
+    // Both endpoints must be REAL range nodes — a link to a range that was
+    // never initialized is a phantom reference, not a forward link.
+    if !store.state().tips.contains_key(source) {
+        return Err(PipelineError::Commit(format!("link source range does not exist: {source}")));
+    }
+    if !store.state().tips.contains_key(target) {
+        return Err(PipelineError::Commit(format!("link target range does not exist: {target}")));
+    }
 
     let mut idb = [0u8; 16];
     rng.fill(&mut idb);

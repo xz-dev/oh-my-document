@@ -741,12 +741,12 @@ fn replace_then_verify_uses_new_source() {
     t.run(&["init", "a.md"]);
     t.write("b.md", "same-bytes");
     let tip = t.tip("file:a.md");
-    // Rebind a's acquisition to b's (identical content) — allowed.
     let (c, o, e) = t.run(&["replace", &tip, "--source", "b.md"]);
     assert_eq!(c, 0, "identical-content replace ok: {o} {e}");
-    // verify still reads live source — identical content → stays clean.
+    // verify reads live content — identical bytes → ok:true (JSON value).
     let (_, ov, _) = t.run(&["verify", "a.md"]);
-    assert!(ov.contains("ok") , "verify after replace: {ov}");
+    let j = serde_json::from_str::<serde_json::Value>(&ov).unwrap_or_default();
+    assert_eq!(j["data"]["ok"].as_bool(), Some(true), "verify clean: {ov}");
 }
 
 // change-review: full confirmed coverage does NOT clear obligations — a
@@ -849,18 +849,19 @@ fn file_verify_passes_when_ranges_clean() {
     assert_eq!(c, 0, "verify ok when clean: {o}");
 }
 
-// managed-content: HEAD movement alone does not change the observed file —
-// verify reads the live working file, never Git HEAD/index.
+// managed-content: verify reads the live working file — the observation
+// is the file's current bytes, never a Git HEAD/index snapshot. (Direct
+// Git-HEAD probe lives in git_source.rs; here we assert the working-file
+// observation is what verify reports.)
 #[test]
 fn head_movement_does_not_change_observation() {
     let t = T::new();
     t.write("a.md", "working");
     t.run(&["init", "a.md"]);
-    // Simulate HEAD moving (a commit exists in git but file unchanged) —
-    // the observation is the working file's content, unaffected.
     let (_, o, _) = t.run(&["verify", "a.md"]);
-    assert!(o.contains("\"ok\": true") || o.contains("ok"),
-            "working file observed, HEAD irrelevant: {o}");
+    let j = serde_json::from_str::<serde_json::Value>(&o).unwrap_or_default();
+    assert_eq!(j["data"]["ok"].as_bool(), Some(true),
+            "unchanged working file → clean: {o}");
 }
 
 // managed-content: readable Git history does not hide a missing current file —
@@ -878,16 +879,48 @@ fn git_history_does_not_hide_missing_current() {
             "deleted current file reported: {o}");
 }
 
-// managed-content: a file observed is never compared to an index entry —
-// verify hashes the live working content each time.
+// managed-content: verify reads the live file — a file with NO tracked
+// ranges reports clean even after edits (there's no range to dirty). The
+// edit only dirties once a range tracks it (proven by in_range_edit).
 #[test]
 fn verify_reads_live_not_index() {
     let t = T::new();
     t.write("a.md", "v1");
     t.run(&["init", "a.md"]);
-    t.write("a.md", "v2-changed");
-    // The changed live content is what verify sees — never a stale snapshot.
+    // Add a range, then edit inside it — now the change IS observed dirty.
+    t.run(&["commit", "commit", "a.md", "--range", "0-2", "--reason", "r"]);
+    t.write("a.md", "vX-changed");
     let (_, o, _) = t.run(&["verify", "a.md"]);
-    assert!(o.contains("dirty") || o.contains("ok") || o.contains("locate"),
-            "live content observed: {o}");
+    let j = serde_json::from_str::<serde_json::Value>(&o).unwrap_or_default();
+    assert_eq!(j["data"]["ok"].as_bool(), Some(false),
+            "in-range edit observed live → not clean: {o}");
+}
+
+// change-review: a link endpoint must be a REAL range node — a link to a
+// range that was never initialized is a phantom reference, rejected.
+#[test]
+fn link_to_nonexistent_range_rejected() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r"]);
+    // Linking FROM a real range TO a never-initialized range must fail.
+    let (c, o, e) = t.run(&["commit", "link", "range:a.md@text:0-5", "range:zz.md@text:0-9"]);
+    assert_ne!(c, 0, "phantom endpoint rejected: {o} {e}");
+    assert!(format!("{o}{e}").contains("does not exist") || format!("{o}{e}").contains("error"),
+            "diagnostic: {o} {e}");
+}
+
+// change-review (55): a combo link where one endpoint is invalid reports
+// the early-success members + the failure — never a silent ok:true.
+#[test]
+fn combo_link_reports_partial_failure() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r"]);
+    // --link-from real range + --link-from a nonexistent one in one command.
+    let (c, o, e) = t.run(&["commit", "commit", "a.md", "--range", "0-3",
+        "--link-from", "a.md@text:0-5", "--link-from", "zz.md@text:0-9", "--reason", "r"]);
+    assert_ne!(c, 0, "combo with invalid member fails: {o} {e}");
 }
