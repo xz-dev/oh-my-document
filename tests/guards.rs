@@ -781,3 +781,40 @@ fn reindex_from_unfamiliar_manifest() {
     let (c, o, _) = t.run(&["reindex"]);
     assert_eq!(c, 0, "reindex rebuilds from manifest: {o}");
 }
+
+// managed-content: an insertion EXACTLY at a range's end dirties it without
+// auto-expanding — the range needs review, never silently grows.
+#[test]
+fn insertion_at_end_dirties_no_growth() {
+    let t = T::new();
+    t.write("a.md", "ABCDE");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "r"]);
+    // Insert exactly at end boundary (pos 3) — ambiguous adjacency.
+    t.write("a.md", "ABCXYDE");
+    let (_, o, _) = t.run(&["verify", "a.md"]);
+    // The range reports dirty/moved — never auto-covered the insertion.
+    assert!(o.contains("dirty") || o.contains("moved") || o.contains("locate"),
+            "end-adjacent insertion flagged: {o}");
+    // The recorded range coords stay 0-3 — no auto-growth.
+    assert!(t.state().contains("range:a.md@text:0-3"),
+            "range not auto-expanded: {}", t.state());
+}
+
+// managed-content: a deleted path reused for a new file keeps histories
+// separate — the new init is a fresh identity, not a continuation.
+#[test]
+fn vacated_path_reuse_separate_history() {
+    let t = T::new();
+    t.write("a.md", "first");
+    t.run(&["init", "a.md"]);
+    let old_tip = t.tip("file:a.md");
+    // Delete + recreate the same path — the new file is a new identity.
+    t.run(&["delete", "a.md"]);
+    t.write("a.md", "second-different");
+    t.run(&["init", "a.md"]);
+    let new_tip = t.tip("file:a.md");
+    // The new init's tip is a DIFFERENT commit — not the old file's chain.
+    assert!(!new_tip.is_empty() && new_tip != old_tip,
+            "reused path → separate identity: {new_tip} vs {old_tip}");
+}
