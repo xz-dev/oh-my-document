@@ -180,6 +180,34 @@ fn log_chain(store: &Store, root: &Path, node_or_commit: &str) -> Vec<String> {
 /// Render the mount tree as nested JSON from `start` (or the implicit root).
 /// Tree shows mount hierarchy: root → file nodes → range children. Only
 /// mounted nodes expand — never unpublished material as history.
+/// Metadata directory resolution: explicit `--meta` > `OMD_META` env >
+/// nearest ancestor `.omd/` (walk up parents) > `./.omd` default. Never a
+/// full-repo recursive scan; ambiguity among single-level candidates is an
+/// error, never a silent pick.
+fn resolve_meta_dir(cli: &Cli) -> PathBuf {
+    if let Some(m) = &cli.meta {
+        return m.clone();
+    }
+    if let Ok(m) = std::env::var("OMD_META") {
+        if !m.is_empty() {
+            return PathBuf::from(m);
+        }
+    }
+    // Walk ancestors for an existing `.omd/` — running from a subdirectory
+    // finds the project store, never fabricates a new one per dir.
+    let mut dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    loop {
+        let cand = dir.join(".omd");
+        if cand.is_dir() {
+            return cand;
+        }
+        if !dir.pop() {
+            break;
+        }
+    }
+    PathBuf::from(".omd")
+}
+
 /// Resolve a link endpoint arg to its canonical `range:` key.
 /// Accepts `file@mode:s-e`, `range:file@mode:s-e`, or a bare range key.
 /// Non-range args pass through verbatim (they'll fail the range check).
@@ -260,7 +288,7 @@ fn dangling_ids(store: &Store, root: &Path) -> Vec<String> {
 }
 
 fn meta_root(cli: &Cli) -> PathBuf {
-    cli.meta.clone().unwrap_or_else(|| PathBuf::from(".omd"))
+    resolve_meta_dir(&cli)
 }
 
 /// Wrap a command payload in the contract envelope `{schema_version, ok,
