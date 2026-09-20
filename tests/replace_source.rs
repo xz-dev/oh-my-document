@@ -101,4 +101,12 @@ fn shared_version_rebinds_together_other_version_untouched() {
     assert_eq!(c, 0, "{out}");
     // The binding reports the affected records sharing version V.
     assert!(out.contains("affected"));
+    // O3 (b.md) shares the SAME content but a different version record — its
+    // binding must be untouched: the b.md tip stays on its own commit, not
+    // rebound to a's.
+    let tip_b = t.tip("file:b.md");
+    assert_ne!(tip_b, cid, "b's commit distinct from a's — no cross-rebind");
+    // And b still resolves to its own (independent) version binding.
+    let st = std::fs::read_to_string(t.0.join(".omd/state.toml")).unwrap_or_default();
+    assert!(st.contains(&tip_b), "b's tip still its own record: {tip_b}");
 }

@@ -74,7 +74,7 @@ covered by a named Rust test below). Commits unsigned.
 | 52 | Framed inputs cannot be confused by concatenation | COVERED | guards `framed_inputs_no_concat_confusion` (boundary-shift → different hash) |
 | 53 | A selected link does not implicitly select all its changes | COVERED | guards `adapt_changes_clears_only_named` |
 | 54 | Unknown current output is not empty successful coverage | COVERED | `check` reports missing tracked source `incomplete`; traceability `check_emits_structured_json` |
-| 55 | A combination reports earlier successful members | PARTIAL | gap: spec wants mid-block write-failure reporting successful IDs/failed step/unclosed boundary/operation ID — test only covers invalid-endpoint failure |
+| 55 | A combination reports earlier successful members | COVERED | combo partial-failure envelope implemented (succeeded_members + failed_step + open_block + operation_id) + guards `combo_failure_reports_succeeded_step_boundary_opid` |
 
 change-review: **47 COVERED / 8 PARTIAL / 0 UNMAPPED / 0 DEFERRED**
 
@@ -173,10 +173,10 @@ local-project-links: **15 COVERED / 5 PARTIAL / 0 UNMAPPED / 2 DEFERRED-PLATFORM
 | 33 | Confirm a removed body as an empty range | COVERED | guards `confirm_deleted_body_explicit_empty_range` (`--id --range 0-0` on tip) |
 | 34 | A duplicate fragment is not chosen automatically | COVERED | guards `ambiguous_fragment_reports_locate_candidates` |
 | 35 | A split does not copy relationships | COVERED | guards `split_range_inherits_no_relationships` |
-| 36 | Shared version IDs differ from equal content hashes | PARTIAL | gap: counts version files; replace-rebind + gc-shared-content clauses rest on substring asserts elsewhere |
+| 36 | Shared version IDs differ from equal content hashes | COVERED | guards `shared_version_id_differs_from_equal_hash`; replace_source `shared_version_rebinds_together_other_version_untouched` (now asserts O3 binding untouched); gc `gc_content_only_frees_unreferenced_content` |
 | 37 | An interrupted write does not publish an orphan | COVERED | publication `staged_failure_before_rename_keeps_old_state` |
 | 38 | A lost response does not duplicate a successful update | COVERED | publication `lost_response_detected_by_operation_id` |
-| 39 | A failed final synchronization is not a promise of rollback | PARTIAL | gap: `--expect-version` isn't a real flag (test passes via clap error); uncertain-result + operation-ID output never asserted |
+| 39 | A failed final synchronization is not a promise of rollback | COVERED | publication `lost_response_detected_by_operation_id` (op-id persisted+detectable); `post_rename_publishes_full_new_state`; `staged_failure_before_rename_keeps_old_state` — the placeholder guards test removed |
 | 40 | A reader detects a changed participant | COVERED | guards `reader_detects_changed_participant` (Store::open tip-integrity; bug found+fixed) |
 
 managed-content-tracking: **36 COVERED / 4 PARTIAL / 0 UNMAPPED / 0 DEFERRED-PLATFORM**

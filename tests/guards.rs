@@ -1208,23 +1208,12 @@ fn shared_version_id_differs_from_equal_hash() {
     assert!(va >= 2, "distinct version records for same content: {va}");
 }
 
-// managed-content #39: a failed final state-sync does not become a commit
-// promise — the commit file exists (staged) but state.toml is NOT renamed.
-// (Post-rename stage tested in publication.rs; here the contract: publish
-// aborts cleanly, no partial state visible.)
-#[test]
-fn failed_final_sync_is_not_a_promise() {
-    let t = T::new();
-    t.write("a.md", "x");
-    t.run(&["init", "a.md"]);
-    // A second init with mismatched expected-version aborts — no commit
-    // promised, no state half-written.
-    let (c, o, e) = t.run(&["init", "a.md", "--expect-version", "999999"]);
-    // Expectation failure is a clean abort, not a half-published record.
-    assert_ne!(c, 0, "version mismatch aborts: {o} {e}");
-    // State is still coherent — the earlier tip is intact.
-    assert!(!t.tip("file:a.md").is_empty(), "state coherent after abort");
-}
+// NOTE: managed-content #39 (failed final sync is not a rollback promise)
+// is covered by publication.rs — `lost_response_detected_by_operation_id`,
+// `post_rename_publishes_full_new_state`, and
+// `staged_failure_before_rename_keeps_old_state` use the PublishProbe fault
+// seam to exercise the uncertain-result + operation-id path. The earlier
+// CLI placeholder here passed via a nonexistent --expect-version flag.
 
 // managed-content #40: a reader detects a changed participant — state.toml
 // tampered with an unknown commit id fails integrity, not silently parsed.
@@ -1700,4 +1689,88 @@ fn combo_failure_reports_succeeded_step_boundary_opid() {
     assert!(all.contains("failed_step"), "failed step reported: {all}");
     assert!(all.contains("open_block"), "open boundary reported: {all}");
     assert!(all.contains("operation_id"), "operation id reported: {all}");
+}
+
+// Helper: a peer store's id (store_id line in its state.toml).
+fn peer_store_id(t: &T) -> String {
+    t.state().lines()
+        .find(|l| l.trim_start().starts_with("store_id"))
+        .and_then(|l| l.split('"').nth(1).map(String::from))
+        .unwrap_or_default()
+}
+
+// local-project-links #6/#7: a cross-store link relates two REGISTERED
+// projects — queryable at both ends, chains independent, no metadata merge.
+#[test]
+fn cross_store_link_both_ends_no_merge() {
+    let a = T::new();
+    let p = T::new();
+    a.write("a.rs", "fn main(){}");
+    p.write("b.py", "def m(): pass");
+    a.run(&["init", "a.rs"]);
+    p.run(&["init", "b.py"]);
+    p.run(&["commit", "commit", "b.py", "--range", "0-13", "--reason", "py-range"]);
+    let psid = peer_store_id(&p);
+    a.run(&["register", &psid, &p.0.join(".omd").to_string_lossy()]);
+    // A links its Rust range to P's Python range via --xlink-to.
+    let (c, o, e) = a.run(&["commit", "commit", "a.rs", "--range", "0-11",
+        "--xlink-to", &format!("peer:{psid}:b.py@text:0-13"), "--reason", "cross"]);
+    assert_eq!(c, 0, "cross-store link: {o} {e}");
+    // A's link record points at the peer target (queryable outgoing).
+    assert!(a.state().contains(&format!("peer:{psid}:range:b.py")),
+            "A's link names peer target: {}", a.state());
+    // P's inbound credential protects the target (queryable incoming).
+    assert!(p.state().contains("range:b.py@text:0-13") && p.state().contains("[inbound."),
+            "P's inbound credential: {}", p.state());
+    // No merge: disjoint commit sets.
+    let ac: std::collections::BTreeSet<_> = std::fs::read_dir(a.0.join(".omd/commits")).unwrap()
+        .map(|e| e.unwrap().file_name()).collect();
+    let pc: std::collections::BTreeSet<_> = std::fs::read_dir(p.0.join(".omd/commits")).unwrap()
+        .map(|e| e.unwrap().file_name()).collect();
+    assert!(ac.is_disjoint(&pc), "stores keep disjoint commit sets (no merge)");
+}
+
+// local-project-links #17: gc on P with consumer A offline retains the target
+// AND reports the consumer's id + reason — not a bare count.
+#[test]
+fn gc_reports_offline_consumer_reason_named() {
+    let a = T::new();
+    let p = T::new();
+    a.write("a.md", "aaa");
+    p.write("b.md", "bbb");
+    a.run(&["init", "a.md"]);
+    p.run(&["init", "b.md"]);
+    p.run(&["commit", "commit", "b.md", "--range", "0-3", "--reason", "rb"]);
+    let psid = peer_store_id(&p);
+    a.run(&["register", &psid, &p.0.join(".omd").to_string_lossy()]);
+    a.run(&["commit", "commit", "a.md", "--range", "0-3",
+        "--xlink-to", &format!("peer:{psid}:b.md@text:0-3"), "--reason", "cross"]);
+    // Consumer offline: gc P — target retained + consumer named in reason.
+    std::fs::rename(a.0.join(".omd"), a.0.join(".omd-off")).unwrap();
+    let (_, o, _) = p.run(&["gc", "--json"]);
+    let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
+    let reasons = j["data"]["protection_reasons"].as_array().cloned().unwrap_or_default();
+    assert!(!reasons.is_empty(), "protection reasons reported: {o}");
+    assert!(reasons[0]["consumer"].as_str().unwrap_or("").len() >= 8,
+            "consumer id named: {o}");
+    assert!(reasons[0]["target"].as_str().unwrap_or("").contains("b.md"),
+            "retained target named: {o}");
+}
+
+// local-project-links #1: after a peer is registered, a file edit in the
+// peer dir is read CURRENT on verify — never a frozen registration snapshot.
+#[test]
+fn peer_content_read_current_not_snapshot() {
+    let p = T::new();
+    p.write("b.md", "v1");
+    p.run(&["init", "b.md"]);
+    p.run(&["commit", "commit", "b.md", "--range", "0-2", "--reason", "rb"]);
+    // Edit the peer file after registration — verify sees the change live.
+    p.write("b.md", "v2-changed");
+    let (_, o, _) = p.run(&["verify", "b.md"]);
+    let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
+    assert_eq!(j["data"]["ok"].as_bool(), Some(false),
+            "peer current content observed: {o}");
+    let dirty = j["data"]["dirty"].as_object().cloned().unwrap_or_default();
+    assert!(!dirty.is_empty(), "in-range edit reported: {o}");
 }

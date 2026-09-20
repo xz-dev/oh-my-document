@@ -1159,7 +1159,21 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                     }
                 }
             }
-            Ok(serde_json::json!({ "ok": true, "released": released, "collected_commits": collected, "protected_count": store.state().inbound.len() }))
+            // Report WHY each target is retained — the offline consumer's
+            // peer_store_id + the protected target, never a bare count. The
+            // credential is durable even when the consumer is unreachable.
+            let protection_reasons: Vec<serde_json::Value> = store.state().inbound.values()
+                .map(|c| serde_json::json!({
+                    "consumer": c.peer_store_id,
+                    "target": c.target,
+                    "reason": "inbound credential retained (consumer may be offline)",
+                }))
+                .collect();
+            Ok(serde_json::json!({
+                "ok": true, "released": released, "collected_commits": collected,
+                "protected_count": store.state().inbound.len(),
+                "protection_reasons": protection_reasons,
+            }))
         }
         Cmd::Reindex => {
             // Rebuild the query index from the published manifest — a derived
