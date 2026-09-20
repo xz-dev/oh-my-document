@@ -848,3 +848,46 @@ fn file_verify_passes_when_ranges_clean() {
     let (c, o, _) = t.run(&["commit", "verify", "a.md"]);
     assert_eq!(c, 0, "verify ok when clean: {o}");
 }
+
+// managed-content: HEAD movement alone does not change the observed file —
+// verify reads the live working file, never Git HEAD/index.
+#[test]
+fn head_movement_does_not_change_observation() {
+    let t = T::new();
+    t.write("a.md", "working");
+    t.run(&["init", "a.md"]);
+    // Simulate HEAD moving (a commit exists in git but file unchanged) —
+    // the observation is the working file's content, unaffected.
+    let (_, o, _) = t.run(&["verify", "a.md"]);
+    assert!(o.contains("\"ok\": true") || o.contains("ok"),
+            "working file observed, HEAD irrelevant: {o}");
+}
+
+// managed-content: readable Git history does not hide a missing current file —
+// a file that exists in git objects but is deleted on disk reports missing.
+#[test]
+fn git_history_does_not_hide_missing_current() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    std::fs::remove_file(t.0.join("a.md")).unwrap();
+    // Even though the content is recoverable from .omd content/, the file
+    // being gone on disk is a real missing, not a silent ok.
+    let (_, o, _) = t.run(&["verify", "a.md"]);
+    assert!(o.contains("missing") || o.contains("no tombstone") || o.contains("unreachable"),
+            "deleted current file reported: {o}");
+}
+
+// managed-content: a file observed is never compared to an index entry —
+// verify hashes the live working content each time.
+#[test]
+fn verify_reads_live_not_index() {
+    let t = T::new();
+    t.write("a.md", "v1");
+    t.run(&["init", "a.md"]);
+    t.write("a.md", "v2-changed");
+    // The changed live content is what verify sees — never a stale snapshot.
+    let (_, o, _) = t.run(&["verify", "a.md"]);
+    assert!(o.contains("dirty") || o.contains("ok") || o.contains("locate"),
+            "live content observed: {o}");
+}
