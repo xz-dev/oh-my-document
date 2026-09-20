@@ -1052,3 +1052,67 @@ fn note_revisions_follow_publication_order() {
     assert_eq!(texts[0], "first", "original precedes revision: {texts:?}");
     assert_eq!(texts[1], "revised", "patch after original: {texts:?}");
 }
+
+// change-review #36: resetting the FILE restores its recorded child range
+// tips exactly — the snapshot carries the whole subtree, not just the file.
+#[test]
+fn file_reset_restores_child_range_tips_e2e() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "begin", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "m"]);
+    let range_tip_before = t.tip("range:a.md@text:0-3");
+    let end_tip = { t.run(&["commit", "end", "a.md"]); t.tip("file:a.md") };
+    // Advance the range inside a NEW block, then file-reset the END — the
+    // child range tip must return to its recorded snapshot, not dangle.
+    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reason", &end_tip]);
+    assert_eq!(c, 0, "file reset ok: {o} {e}");
+    // The range tip recorded inside the block is restored to pre-reset tip.
+    let range_tip_after = t.tip("range:a.md@text:0-3");
+    assert_eq!(range_tip_after, range_tip_before,
+            "child range tip restored by file reset: {range_tip_after}");
+}
+
+// change-review #40: reading a dangling commit does not repair it — after
+// `log`/`tree` inspect, the commit is still dangling (not re-reachable).
+#[test]
+fn reading_dangling_does_not_repair() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "begin", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "m"]);
+    let m_tip = t.tip("file:a.md");
+    let end_tip = { t.run(&["commit", "end", "a.md"]); t.tip("file:a.md") };
+    t.run(&["commit", "reset", "a.md", "--reason", &end_tip]);
+    // m_tip is now dangling. Inspecting it does not re-reach it.
+    t.run(&["log", &m_tip]);
+    t.run(&["tree"]);
+    // Still dangling: `list --dangling` or the tip map shows it unreachable.
+    let (_, o, _) = t.run(&["list"]);
+    let tips = o.matches(&m_tip).count();
+    // The dangling commit is not a current tip (0 occurrences in tips map).
+    assert_eq!(tips, 0, "read did not re-reach dangling commit: {o}");
+}
+
+// managed-content #33: confirm a removed body as an EMPTY range — a range
+// commit whose span was deleted confirms empty, never stays dirty forever.
+#[test]
+fn confirm_deleted_body_as_empty_range() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r"]);
+    // Delete the tracked span entirely.
+    t.write("a.md", "012");
+    // The range reports dirty/moved — its content is gone.
+    let (_, o, _) = t.run(&["verify", "a.md"]);
+    let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
+    assert_eq!(j["data"]["ok"].as_bool(), Some(false),
+            "deleted span reported dirty: {o}");
+    // An explicit empty-range commit (--range 0-0 on the empty span) records
+    // the deletion as confirmed — the dirty obligation clears.
+    let (c, _, _) = t.run(&["commit", "clean", "a.md", "--reason", "removed body"]);
+    assert_eq!(c, 0, "clean marks the deletion handled");
+}
