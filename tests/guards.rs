@@ -1339,3 +1339,26 @@ fn timestamp_replay_records_time_not_conflict() {
     assert!(st.contains("2020-01-01") || t.tip("range:a.md@text:0-2").len() == 64,
             "replay timestamp recorded");
 }
+
+// change-review #16/#17: a range advances inside an open block before END —
+// the --id commit moves the range tip forward, and END closes the block
+// recording that advanced state (not the pre-advance tip).
+#[test]
+fn range_advances_inside_block_end_closes_advanced() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "begin", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "m"]);
+    let rtip = t.tip("range:a.md@text:0-3");
+    // Advance the range via --id INSIDE the open block — tip moves forward.
+    t.run(&["commit", "commit", "a.md", "--id", &rtip, "--range", "0-5", "--reason", "adv"]);
+    let newtip = t.tip("range:a.md@text:0-3");
+    assert_ne!(newtip, rtip, "range advanced before END: {newtip}");
+    // END closes the block — the advanced state is what the block sealed.
+    let (c, o, e) = t.run(&["commit", "end", "a.md"]);
+    assert_eq!(c, 0, "END closes advanced state: {o} {e}");
+    // Post-close the range tip is still the advanced commit (END kept it).
+    assert_eq!(t.tip("range:a.md@text:0-3"), newtip,
+            "END preserved advanced range tip");
+}

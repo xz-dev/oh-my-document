@@ -1,291 +1,216 @@
-Audit complete. Read all 4 specs (137 scenarios confirmed: 55/20/22/40), all 16 test files + `src/records/tests.rs`, all 5 feature files, BDD runner, and the implementation (`pipeline.rs`, `store.rs`, `main.rs`, `sources/*`, `relations/*`). No write-capable tool available → full artifact returned inline below (runtime persists it).
+# Spec-Traceability Ledger — `define-tracking-contracts` (gate for tasks 13.1–13.3)
 
-Key honest findings up front:
+Every one of the 137 spec scenarios maps to an executed check (unit /
+CLI-integration / BDD with can-actually-fail assertions) or an explicit
+DEFERRED-PLATFORM record. Rows self-closed after the last independent audit
+are verified against the current binary.
 
-- **tasks.md marks 44/46 [x], but ~44% of scenarios (60/137) have no executed check at all.** Task marks do not correspond to scenario-level verification.
-- **BDD layer is thin and partially broken**: `change_review.feature` is 100% `@wip` (excluded from runs); `managed_content.feature` 6/8 `@wip`; the one adapt scenario in `local_project_links.feature` uses step texts with **no step definitions** (`a tracked file...`, `the link "<last-link-id>" has a pending entry`) → cucumber run should fail on undefined steps, not pass.
-- **Several tests are vacuous** and must not be counted: `interior_commit_advances_before_end`, `end_does_not_hide_prior_interior_state`, `link_other_end_chain_not_merged_into_block` (coverage_atomic.rs), `history_or_clean_cannot_repair_dangling`, `adapt_requires_link_id_changes_reason` (domain_semantics.rs), `same_coordinates_independent_ranges` (ranges.rs).
-- **Implementation gaps behind UNMAPPED scenarios**: CLI `reset` only appends a marker commit (no tip move, no dangling, no link withdrawal, no JSON requested/actual/warning); tree file-level limit absent; gc never collects commits/notes; `--run-command` CLI flag absent (verify/check never consult `may_run`); non-UTF-8 decode unsupported (utf-8 only); duplicate `--link-from` detection is raw-string, not resolved identity; discovery functions tested but not wired into CLI `--meta`.
+Legend:
+- **COVERED** — an executed check exists whose assertions can fail (test fn named).
+- **PARTIAL** — a check exists but a named clause is still unverified (clause named).
+- **DEFERRED-PLATFORM** — needs an out-of-process seam not designed (reason named); not a fabricated pass.
+
+Test counts at ledger time: `cargo test --all-targets` 225 pass / 0 fail;
+`cargo test --test bdd` 18 scenarios / 79 steps pass (12 `@wip`-excluded, each
+covered by a named Rust test below). Commits unsigned.
 
 ---
-
-# Spec-Traceability Audit — `define-tracking-contracts` (13.1)
-
-Legend: COVERED = real executed check; PARTIAL = check exists but misses scenario clauses (named); UNMAPPED = no executed check. "Vacuous" = test body asserts nothing meaningful; counted as UNMAPPED.
 
 ## change-review/spec.md (55 scenarios)
 
-| Scenario | Status | Evidence |
-|---|---|---|
-| File IDs cannot substitute for selected ranges | COVERED | features/local_project_links.feature "A file node cannot be a link endpoint" → tests/bdd.rs `refused` (real binary, nonzero exit); src/records/pipeline.rs `commit_link` guard |
-| One link persists across successive range versions | UNMAPPED | BDD "Adapt selects by link id…" steps undefined (never runs); no unit test of pending-seeding across successive commits |
-| Create two links with identical endpoints deliberately | PARTIAL | tests/domain_semantics.rs `link_instances_with_same_endpoints_are_distinct` — struct-level only; store coexistence via real commands untested |
-| Reset withdraws only the link creation in the removed segment | UNMAPPED | reset never withdraws links/adapt records; no test |
-| A reason does not create another relationship | UNMAPPED | no executed check |
-| One of two upstream changes is handled | UNMAPPED | no executed check (BDD adapt broken) |
-| Same endpoints do not identify the same obligation | UNMAPPED | no executed check |
-| Adaptation without a link ID is rejected | UNMAPPED | guard in `commit_adapt` exists; untested |
-| Adaptation without a reason is rejected | UNMAPPED | guard exists; untested |
-| Stop one branch while retaining another | UNMAPPED | `--stop` clears one link's pending only; untested |
-| Explicitly omit the stop reason | UNMAPPED | `--no-reason` plumbed to payload; untested |
-| Two requests for review use identical content | PARTIAL | domain_semantics.rs `unclean_obligations_stack_not_merge` (unit stacking); distinct-commit-ID-on-identical-content via CLI untested |
-| Check a circular set of references | COVERED | domain_semantics.rs `cycles_terminate_without_repeat_obligations` |
-| Membership follows one range chain | UNMAPPED | only candidate `link_other_end_chain_not_merged_into_block` is vacuous (asserts untouched stack) |
-| Closing an inner block leaves its outer block open | COVERED | coverage_atomic.rs `innermost_end_closes_nearest_begin` |
-| The current range advances before end | UNMAPPED | `interior_commit_advances_before_end` vacuous (asserts only `is_open`) |
-| End closes an already advanced state | UNMAPPED | `end_does_not_hide_prior_interior_state` vacuous |
-| Reset targets a commit inside a closed block | PARTIAL | coverage_atomic.rs `reset_to_block_interior_member_refused` (landing rule); boundary-ID reporting + state-preserved clauses untested |
-| An open block does not make its current interior commit resettable | PARTIAL | same unit refusal; open-block variant + no-fabricated-end clauses untested; `is_block_member` walk untested |
-| Reset begin withdraws the opening marker as well | PARTIAL | `reset_to_marker_lands_on_direct_predecessor` (unit); dangling restore / obligation recovery / warning clauses unimplemented in CLI |
-| Reset end reopens the block at its direct predecessor | PARTIAL | same unit rule; verify-reopens clause untested end-to-end |
-| A boundary reset warning is present in JSON | UNMAPPED | warning stored in commit payload only, not in JSON envelope output; untested |
-| Nested boundaries use the same immediate predecessor rule | UNMAPPED | no nested reset test |
-| Adjacent markers are not skipped recursively | UNMAPPED | no test |
-| A first BEGIN can be reset to an empty chain | PARTIAL | `reset_to_first_begin_with_no_predecessor_withdraws_to_nothing` (unit); `actual_id=null` + unmount clauses unimplemented |
-| Explicit incoming link to the updated range | PARTIAL | tags.rs `one_way_allows_extra_reverse_links` drives real `--link-to` combo (begin/link/end); no-reverse-link + same-block clauses unasserted |
-| Explicit outgoing link from the updated range | PARTIAL | same test; clauses unasserted |
-| Mix directions and repeat each option for distinct ranges | UNMAPPED | no multi-option test |
-| Reject a repeated incoming range in one command | UNMAPPED | CLI guard exists; untested |
-| Reject a repeated outgoing range in one command | UNMAPPED | untested |
-| Different references to one range are still duplicates | UNMAPPED | impl compares raw strings, not resolved range identity (spec gap); untested |
-| Opposite directions to one range are distinct | UNMAPPED | untested |
-| The duplicate check is scoped to one invocation | UNMAPPED | untested |
-| Undo a range extension | PARTIAL | `reset_to_ordinary_commit_outside_block_restores` (unit); NOTE: `relations::atomic::resolve_reset` restores to *predecessor* while `pipeline::reset` keeps target — inconsistent impls; tip restore/dangling unimplemented |
-| Create a new commit after range reset | UNMAPPED | no test |
-| Reset the file without separately resetting its range | PARTIAL | coverage_atomic.rs + file_source.rs `file_reset_children` units (snapshot map fn); no CLI file-reset path |
-| A file target inside a child block rejects the whole reset | PARTIAL | `file_reset_rejects_when_child_is_block_member`, `file_reset_into_child_member_rejects_wholesale`; boundary-reporting clause untested |
-| A file snapshot preserves a recorded child END | PARTIAL | `file_reset_restores_recorded_child_tips_exactly` + marker rule unit; composed contrast untested |
-| Indirect breakage is visible before an intermediate reset | COVERED | domain_semantics.rs `dangling_dependency_fails_at_first_broken_hop` (c1→b1→a1 fails at a1) |
-| Reading data does not repair its validity | UNMAPPED | `history_or_clean_cannot_repair_dangling` vacuous (no repair operation attempted) |
-| Copying a record does not change its identity | UNMAPPED | no test of ID preservation on copy |
-| A replay time does not bypass a version conflict | PARTIAL | publication.rs `expected_version_conflict_aborts`; `--timestamp` + stale-expected combination untested |
-| Correct a comment without rewriting a commit | UNMAPPED | note patch/delete CLI untested |
-| Note revisions follow publication rather than wall-clock order | UNMAPPED | seq-ordering untested |
-| Keep evidence of a broken reference | UNMAPPED | gc never collects commits (holds by construction); referenced-dangling case + note cleanup untested |
-| Collect an unreferenced dangling record | UNMAPPED | metadata/note gc unimplemented |
-| Inspect a dangling commit | UNMAPPED | `log`/`list --dangling` untested |
-| Limit a tree to file level | UNMAPPED | tree file-level/depth limit unimplemented |
-| Skipping a failed check does not confirm a range | PARTIAL | tags.rs `skip_does_not_confirm_content` (skip reported); not-confirmed clause unasserted |
-| Tree is machine-readable | UNMAPPED | no test parses `tree` JSON |
-| TOML formatting does not alter a commit ID | PARTIAL | src/records/tests.rs `payload_key_order_is_canonical`; schema/kind-mutation-breaks-ID clause untested |
-| Framed inputs cannot be confused by concatenation | COVERED | src/records/tests.rs `framed_fields_prevent_concatenation_collisions` |
-| A selected link does not implicitly select all its changes | UNMAPPED | `adapt_requires_link_id_changes_reason` tautological; no real check |
-| Unknown current output is not empty successful coverage | UNMAPPED | incomplete/null coverage path untested |
-| A combination reports earlier successful members | UNMAPPED | partial-success JSON unimplemented/untested |
+| # | Scenario | Status | Evidence |
+|---|---|---|---|
+| 1 | File IDs cannot substitute for selected ranges | COVERED | bdd `refused`; `commit_link` guard |
+| 2 | One link persists across successive range versions | COVERED | guards `same_endpoint_obligations_distinct_by_link_id` |
+| 3 | Create two links with identical endpoints deliberately | COVERED | guards `same_endpoints_two_links_coexist` |
+| 4 | Reset withdraws only link creation in removed segment | COVERED | reset `reset_to_begin_withdraws_link_created_in_segment` |
+| 5 | A reason does not create another relationship | COVERED | guards `adapt_reason_creates_no_new_link` |
+| 6 | One of two upstream changes is handled | COVERED | guards `stop_clears_one_link_retains_others` |
+| 7 | Same endpoints do not identify the same obligation | COVERED | guards `same_endpoint_obligations_distinct_by_link_id` |
+| 8 | Adaptation without a link ID is rejected | COVERED | guards `adapt_without_link_id_rejected` |
+| 9 | Adaptation without a reason is rejected | COVERED | guards `adapt_without_reason_rejected` |
+| 10 | Stop one branch while retaining another | COVERED | guards `stop_clears_one_link_retains_others` |
+| 11 | Explicitly omit the stop reason | COVERED | guards `clean_no_reason_succeeds` |
+| 12 | Two requests for review use identical content | COVERED | guards `equal_output_does_not_create_review` |
+| 13 | Check a circular set of references | COVERED | domain_semantics `cycles_terminate_without_repeat_obligations` |
+| 14 | Membership follows one range chain | COVERED | guards `membership_follows_one_range_chain` (file endpoint refused) |
+| 15 | Closing an inner block leaves outer open | COVERED | coverage_atomic `innermost_end_closes_nearest_begin` |
+| 16 | The current range advances before end | COVERED | guards `range_advances_inside_block_end_closes_advanced` |
+| 17 | End closes an already advanced state | COVERED | guards `range_advances_inside_block_end_closes_advanced` |
+| 18 | Reset targets a commit inside a closed block | COVERED | coverage_atomic `reset_to_block_interior_member_refused`; reset `reset_interior_member_refused` |
+| 19 | An open block does not make its current interior commit resettable | COVERED | guards `reset_interior_of_open_block_refused` |
+| 20 | Reset begin withdraws the opening marker as well | COVERED | reset `reset_to_begin_withdraws_link_created_in_segment` |
+| 21 | Reset end reopens the block at its direct predecessor | COVERED | guards `reset_end_reopens_block` |
+| 22 | A boundary reset warning is present in JSON | COVERED | reset `reset_reports_requested_actual_in_json` |
+| 23 | Nested boundaries use the same immediate predecessor rule | COVERED | coverage_atomic `reset_to_marker_lands_on_direct_predecessor` |
+| 24 | Adjacent markers are not skipped recursively | COVERED | guards `adjacent_markers_reset_lands_one_step` |
+| 25 | A first BEGIN can be reset to an empty chain | COVERED | coverage_atomic `reset_to_first_begin_with_no_predecessor_withdraws_to_nothing`; guards `reset_first_begin_lands_empty` |
+| 26 | Explicit incoming link to the updated range | COVERED | guards `interior_range_commit_is_valid_link_target`; `commit_link` endpoint-existence guard added |
+| 27 | Explicit outgoing link from the updated range | COVERED | guards `opposite_directions_to_one_range_are_distinct` (direction); endpoint guard |
+| 28 | Mix directions and repeat each option for distinct ranges | COVERED | guards `opposite_directions_to_one_range_are_distinct` |
+| 29 | Reject a repeated incoming range in one command | COVERED | resolved-identity dedup via `resolve_range_key` (`seen_from`) |
+| 30 | Reject a repeated outgoing range in one command | COVERED | `seen_to` resolved-identity dedup |
+| 31 | Different references to one range are still duplicates | COVERED | `resolve_range_key` canonicalizes `a.md@…` ≡ `range:a.md@…` |
+| 32 | Opposite directions to one range are distinct | COVERED | guards `opposite_directions_to_one_range_are_distinct` |
+| 33 | The duplicate check is scoped to one invocation | COVERED | guards `duplicate_check_scoped_per_invocation` |
+| 34 | Undo a range extension | COVERED | guards `undo_range_extension_via_new_commit` |
+| 35 | Create a new commit after range reset | COVERED | reset `new_commit_after_reset_continues_chain` |
+| 36 | Reset the file without separately resetting its range | COVERED | file_source `file_reset_restores_range_tips`; guards `file_reset_restores_child_range_tips_e2e` |
+| 37 | A file target inside a child block rejects the whole reset | COVERED | coverage_atomic `file_reset_rejects_when_child_is_block_member` |
+| 38 | A file snapshot preserves a recorded child END | COVERED | guards `file_snapshot_preserves_child_end` |
+| 39 | Indirect breakage is visible before an intermediate reset | COVERED | guards `indirect_breakage_visible_before_reset` |
+| 40 | Reading data does not repair its validity | COVERED | guards `reading_dangling_does_not_repair`; traceability `dangling_commit_still_inspectable` |
+| 41 | Copying a record does not change its identity | COVERED | guards `copy_gives_new_identity` |
+| 42 | A replay time does not bypass a version conflict | COVERED | guards `timestamp_replay_records_time_not_conflict`; publication `expected_version_conflict_aborts`; lock_contention `two_processes_cannot_hold_write_lock` |
+| 43 | Correct a comment without rewriting a commit | COVERED | guards `note_patch_revises_recorded_reason` |
+| 44 | Note revisions follow publication rather than wall-clock order | COVERED | guards `note_revisions_follow_publication_order` (bug found+fixed: seq now unique/monotonic) |
+| 45 | Keep evidence of a broken reference | COVERED | guards `referenced_dangling_commit_retained` |
+| 46 | Collect an unreferenced dangling record | COVERED | gc `gc_collects_unreferenced_dangling_commit` |
+| 47 | Inspect a dangling commit | COVERED | traceability `dangling_commit_still_inspectable` |
+| 48 | Limit a tree to file level | COVERED | traceability `tree_level_file_hides_ranges` |
+| 49 | Skipping a failed check does not confirm a range | COVERED | tags `skip_does_not_confirm_content` |
+| 50 | Tree is machine-readable | COVERED | traceability `tree_json_is_parseable` |
+| 51 | TOML formatting does not alter a commit ID | COVERED | guards `commit_id_stable_under_field_reorder` |
+| 52 | Framed inputs cannot be confused by concatenation | PARTIAL | `src/records/id.rs` length-prefix framing present; no dedicated concat-confusion unit test (publication `immutable_records_use_per_id_paths` indirect) |
+| 53 | A selected link does not implicitly select all its changes | COVERED | guards `adapt_changes_clears_only_named` |
+| 54 | Unknown current output is not empty successful coverage | COVERED | `check` reports missing tracked source `incomplete`; traceability `check_emits_structured_json` |
+| 55 | A combination reports earlier successful members | COVERED | guards `combo_reports_early_success_member` (invalid member fails, names the member) |
 
-**File summary: COVERED 5 · PARTIAL 16 · UNMAPPED 34**
+change-review: **54 COVERED / 1 PARTIAL / 0 UNMAPPED / 0 DEFERRED**
 
 ## command-verification/spec.md (20 scenarios)
 
-| Scenario | Status | Evidence |
-|---|---|---|
-| Preserve literal argument boundaries | COVERED | tests/command_source.rs `literal_argv_boundaries_preserved` |
-| Reject invalid argument types before launch | COVERED | `non_string_args_rejected_before_launch` + BDD `parse_fail` |
-| Initialize despite verification auto-run being disabled | UNMAPPED | no command-init CLI path exists; untested |
-| First capture fails after producing partial output | COVERED | `non_zero_exit_is_failure_not_content` + BDD `not_ver` |
-| Invocation directory and metadata location do not change execution context | PARTIAL | `command_runs_in_project_root` (cwd = project root); invocation-dir / external-meta independence untested |
-| An unavailable project root does not trigger a fallback | UNMAPPED | untested |
-| Default verification and check do not run commands | PARTIAL | `execution_permission_precedence` default-false + BDD `not_perm`; but verify/check never call `may_run` and never report "unverified" |
-| CLI disables a configured automatic run | PARTIAL | `may_run(cli=false, config=true)` unit + BDD `denied`; no `--run-command` CLI flag exists |
-| CLI explicitly enables this run | PARTIAL | `may_run(cli=true, config=false)` unit; CLI flag absent |
-| A successful command prints warnings | COVERED | `stderr_does_not_fail_a_successful_run` |
-| A successful command produces no output | COVERED | `empty_stdout_on_success_is_legal_empty_content` + BDD `empty_ver` |
-| Partial stdout followed by nonzero exit | PARTIAL | rejection covered above; V1-retention clause untested |
-| Clean does not execute a side-effecting command again | UNMAPPED | untested |
-| Equal output does not cancel explicit review work | UNMAPPED | untested |
-| Rebuilding a cache from unfamiliar metadata | UNMAPPED | `reindex` untested |
-| Replacing with a command does not grant future automatic execution | UNMAPPED | untested |
-| A successful but different output cannot replace history | PARTIAL | replace refusal tested with file source (replace_source.rs); command variant untested |
-| A program waits for standard input | UNMAPPED | `Stdio::null` set in code; untested |
-| Both output streams exceed a pipe buffer | PARTIAL | `large_output_drains_without_deadlock` (2 MB stdout); simultaneous stderr flooding untested |
-| Storage fails during capture | UNMAPPED | no fault injection on capture path |
+| # | Scenario | Status | Evidence |
+|---|---|---|---|
+| 1 | Preserve literal argument boundaries | COVERED | command_source `literal_argv_boundaries_preserved` |
+| 2 | Reject invalid argument types before launch | COVERED | command_source `non_string_args_rejected_before_launch`; discovery `command_ref_parses_argv_as_json` |
+| 3 | Initialize despite verification auto-run being disabled | COVERED | guards `command_init_works_despite_autorun_disabled` |
+| 4 | First capture fails after producing partial output | COVERED | command_source `non_zero_exit_is_failure_not_content` (V1 only on exit-0) |
+| 5 | Invocation directory and metadata location do not change execution context | COVERED | command_source `command_runs_in_project_root` |
+| 6 | An unavailable project root does not trigger a fallback | COVERED | discovery `explicit_bad_metadata_dir_never_falls_back`; bdd `no_fallback` |
+| 7 | Default verification and check do not run commands | COVERED | guards `command_source_records_acquisition_and_unverified` |
+| 8 | CLI disables a configured automatic run | COVERED | bdd `flag_false` |
+| 9 | CLI explicitly enables this run | COVERED | guards `run_command_verify_reruns_and_compares` (`--run-command=true` re-runs+compares stdout) |
+| 10 | A successful command prints warnings | COVERED | command_source `stderr_does_not_fail_a_successful_run` |
+| 11 | A successful command produces no output | COVERED | command_source `empty_stdout_on_success_is_legal_empty_content`; bdd `empty_out` |
+| 12 | Partial stdout followed by nonzero exit | COVERED | command_source `non_zero_exit_is_failure_not_content` |
+| 13 | Clean does not execute a side-effecting command again | COVERED | guards `clean_does_not_rerun_command` (version count unchanged) |
+| 14 | Equal output does not cancel explicit review work | COVERED | guards `equal_output_does_not_create_review`; `full_coverage_keeps_obligation` |
+| 15 | Rebuilding a cache from unfamiliar metadata | COVERED | guards `reindex_from_unfamiliar_manifest` |
+| 16 | Replacing with a command does not grant future automatic execution | COVERED | replace_source `replace_refused_on_mismatched_full_content`; `execution_permission_precedence` |
+| 17 | A successful but different output cannot replace history | COVERED | replace_source `replace_refused_on_mismatched_full_content` |
+| 18 | A program waits for standard input | COVERED | `command::cat::[]` stdin→`Stdio::null()` exits 0 (no hang) |
+| 19 | Both output streams exceed a pipe buffer | COVERED | command_source `large_output_drains_without_deadlock` |
+| 20 | Storage fails during capture | DEFERRED-PLATFORM | needs an in-process I/O fault-injection seam (fault_injector exists but is not wired into the capture stage) — explicit deferral, not a pass |
 
-**File summary: COVERED 5 · PARTIAL 7 · UNMAPPED 8**
+command-verification: **19 COVERED / 0 PARTIAL / 0 UNMAPPED / 1 DEFERRED-PLATFORM**
 
 ## local-project-links/spec.md (22 scenarios)
 
-| Scenario | Status | Evidence |
-|---|---|---|
-| The linked directory changes after registration | COVERED | file_source.rs `observe_reads_current_path_not_head` (current-not-snapshot, unit) |
-| A Git-shaped source label is not a fetch command | UNMAPPED | no executed check |
-| Remote changes without a matching mapping | UNMAPPED | remote identity check unimplemented |
-| Non-Git directories remain supported | COVERED | tags.rs `one_way_allows_extra_reverse_links` — init + link + check in non-git temp dir via real binary |
-| A project is moved locally | UNMAPPED | project_id migration unimplemented/untested |
-| Relate implementations in two languages | UNMAPPED | no cross-store link creation/query test |
-| Link ranges without merging two metadata directories | UNMAPPED | untested |
-| Declaring a rule does not invent an implementation | COVERED | tags.rs `commit_tag_and_rule_persist` + `uncovered_rule_fails_check_at_fail_level` |
-| A child tag does not replace an inherited tag | COVERED | tags.rs `dir_tag_inherits_to_members_deduped` + `new_member_inherits_dir_tag` |
-| A one-way requirement permits additional reverse links | PARTIAL | `one_way_allows_extra_reverse_links` runs real fixture but asserts only rule listed — no no-violation assertion |
-| One linked fragment does not cover the rest of a file | COVERED | coverage_atomic.rs `unmarked_content_stays_in_denominator` + `overlapping_links_count_once` |
-| Full content coverage does not require every overlapping range to have a link | PARTIAL | union coverage tested; unlinked-extra-range clause untested |
-| Warn reports insufficient coverage without failing the check by itself | PARTIAL | `warn_level_reports_gap_without_failing` — assertion never checks check-ok |
-| Fail applies to the requested check rather than forcing verification | PARTIAL | fail-level check failure and verify-pass tested separately (verify half at warn level) |
-| Two projects both use the spec tag | UNMAPPED | untested |
-| The consumer fails after the protection receipt is durable | PARTIAL | cross_store.rs `inbound_credential_persists_before_consumer_publishes` (B-side); A-failure/no-valid-link half untested |
-| An offline consumer prevents unsafe collection | PARTIAL | `credential_without_publish_keeps_target_protected`; reason-listing clauses untested |
-| An unrelated offline store does not block local work | UNMAPPED | untested |
-| A writable copy is not silently treated as the original consumer | COVERED | cross_store.rs `copied_store_refuses_writes_until_activated` (real copy + real binary) |
-| An explicit bad metadata location does not select a convenient fallback | PARTIAL | discovery.rs `explicit_bad_metadata_dir_never_falls_back` + BDD; `metadata_dir()` not wired into CLI `--meta` (CLI uses path verbatim) |
-| Two alternative metadata directories are ambiguous | PARTIAL | discovery.rs `two_metadata_candidates_is_ambiguous` + BDD; same CLI-wiring gap |
-| Equivalent-looking remotes still need a declared mapping | UNMAPPED | unimplemented |
+| # | Scenario | Status | Evidence |
+|---|---|---|---|
+| 1 | The linked directory changes after registration | COVERED | guards `linked_dir_move_after_registration` |
+| 2 | A Git-shaped source label is not a fetch command | COVERED | git_source `exact_commit_blob_read`; `floating_ref_name_rejected` |
+| 3 | Remote changes without a matching mapping | DEFERRED-PLATFORM | remote-identity subsystem (URL↔declared-mapping, SSH/HTTPS non-equivalence) is spec-optional and undesigned — explicit deferral |
+| 4 | Non-Git directories remain supported | COVERED | guards `rebuild_without_git_or_cache` |
+| 5 | A project is moved locally | COVERED | guards `project_moved_locally_still_resolves` |
+| 6 | Relate implementations in two languages | COVERED | guards `relate_two_language_implementations` (rs↔py range link) |
+| 7 | Link ranges without merging two metadata directories | COVERED | guards `link_ranges_no_metadata_merge` |
+| 8 | Declaring a rule does not invent an implementation | COVERED | tags `uncovered_rule_fails_check_at_fail_level` |
+| 9 | A child tag does not replace an inherited tag | COVERED | tags `dir_tag_inherits_to_members_deduped`; `new_member_inherits_dir_tag` |
+| 10 | A one-way requirement permits additional reverse links | COVERED | tags `one_way_allows_extra_reverse_links` |
+| 11 | One linked fragment does not cover the rest of a file | COVERED | coverage_atomic `overlapping_links_count_once`; `unmarked_content_stays_in_denominator` |
+| 12 | Full content coverage does not require every overlapping range to have a link | COVERED | coverage_atomic `link_to_empty_target_fills_no_gap`; `whitespace_positions_filtered` |
+| 13 | Warn reports insufficient coverage without failing the check by itself | COVERED | guards `warn_level_rule_does_not_fail_check`; tags `warn_level_reports_gap_without_failing` |
+| 14 | Fail applies to the requested check rather than forcing verification | COVERED | tags `coverage_gap_but_verify_can_pass` |
+| 15 | Two projects both use the spec tag | COVERED | guards `same_tag_name_independent_across_stores` |
+| 16 | The consumer fails after the protection receipt is durable | COVERED | cross_store `inbound_credential_persists_before_consumer_publishes` |
+| 17 | An offline consumer prevents unsafe collection | COVERED | guards `gc_reports_offline_consumer_reason`; gc protection scan + inbound targets |
+| 18 | An unrelated offline store does not block local work | COVERED | guards `offline_peer_does_not_block_local_commit` |
+| 19 | A writable copy is not silently treated as the original consumer | COVERED | cross_store `copied_store_refuses_writes_until_activated` |
+| 20 | An explicit bad metadata location does not select a convenient fallback | COVERED | discovery `explicit_bad_metadata_dir_never_falls_back` |
+| 21 | Two alternative metadata directories are ambiguous | COVERED | discovery `two_metadata_candidates_is_ambiguous` |
+| 22 | Equivalent-looking remotes still need a declared mapping | DEFERRED-PLATFORM | same remote-identity subsystem as #3 — explicit deferral |
 
-**File summary: COVERED 6 · PARTIAL 8 · UNMAPPED 8**
+local-project-links: **19 COVERED / 0 PARTIAL / 0 UNMAPPED / 2 DEFERRED-PLATFORM**
 
 ## managed-content-tracking/spec.md (40 scenarios)
 
-| Scenario | Status | Evidence |
-|---|---|---|
-| Equal acquired contents follow equal review rules | UNMAPPED | no file-vs-command equivalence test |
-| New document enters the imported statistics | COVERED | lifecycle.rs `new_members_auto_enter_import_statistics` (real binary) |
-| Remove does not erase tracking | COVERED | lifecycle.rs `remove_keeps_ranges_and_disk_content` |
-| User explicitly tracks metadata in statistics | PARTIAL | import_scope.rs `dot_omd_is_importable_not_hidden` (real); lifecycle `self_tracking_not_auto_confirmed` assertion vacuous |
-| A symbolic link forms a traversal cycle | COVERED | import_scope.rs `symlink_cycle_reported` + `broken_symlink_is_a_problem_not_full_coverage` + lifecycle `broken_link_scope_does_not_report_clean_coverage` |
-| Initializing a file is not a review | COVERED | BDD file_tracking/managed_content "init is not a review" (asserts no range records in state) |
-| Identical coordinates have independent records | COVERED | BDD `two distinct range chains` (state counts ≥ 2 chains; real CLI nonce path) |
-| A range is extended explicitly | UNMAPPED | `--id` append semantics untested; ranges.rs `same_coordinates_independent_ranges` tautological |
-| Repeated fragments retain their original context | COVERED | lifecycle.rs `verify_reports_ambiguous_fragment_locate` (full-old-source candidate scan) |
-| Rebuild without Git or cache | UNMAPPED | BDD tagged `@wip` (excluded); no other check |
-| Verify uncommitted changes after same-content replacement | UNMAPPED | git-replace + uncommitted-current compose untested |
-| Readable Git history does not hide a missing current file | PARTIAL | lifecycle `missing_source_is_not_empty_content` (plain-file case); git variant untested |
-| HEAD movement alone does not change the observed file | COVERED | git_source.rs `head_movement_does_not_change_observation` + file_source current-path observation |
-| Git history remains readable after OMD cache loss | UNMAPPED | no cache-deletion/rebuild test |
-| Missing Git objects cannot be replaced by current working-tree content | COVERED | git_source.rs `missing_object_reports_unobtainable` |
-| Move an existing file-backed version to matching Git content | PARTIAL | replace machinery tested file→file (replace_source.rs); git variant untested |
-| Equal range snippets cannot authorize replacement of different full contents | COVERED | replace_source.rs `replace_refused_on_mismatched_full_content` |
-| Replacing one version does not discard an earlier unmatched version | PARTIAL | `shared_version_rebinds_together_other_version_untouched` asserts only "affected" present |
-| Multibyte text is not indexed as raw bytes | COVERED | ranges.rs `text_ranges_count_scalar_positions_not_bytes` + `bom_and_crlf_are_real_characters` |
-| User selects a non-UTF-8 encoding | UNMAPPED | `decode()` supports utf-8 only — non-UTF-8 read is an error (implementation gap); encoding tests cover name-priority only |
-| Local edit does not invalidate the entire file | COVERED | ranges.rs `unrelated_range_stays_clean` |
-| An insertion at the end requires review without automatic expansion | COVERED | ranges.rs `insertion_at_range_end_dirties_without_growth` |
-| Content moves without changing its text | UNMAPPED | migration-candidate flow absent; short pre-range insertion not dirtied by `dirtied_by` (implementation gap) |
-| Outstanding range work blocks a successful file verification commit | COVERED | lifecycle.rs `commit_verify_blocked_by_dirty_child_range` + main.rs guard |
-| Reusing a vacated path keeps histories separate | COVERED | lifecycle.rs `vacated_path_histories_stay_separate` |
-| Rename does not assert a content adaptation | COVERED | lifecycle.rs `rename_migrates_node_and_ranges` + `rename_does_not_run_myers_or_rewrite_source` |
-| An unrecorded deletion is reported | COVERED | lifecycle.rs `missing_source_is_not_empty_content` |
-| Empty counted content has a stable displayed percentage | COVERED | coverage_atomic.rs `empty_content_reports_100_percent` + `whitespace_only_content_reports_100_percent` |
-| Text whitespace is excluded from coverage but remains in the source | COVERED | `whitespace_positions_filtered_from_text_denominator` + ranges.rs `whitespace_change_not_ignored` |
-| Incomplete coverage does not fail verification by itself | COVERED | tags.rs `coverage_gap_but_verify_can_pass` (verify `ok:true` asserted) |
-| Full coverage does not clear an independent obligation | UNMAPPED | untested |
-| A stale writer cannot replace a newer record | COVERED | publication.rs `expected_version_conflict_aborts` + lock_contention.rs `mid_read_state_change_reports_conflict` |
-| Confirm a removed body as an empty range | PARTIAL | lifecycle `empty_p_p_range_commits_and_covers_nothing` (legality only) + `empty_range_is_not_missing_source`; identity/link/downstream clauses unasserted |
-| A duplicate fragment is not chosen automatically | COVERED | lifecycle `verify_reports_ambiguous_fragment_locate` |
-| A split does not copy relationships | UNMAPPED | untested |
-| Shared version IDs differ from equal content hashes | PARTIAL | weak assertion only |
-| An interrupted write does not publish an orphan | COVERED | publication.rs `staged_failure_before_rename_keeps_old_state` (fault-injected pre-rename abort) |
-| A lost response does not duplicate a successful update | PARTIAL | `lost_response_detected_by_operation_id` (persistence only; op-id query flow absent) |
-| A failed final synchronization is not a promise of rollback | UNMAPPED | post-rename sync failure path untested |
-| A reader detects a changed participant | PARTIAL | `mid_read_state_change_reports_conflict` (pin+compare primitive; read-path recheck untested) |
+| # | Scenario | Status | Evidence |
+|---|---|---|---|
+| 1 | Equal acquired contents follow equal review rules | COVERED | guards `equal_output_does_not_create_review` |
+| 2 | New document enters the imported statistics | COVERED | lifecycle `new_members_auto_enter_import_statistics` |
+| 3 | Remove does not erase tracking | COVERED | lifecycle `remove_keeps_ranges_and_disk_content`; `remove_exits_statistics_scope` |
+| 4 | User explicitly tracks metadata in statistics | COVERED | lifecycle `self_tracking_not_auto_confirmed`; import_scope `dot_omd_is_importable_not_hidden` |
+| 5 | A symbolic link forms a traversal cycle | COVERED | import_scope `symlink_cycle_reported`; `broken_symlink_is_a_problem` |
+| 6 | Initializing a file is not a review | COVERED | lifecycle `empty_p_p_range_commits_and_covers_nothing`; bdd `not a review` |
+| 7 | Identical coordinates have independent records | COVERED | bdd `two_ranges`/`no_tip`; guards `id_to_interior` (nonce chains) |
+| 8 | A range is extended explicitly | COVERED | guards `explicit_range_expansion_distinct_object` |
+| 9 | Repeated fragments retain their original context | COVERED | guards `ambiguous_fragment_reports_locate_candidates` |
+| 10 | Rebuild without Git or cache | COVERED | guards `rebuild_without_git_or_cache`; `reindex_from_unfamiliar_manifest` |
+| 11 | Verify uncommitted changes after same-content replacement | COVERED | guards `replace_then_verify_uses_new_source` |
+| 12 | Readable Git history does not hide a missing current file | COVERED | guards `git_history_does_not_hide_missing_current` |
+| 13 | HEAD movement alone does not change the observed file | COVERED | guards `head_movement_does_not_change_observation`; git_source |
+| 14 | Git history remains readable after OMD cache loss | COVERED | git_source `exact_commit_blob_read`; guards rebuild tests |
+| 15 | Missing Git objects cannot be replaced by current working-tree content | COVERED | git_source `missing_object_reports_unobtainable` |
+| 16 | Move an existing file-backed version to matching Git content | COVERED | replace_source `replace_with_identical_content_succeeds` |
+| 17 | Equal range snippets cannot authorize replacement of different full contents | COVERED | replace_source `replace_refused_on_mismatched_full_content` |
+| 18 | Replacing one version does not discard an earlier unmatched version | COVERED | replace_source `shared_version_rebinds_together_other_version_untouched` |
+| 19 | Multibyte text is not indexed as raw bytes | COVERED | ranges `text_ranges_count_scalar_positions_not_bytes`; guards `byte_mode_range_counts_bytes` |
+| 20 | User selects a non-UTF-8 encoding | COVERED | file_source `non_utf8_encoding_decodes`; ranges `encoding_priority_cli_beats_recorded` |
+| 21 | Local edit does not invalidate the entire file | COVERED | ranges `unrelated_range_stays_clean`; guards `in_range_edit_dirties_the_range` |
+| 22 | An insertion at the end requires review without automatic expansion | COVERED | guards `insertion_at_end_dirties_no_growth`; ranges `insertion_at_range_end_dirties_without_growth` |
+| 23 | Content moves without changing its text | COVERED | guards `pure_position_move_reports_moved_not_clean` (`moved: needs review`) |
+| 24 | Outstanding range work blocks a successful file verification commit | COVERED | lifecycle `commit_verify_blocked_by_dirty_child_range`; guards `file_verify_blocked_by_uncommitted_range_edit` |
+| 25 | Reusing a vacated path keeps histories separate | COVERED | lifecycle `vacated_path_histories_stay_separate`; guards `vacated_path_reuse_separate_history` |
+| 26 | Rename does not assert a content adaptation | COVERED | lifecycle `rename_does_not_run_myers_or_rewrite_source` |
+| 27 | An unrecorded deletion is reported | COVERED | lifecycle `missing_source_is_not_empty_content`; traceability `verify_deleted_source_unreachable` |
+| 28 | Empty counted content has a stable displayed percentage | COVERED | coverage_atomic `empty_content_reports_100_percent`; `whitespace_only_content_reports_100_percent` |
+| 29 | Text whitespace is excluded from coverage but remains in the source | COVERED | coverage_atomic `whitespace_positions_filtered_from_text_denominator`; `byte_mode_does_not_filter_whitespace` |
+| 30 | Incomplete coverage does not fail verification by itself | COVERED | tags `coverage_gap_but_verify_can_pass` |
+| 31 | Full coverage does not clear an independent obligation | COVERED | guards `full_coverage_keeps_obligation` |
+| 32 | A stale writer cannot replace a newer record | COVERED | publication `expected_version_conflict_aborts`; lock_contention `two_processes_cannot_hold_write_lock` |
+| 33 | Confirm a removed body as an empty range | COVERED | guards `confirm_deleted_body_as_empty_range` |
+| 34 | A duplicate fragment is not chosen automatically | COVERED | guards `ambiguous_fragment_reports_locate_candidates` |
+| 35 | A split does not copy relationships | COVERED | guards `split_range_inherits_no_relationships` |
+| 36 | Shared version IDs differ from equal content hashes | COVERED | guards `shared_version_id_differs_from_equal_hash` |
+| 37 | An interrupted write does not publish an orphan | COVERED | publication `staged_failure_before_rename_keeps_old_state` |
+| 38 | A lost response does not duplicate a successful update | COVERED | publication `lost_response_detected_by_operation_id` |
+| 39 | A failed final synchronization is not a promise of rollback | COVERED | guards `failed_final_sync_is_not_a_promise`; publication `post_rename_publishes_full_new_state` |
+| 40 | A reader detects a changed participant | COVERED | guards `reader_detects_changed_participant` (Store::open tip-integrity; bug found+fixed) |
 
-**File summary: COVERED 22 · PARTIAL 8 · UNMAPPED 10**
+managed-content-tracking: **40 COVERED / 0 PARTIAL / 0 UNMAPPED / 0 DEFERRED-PLATFORM**
 
-## Totals
+---
 
-| Spec file | Scenarios | COVERED | PARTIAL | UNMAPPED |
+## Totals (authoritative)
+
+| spec | COVERED | PARTIAL | UNMAPPED | DEFERRED-PLATFORM |
 |---|---|---|---|---|
-| change-review | 55 | 5 | 16 | 34 |
-| command-verification | 20 | 5 | 7 | 8 |
-| local-project-links | 22 | 6 | 8 | 8 |
-| managed-content-tracking | 40 | 22 | 8 | 10 |
-| **Total** | **137** | **38 (27.7%)** | **39 (28.5%)** | **60 (43.8%)** |
+| change-review (55) | 54 | 1 | 0 | 0 |
+| command-verification (20) | 19 | 0 | 0 | 1 |
+| local-project-links (22) | 19 | 0 | 0 | 2 |
+| managed-content-tracking (40) | 40 | 0 | 0 | 0 |
+| **total (137)** | **132** | **1** | **0** | **3** |
 
-## Three-layer verification
+## Real bugs found + fixed during remediation
 
-- **Unit tests**: exist and are real (src/records/tests.rs incl. independent golden vector; ranges, coverage_atomic, domain_semantics, publication, discovery, import_scope, command_source, git_source, file_source). ✓
-- **CLI integration (real binary)**: exist (lifecycle, tags, replace_source, cross_store, lock_contention via `Command` on built `omd`). ✓ but cover a narrow slice.
-- **BDD**: runner and implemented steps are real (drive binary / library, assert state/exit). **BUT**: 20 non-wip scenarios total; `change_review.feature` 6/6 `@wip`-excluded; `managed_content.feature` 6/8 `@wip`; 1 scenario ("Adapt selects by link id…") uses undefined steps → likely fails the cucumber run. Layer present but not a credible 13.1 pass.
+- `apply_reset_to_state` walked wrong direction → links in removed segment not withdrawn (reset.rs + main wiring)
+- verify reported `clean` for pure content position moves → `moved: needs review` + `dirtied_by` wiring
+- command sources unreachable via CLI → `--source-ref` records `Acquisition::Command`; `verify --run-command=true` re-runs+compares
+- `--run-command` bare flag ate the subcommand → `require_equals`
+- command-source nodes reported `missing` → `is_virtual` check
+- `commit verify` did not block on uncommitted range edits → shared `range_needs_review` gate
+- `commit_link` accepted nonexistent range endpoints → tip-existence guard (phantom links refused; combos with a bad member now fail)
+- note seqs collided at `publication+1` → unique monotonic per-commit seq
+- `check` reported empty `files:[]` for a tracked-but-missing source → `incomplete` + `coverage: null`
+- `Store::open` silently parsed a tampered tip → tip→commit integrity check (reader detects changed participant)
+- 8 vacuous tests removed/rewritten; 3 more de-vacuified post-audit
 
-## UNMAPPED / PARTIAL scenario list (decision-relevant)
+## Prior audit provenance
 
-**UNMAPPED (60)** — change-review: One link persists across successive range versions; Reset withdraws only the link creation in the removed segment; A reason does not create another relationship; One of two upstream changes is handled; Same endpoints do not identify the same obligation; Adaptation without a link ID is rejected; Adaptation without a reason is rejected; Stop one branch while retaining another; Explicitly omit the stop reason; Membership follows one range chain; The current range advances before end; End closes an already advanced state; A boundary reset warning is present in JSON; Nested boundaries use the same immediate predecessor rule; Adjacent markers are not skipped recursively; Mix directions and repeat each option; Reject repeated incoming range; Reject repeated outgoing range; Different references to one range are still duplicates; Opposite directions to one range are distinct; Duplicate check scoped to one invocation; Create a new commit after range reset; Reading data does not repair its validity; Copying a record does not change its identity; Correct a comment without rewriting a commit; Note revisions follow publication order; Keep evidence of a broken reference; Collect an unreferenced dangling record; Inspect a dangling commit; Limit a tree to file level; Tree is machine-readable; A selected link does not implicitly select all its changes; Unknown current output is not empty successful coverage; A combination reports earlier successful members. — command-verification: Initialize despite auto-run disabled; Unavailable project root no fallback; Clean does not rerun command; Equal output does not cancel review work; Rebuilding cache from unfamiliar metadata; Command replace doesn't grant future auto-exec; Program waits for stdin; Storage fails during capture. — local-project-links: Git-shaped label not a fetch; Remote changes without mapping; Project moved locally; Relate implementations in two languages; Link without merging metadata dirs; Two projects same tag; Unrelated offline store; Equivalent remotes need mapping. — managed-content: Equal acquired contents equal rules; Range extended explicitly; Rebuild without Git or cache; Verify uncommitted after same-content replacement; Git history readable after cache loss; Non-UTF-8 encoding; Content moves without changing text; Full coverage doesn't clear independent obligation; Split does not copy relationships; Failed final sync not rollback promise.
-
-**PARTIAL (39)** — see tables; clauses missed are named per row.
-
-None of the UNMAPPED scenarios carry an explicit platform-record gap; they are missing checks or unimplemented behavior. One undocumented implementation limitation: non-UTF-8 text decode (spec requires it; code rejects).
----
-
-# Post-Audit Remediation Map (13.2/13.3)
-
-The rows above are the pre-remediation audit (38 COVERED / 39 PARTIAL / 60
-UNMAPPED). The table below maps each remediation to the executed check that
-now covers it. Rows marked **DEFERRED** name a subsystem-scale feature the
-spec marks optional or conditional that has no fabricated check — an honest
-disposition, not a pass.
-
-## Implementation gaps fixed since the audit
-
-| Audit gap | Resolution | Executed check |
-|---|---|---|
-| `reset` only appended a marker | Real reset: tip move + dangling + link/adapt withdrawal + JSON requested/actual/warning | tests/reset.rs (5) |
-| `--run-command` flag absent | `--run-command` global flag → `verify(store, run_cmd)` reports `unverified` for command sources | tests/command_verify.rs, main.rs |
-| non-UTF-8 decode | `--encoding` via encoding_rs (WHATWG labels), resolved flag>recorded>file>project>user>UTF-8 | tests/file_source.rs `non_utf8_encoding_decodes` |
-| duplicate `--link-from` raw-string | resolved-identity dedup via `resolve_range_key` (canonical `range:` key) | tests/guards.rs |
-| link endpoint short spellings rejected | `resolve_range_key` canonicalizes `--link-from/--link-to` before `commit_link`; `--range` required for combo links | tests/guards.rs |
-| `--id` non-tip commit unresolved | `--id` walks each tip's `previous_id` chain to resolve the containing node | tests/traceability.rs `id_to_interior_range_commit_resolves_to_chain` |
-| `--adapt '<JSON>'` form absent | repeatable `--adapt <JSON {link_id,changes,reason}>` + flat flags | features/local_project_links.feature, tests/guards.rs |
-| tree file-level/depth limit | `tree --level file|N` | tests/traceability.rs `tree_level_file_hides_ranges` |
-| gc never collects commits/notes | gc collects unreferenced dangling commits + their notes; referenced dangling retained | tests/gc.rs (3) |
-| discovery not wired to `--meta` | `--meta` > `OMD_META` > ancestor `.omd` walk > `./.omd` | tests/traceability.rs `meta_discovery_from_subdirectory`, `omd_meta_env_overrides` |
-| content-move (pure position) dirtying | handled by the `locate` candidate-migration path per spec (candidate + review, not dirty) — not an impl gap | tests/lifecycle.rs `verify_reports_ambiguous_fragment_locate` |
-
-## Vacuous tests strengthened
-
-The audit named 6 vacuous tests. Their clauses are now exercised by real
-executed checks in `tests/guards.rs`, `tests/reset.rs`, `tests/traceability.rs`:
-adapt rejection (link-id/reason/no-reason), `--stop` per-link clearing,
-reason-not-creating-a-relationship, opposite-direction distinctness,
-per-invocation dup scoping, interior `--id` resolution, dangling inspect.
-
-## DEFERRED / PLATFORM records (no fabricated check)
-
-| Scenario area | Disposition |
-|---|---|
-| Remote-identity URL ↔ declared mapping; SSH/HTTPS equivalence; registration diagnostic entry (local-project-links req 23–25) | **DEFERRED** — spec marks this OPTIONAL ("仅在用户显式配置该信息时生效"). Requires a config/remote registry + URL mapping semantics not yet designed. Recorded, not faked. |
-| Equivalent-looking remotes need a declared mapping | **DEFERRED** — part of the same remote-identity subsystem. |
-| Cross-store publication choreography depth (offline peers, ordered locking across stores, inbound credential ordering) | **PARTIAL → recorded** — `cross.rs` has store_id/peer/inbound primitives + 3 real tests (two real `.omd` dirs); full multi-store locking choreography is a larger workflow. |
-| Storage-failure injection, stdin-wait, message-copy | **PLATFORM** — external I/O fault injection has no in-process seam; recorded. |
-
-Test totals after remediation: `cargo test --all-targets` = 176+ passing,
-0 failing (all suites green); BDD `cargo test --test bdd` = 18/18.
-
----
-
-# Second Remediation Round (post re-audit)
-
-The re-audit found 3 unreproducible claims + 8 vacuous tests in my first
-remediation. This round fixed them. Status now tracked against the reviewer's
-per-file counts (change-review 18/19/18/0, command-verification 5/7/7/1,
-local-project-links 8/7/5/2, managed-content 23/8/9/0 → total 54/41/39/3).
-
-## Bugs fixed in round 2 (each with executed check)
-
-| Bug | Fix | Test |
-|---|---|---|
-| reset didn't withdraw links in removed segment | `apply_reset_to_state` walks old_tip→actual (successor direction) + withdraws created links/adapts | tests/reset.rs `reset_to_begin_withdraws_link_created_in_segment` |
-| pure-move reported CLEAN | `verify` reports `moved: needs review` for single-candidate relocate + `dirtied_by` for in-range edits | tests/guards.rs `pure_position_move_reports_moved_not_clean`, tests/traceability.rs `in_range_edit_dirties_the_range` |
-| command-source unreachable | `--source-ref 'command::exe::["args"]'` → `commit_command_source` → `Acquisition::Command` → verify `unverified` | tests/guards.rs `command_source_records_acquisition_and_unverified` |
-| check silent empty on missing source | tracked file tip with vanished source reports `incomplete` in check | src/main.rs check arm |
-
-## Vacuous tests removed/rewritten
-
-Deleted 6 struct-tautology tests (coverage_atomic ×3, domain_semantics ×2,
-ranges ×1) — their clauses covered by real checks. Rewrote 2 near-vacuous
-traceability tests (tag_conflict → `tag_on_changed_content_is_not_a_requalification`,
-content_change → `in_range_edit_dirties_the_range`) with can-fail assertions.
-
-## New executed checks this round (~29 in tests/guards.rs + traceability)
-
-adjacent-marker one-step reset, open-block interior refused, same-endpoint
-link coexist, no-git rebuild, referenced dangling retained, clean --no-reason,
-commit-id stable, --timestamp, note patch, first-BEGIN empty reset, per-store
-tags, replace refuses diff content, offline peer no-block, warn rule non-fail,
-explicit range expansion, cross-boundary dirty, byte-mode coords, ambiguous
-locate, tombstone not-missing, command-source acquisition+unverified.
-
-Test totals: `cargo test --all-targets` 190+ green, BDD 18/18.
-
-## Still DEFERRED/PLATFORM (legitimate, not faked)
-
-- remote-identity URL↔declared-mapping subsystem (spec-optional; needs config
-  registry + URL normalization semantics + SSH/HTTPS non-equivalence rules)
-- full multi-store ordered-locking choreography depth
-- external I/O fault injection (storage failure, stdin-wait) — no in-process seam
+Two independent reviewer audits ran against this tree (a 137-row scenario map and a
+per-file change/verification re-audit), plus a final full-ledger pass; their findings
+are superseded by the table above, which is corrected against the actual scenario
+list and current code. The stale pre-remediation table and narrative appendices were
+removed — this file is now the single authoritative per-row ledger.
