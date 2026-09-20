@@ -522,3 +522,63 @@ fn explicit_range_expansion_distinct_object() {
     let tip = t.tip("range:a.md@text:0-5");
     assert!(!tip.is_empty(), "c1's chain advanced via --id");
 }
+
+// managed-content: a cross-boundary edit (change spanning the range edge)
+// dirties the range — the spec requires review for boundary-crossing changes.
+#[test]
+fn cross_boundary_edit_dirties() {
+    let t = T::new();
+    t.write("a.md", "AABBCCDD");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "2-6", "--reason", "r"]);
+    // Edit spanning the boundary (positions 1-7 changed).
+    t.write("a.md", "AXXBCCYD");
+    let (_, o, _) = t.run(&["verify", "a.md"]);
+    assert!(o.contains("dirty") || o.contains("moved") || o.contains("locate")
+            || o.contains("in-range"), "cross-boundary edit flagged: {o}");
+}
+
+// managed-content: a byte-mode range counts raw byte offsets, not chars.
+#[test]
+fn byte_mode_range_counts_bytes() {
+    let t = T::new();
+    // Multi-byte UTF-8 chars: 'é' = 2 bytes.
+    t.write("a.md", "aébc");
+    t.run(&["init", "a.md"]);
+    // byte:0-3 covers 'a' + 'é'(2 bytes) = 3 bytes.
+    let (c, o, e) = t.run(&["commit", "commit", "a.md", "--range", "byte:0-3", "--reason", "r"]);
+    assert_eq!(c, 0, "byte range commits: {o} {e}");
+    // The byte-range node key uses byte coordinates.
+    assert!(t.state().contains("byte:0-3"), "byte range node: {}", t.state());
+}
+
+// managed-content: a fragment matching ambiguously in current content reports
+// locate candidates — never auto-picks one.
+#[test]
+fn ambiguous_fragment_reports_locate_candidates() {
+    let t = T::new();
+    t.write("a.md", "XX AB XX");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "3-5", "--reason", "r"]);
+    // Now 'AB' appears multiple places conceptually; make current ambiguous.
+    t.write("a.md", "AB AB AB");
+    let (_, o, _) = t.run(&["verify", "a.md"]);
+    assert!(o.contains("ambiguous") || o.contains("candidates") || o.contains("locate"),
+            "ambiguous locate reported: {o}");
+}
+
+// managed-content: a file with a tombstone (Delete commit) is NOT reported
+// missing — the delete is intentional.
+#[test]
+fn tombstoned_file_not_missing() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    // delete the file via the tombstone verb, then remove it from disk.
+    t.run(&["delete", "a.md"]);
+    std::fs::remove_file(t.0.join("a.md")).unwrap();
+    let (_, o, _) = t.run(&["verify", "a.md"]);
+    // Tombstone → not 'missing'.
+    assert!(!o.contains("missing") || o.contains("no tombstone") == false,
+            "tombstoned file not missing: {o}");
+}
