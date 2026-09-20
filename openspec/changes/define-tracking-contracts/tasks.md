@@ -61,9 +61,9 @@
 
 ## 10. Git 历史与同内容 replace（依赖 4、5、9）
 
-- [ ] 10.1 实现 git::<JSON> 的本地 repo、确切 commit、版本内 path 读取及历史符号链接检查；验证原始完整 blob、不用 diff/index/filter/textconv、禁止隐式 fetch；HEAD 变化不替换当前文件，历史丢失不拿工作区代替，当前文件缺失也不被 Git 历史掩盖。
-- [ ] 10.2 实现经 commit 选择完整来源版本的 file/command/git replace 和不可变 binding 修订；验证完整内容相同才成功、片段相同而整体不同仍拒绝、不生成 OMD commit、原 ID/输入/link/note/当前观察不变，无完整来源依据的操作不能充当目标。
-- [ ] 10.3 实现共享版本影响报告及显式 command replace 单次授权；验证同一版本 ID 的记录共同改绑、仅 hash 相同的其他版本不变，旧 Z/共享 X 不丢失，command 成功输出仍须完整相等，后续 verify/check 的许可不被替换操作提升。
+- [x] 10.1 实现 git::<JSON> 的本地 repo、确切 commit、版本内 path 读取及历史符号链接检查；验证原始完整 blob、不用 diff/index/filter/textconv、禁止隐式 fetch；HEAD 变化不替换当前文件，历史丢失不拿工作区代替，当前文件缺失也不被 Git 历史掩盖。
+- [x] 10.2 实现经 commit 选择完整来源版本的 file/command/git replace 和不可变 binding 修订；验证完整内容相同才成功、片段相同而整体不同仍拒绝、不生成 OMD commit、原 ID/输入/link/note/当前观察不变，无完整来源依据的操作不能充当目标。
+- [x] 10.3 实现共享版本影响报告及显式 command replace 单次授权；验证同一版本 ID 的记录共同改绑、仅 hash 相同的其他版本不变，旧 Z/共享 X 不丢失，command 成功输出仍须完整相等，后续 verify/check 的许可不被替换操作提升。
 
 ## 11. 独立存储的关联与保护（依赖 3、6、10）
 

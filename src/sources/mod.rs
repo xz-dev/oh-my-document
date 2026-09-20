@@ -61,3 +61,4 @@ fn decode(bytes: &[u8], encoding: &str) -> Result<String, SourceError> {
     }
 }
 pub mod scope;
+pub mod git;

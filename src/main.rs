@@ -87,6 +87,23 @@ enum Cmd {
     Rename { source: String, target: String },
     /// `omd copy` — new initialization without prior association.
     Copy { source: String, target: String },
+    /// `omd note` — append-only notes on a commit + reverse lookup.
+    Note {
+        /// `add|patch|delete|list`
+        action: String,
+        /// Target commit id.
+        commit_id: String,
+        /// For patch/delete: the original note id.
+        #[arg(long)] target: Option<String>,
+        #[arg(long)] text: Option<String>,
+    },
+    /// `omd replace <commit-id> --source <ref>` — rebind the commit's
+    /// recorded full version to a new source with identical content.
+    Replace {
+        commit_id: String,
+        /// `file:<path>` | `git::<JSON>` | `command::<exe>::<args>`.
+        #[arg(long)] source: String,
+    },
     /// `omd log <id>` — walk a node's commit chain.
     Log { id: String },
     /// `omd tree [id]` — mount-tree view from root or a node.
@@ -154,12 +171,24 @@ fn meta_root(cli: &Cli) -> PathBuf {
     cli.meta.clone().unwrap_or_else(|| PathBuf::from(".omd"))
 }
 
+/// Wrap a command payload in the contract envelope `{schema_version, ok,
+/// data, diagnostics}`. `data` carries the command result; `diagnostics`
+/// carries structured `{kind, severity, message, store, node, commit_id}`
+/// entries (nulls for inapplicable fields). stdout is JSON only — progress
+/// and source stderr never merge into the JSON channel.
+fn envelope(ok: bool, data: serde_json::Value, diagnostics: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": "1",
+        "ok": ok,
+        "data": data,
+        "diagnostics": diagnostics,
+    })
+}
+
 fn emit(cli: &Cli, v: serde_json::Value) {
     if cli.json {
         println!("{}", serde_json::to_string(&v).unwrap());
     } else {
-        // Human-readable fallback: still a JSON shape for now (single
-        // canonical output; a pretty printer is a later task).
         println!("{}", serde_json::to_string_pretty(&v).unwrap());
     }
 }
@@ -489,6 +518,96 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             ).map_err(|e| e.to_string())?;
             Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": "Init", "copied_from": source }))
         }
+        Cmd::Note { action, commit_id, target, text } => {
+            let store = Store::open(&root).map_err(|e| e.to_string())?;
+            let seq = store.state().publication + 1;
+            match action.as_str() {
+                "add" | "patch" | "delete" => {
+                    let mut idb = [0u8; 16];
+                    omd::testing::Rng::fill(&OsRng, &mut idb);
+                    let note = omd::records::notes::Note {
+                        id: hex::encode(idb),
+                        timestamp: omd::records::commit::Commit::format_timestamp(omd::testing::Clock::now(&SystemClock).0),
+                        commit_id: commit_id.clone(),
+                        kind: action.clone(),
+                        target_note_id: target.clone().unwrap_or_default(),
+                        text: text.clone().unwrap_or_default(),
+                        seq,
+                    };
+                    let nid = omd::records::notes::append(&root, &note).map_err(|e| e.to_string())?;
+                    Ok(serde_json::json!({ "ok": true, "note": nid, "kind": action }))
+                }
+                "list" => {
+                    let notes = omd::records::notes::list_for(&root, commit_id);
+                    Ok(serde_json::json!({ "ok": true, "commit_id": commit_id, "notes": notes }))
+                }
+                other => Err(format!("unknown note action: {other}")),
+            }
+        }
+        Cmd::Replace { commit_id, source } => {
+            let mut store = Store::open(&root).map_err(|e| e.to_string())?;
+            // Resolve the commit's recorded version + its complete content.
+            let commit = store.read_commit(commit_id).map_err(|e| e.to_string())?;
+            let version = store.read_version(&commit.content_ref).map_err(|e| e.to_string())?;
+            let recorded = store.read_content(&version.sha256).map_err(|e| e.to_string())?;
+            // Read the new source's *complete* bytes per its kind.
+            // A bare existing path is a file source even without `proj:`.
+            let new_bytes = if std::path::Path::new(source).exists() {
+                std::fs::read(source).map_err(|e| format!("read {source}: {e}"))?
+            } else { match omd::sources::reference::parse_source_ref(source) {
+                Ok(omd::sources::reference::SourceRef::File { path, .. }) => {
+                    std::fs::read(&path).map_err(|e| format!("read {path}: {e}"))?
+                }
+                Ok(omd::sources::reference::SourceRef::Git { repo, commit, path }) => {
+                    let g = omd::sources::git::GitRef { repo: repo.into(), commit, path };
+                    omd::sources::git::read_blob(&g).map_err(|_| "git source unobtainable".to_string())?
+                }
+                Ok(omd::sources::reference::SourceRef::Command { executable, args }) => {
+                    let out = omd::sources::command::observe_command(&executable, &args, &std::env::current_dir().unwrap_or_default())
+                        .map_err(|_| "command failed".to_string())?;
+                    out.into_observation().ok_or("command exit != 0")?.bytes
+                }
+                Err(_) => return Err(format!("bad --source: {source}")),
+            } };
+            // Only identical *complete* content rebinds — a matching range
+            // fragment is never enough.
+            if new_bytes != recorded {
+                return Err("replace refused: new source content differs from recorded full content".into());
+            }
+            // Rebind: which records share this version id (impact report).
+            let mut affected = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(root.join("commits")) {
+                for e in rd.flatten() {
+                    if let Ok(txt) = std::fs::read_to_string(e.path()) {
+                        if let Ok(c) = toml::from_str::<omd::records::commit::Commit>(&txt) {
+                            if c.content_ref == commit.content_ref {
+                                let cid = e.path().file_stem().unwrap().to_string_lossy().to_string();
+                                affected.push(cid);
+                            }
+                        }
+                    }
+                }
+            }
+            // Persist an immutable binding revision pointing the version at
+            // the new acquisition. Content/id/links/notes unchanged.
+            let mut idb = [0u8; 16];
+            omd::testing::Rng::fill(&OsRng, &mut idb);
+            let binding = omd::records::binding::Binding {
+                id: hex::encode(idb),
+                version_id: commit.content_ref.clone(),
+                acquisition: serde_json::json!({ "source": source }),
+                seq: store.state().publication + 1,
+                affected: affected.clone(),
+            };
+            omd::records::binding::write_binding(&root, &binding).map_err(|e| e.to_string())?;
+            let mut st = store.state().clone();
+            st.bindings.insert(commit.content_ref.clone(), binding.id.clone());
+            st.publication += 1;
+            // publish state via a marker-free path — bindings update is a
+            // metadata revision, not a business commit.
+            store.set_state(st).map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "ok": true, "binding": binding.id, "version": commit.content_ref, "affected": affected }))
+        }
         Cmd::Log { id } => {
             let store = Store::open(&root).map_err(|e| e.to_string())?;
             // Walk the node's chain from its tip via previous_id.
@@ -575,16 +694,35 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     match run(&cli) {
         Ok(v) => {
-            emit(&cli, v);
-            ExitCode::SUCCESS
+            // `run` returns a payload; wrap in the contract envelope.
+            let ok = v.get("ok").and_then(|x| x.as_bool()).unwrap_or(true);
+            emit(&cli, envelope(ok, v, serde_json::json!([])));
+            if ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
         }
         Err(e) => {
-            if cli.json {
-                println!("{}", serde_json::json!({ "ok": false, "error": e }));
+            // Classify the failure into the contract exit codes:
+            // 1 check-fail/incomplete, 2 usage, 3 version conflict,
+            // 4 lock conflict, 5 I/O/exec.
+            let (code, kind) = if e.contains("lock") || e.contains("Lock") {
+                (4, "lock_conflict")
+            } else if e.contains("publication") || e.contains("mismatch") || e.contains("conflict") {
+                (3, "version_conflict")
+            } else if e.contains("bad --range") || e.contains("unknown") || e.contains("usage") {
+                (2, "usage")
+            } else if e.contains("io:") || e.contains("exec") {
+                (5, "io_exec")
             } else {
-                eprintln!("error: {e}");
+                (1, "check_failed")
+            };
+            let diag = serde_json::json!([{ "kind": kind, "severity": "error",
+                "message": e, "store": null, "node": null, "commit_id": null }]);
+            let out = envelope(false, serde_json::json!(null), diag);
+            if cli.json {
+                println!("{}", serde_json::to_string(&out).unwrap());
+            } else {
+                eprintln!("error: {}", serde_json::to_string_pretty(&out).unwrap());
             }
-            ExitCode::FAILURE
+            ExitCode::from(code)
         }
     }
 }

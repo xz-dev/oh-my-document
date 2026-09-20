@@ -226,6 +226,18 @@ impl Store {
         &self.root
     }
 
+    /// Persist a metadata-only state update (binding/registration revisions
+    /// that aren't business commits) via the same atomic state swap.
+    pub fn set_state(&mut self, st: State) -> Result<(), StoreError> {
+        let path = self.root.join("state.toml");
+        let tmp = self.root.join("state.toml.tmp");
+        let txt = toml::to_string(&st).map_err(|e| StoreError::Record(e.to_string()))?;
+        fs::write(&tmp, txt)?;
+        fs::rename(&tmp, &path)?;
+        self.state = st;
+        Ok(())
+    }
+
     /// Verify caller-observed preconditions under the held lock.
     /// Any mismatch aborts the write — never silently uses the newer value.
     pub fn check_expected(&self, exp: &Expected) -> Result<(), StoreError> {

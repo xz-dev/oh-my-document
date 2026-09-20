@@ -17,6 +17,8 @@ pub enum SourceRef {
     File { alias: String, path: String, byte: bool },
     /// `command::<exe>::<args>` — virtual file from program stdout.
     Command { executable: String, args: Vec<String> },
+    /// `git::<JSON>` — exact-commit blob from a local repo.
+    Git { repo: String, commit: String, path: String },
 }
 
 /// Parse a source reference string.
@@ -39,6 +41,14 @@ pub fn parse_source_ref(s: &str) -> Result<SourceRef, SourceError> {
     if s.starts_with("command::") {
         let (exe, args) = parse_command_ref(s)?;
         return Ok(SourceRef::Command { executable: exe, args });
+    }
+    if s.starts_with("git::") {
+        let g = super::git::parse_git_ref(s)?;
+        return Ok(SourceRef::Git {
+            repo: g.repo.to_string_lossy().into(),
+            commit: g.commit,
+            path: g.path,
+        });
     }
     Err(SourceError::Command)
 }

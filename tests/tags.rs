@@ -96,15 +96,25 @@ fn warn_level_reports_gap_without_failing() {
 
 #[test]
 fn one_way_allows_extra_reverse_links() {
-    // spec->code fully covered; extra code->spec links don't violate a
-    // one-way rule. Two-way would require both directions independently.
-    let mut st = omd::records::store::State::default();
-    st.tags.insert("file:docs".into(), BTreeSet::from(["spec".to_string()]));
-    st.tags.insert("file:code".into(), BTreeSet::from(["code".to_string()]));
-    // A spec range links to code AND a code range links back — one-way
-    // spec->code is still satisfied (extra reverse edge is not a violation).
-    // The check rule 'spec->code' only asserts forward coverage.
-    assert!(true); // structural: cov() only measures src->tgt for '->'
+    // spec->code covered; an extra code->spec link is NOT a violation of
+    // the one-way rule — check on 'spec->code' must not fail because a
+    // reverse edge exists.
+    let t = T::new();
+    t.write("docs/s.md", "spec-content");
+    t.write("code/i.rs", "impl");
+    t.run(&["import", "docs"]); t.run(&["import", "code"]);
+    t.run(&["init", "docs/s.md"]); t.run(&["init", "code/i.rs"]);
+    t.run(&["commit", "tag", "docs", "--tag", "spec"]);
+    t.run(&["commit", "tag", "code", "--tag", "code"]);
+    t.run(&["commit", "scope_adjust", "docs", "--rule", "spec->code", "--level", "warn"]);
+    // spec range links to code; code range also links back to spec.
+    t.run(&["commit", "commit", "docs/s.md", "--range", "0-4",
+            "--link-to", "range:code/i.rs@text:0-4"]);
+    t.run(&["commit", "commit", "code/i.rs", "--range", "0-4",
+            "--link-to", "range:docs/s.md@text:0-4"]);
+    let (_, out, _) = t.run(&["check"]);
+    // One-way spec->code: extra reverse edge must not produce a violation.
+    assert!(out.contains("spec->code"), "rule missing:\n{out}");
 }
 
 #[test]
@@ -119,8 +129,10 @@ fn coverage_gap_but_verify_can_pass() {
     let (_, chk, _) = t.run(&["check"]);
     let (_, ver, _) = t.run(&["verify"]);
     assert!(chk.contains("spec->code"), "rule gap not reported:\n{chk}");
-    // verify has no open obligations → ok true (coverage is not a verify gate).
-    assert!(ver.contains("\"ok\": true") || ver.contains("ok"), "verify should pass:\n{ver}");
+    // verify's own `ok` field must be true — coverage is not a verify gate.
+    let v: serde_json::Value = serde_json::from_str(&ver).unwrap_or_default();
+    assert_eq!(v.get("ok").and_then(|x| x.as_bool()), Some(true),
+        "verify should pass despite coverage gap:\n{ver}");
 }
 
 #[test]
