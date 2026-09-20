@@ -1116,3 +1116,60 @@ fn confirm_deleted_body_as_empty_range() {
     let (c, _, _) = t.run(&["commit", "clean", "a.md", "--reason", "removed body"]);
     assert_eq!(c, 0, "clean marks the deletion handled");
 }
+
+// change-review #38: a file snapshot preserves a recorded child END — the
+// file reset restores the END marker's tip position too.
+#[test]
+fn file_snapshot_preserves_child_end() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "begin", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "m"]);
+    let end_tip = { t.run(&["commit", "end", "a.md"]); t.tip("file:a.md") };
+    // Reset the END → the file snapshot restores the recorded state where
+    // the child END still existed — a subsequent END close works again.
+    t.run(&["commit", "reset", "a.md", "--reason", &end_tip]);
+    let (c, o, e) = t.run(&["commit", "end", "a.md"]);
+    assert_eq!(c, 0, "block still closeable after END reset: {o} {e}");
+}
+
+// change-review #53: `adapt --changes <names>` clears only the NAMED
+// obligations — un-named pending on the same link stays.
+#[test]
+fn adapt_changes_clears_only_named() {
+    let t = T::new();
+    t.write("a.md", "aaa");
+    t.write("b.md", "bbb");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "ra"]);
+    t.run(&["commit", "commit", "b.md", "--range", "0-3", "--link-from", "a.md@text:0-3", "--reason", "lb"]);
+    // Two upstream commits seed two obligations on the one link.
+    let tip = t.tip("range:a.md@text:0-3");
+    t.run(&["commit", "commit", "a.md", "--id", &tip, "--range", "0-3", "--reason", "up1"]);
+    t.run(&["commit", "commit", "a.md", "--id", &tip, "--range", "0-3", "--reason", "up2"]);
+    // adapt --changes names ONE pending commit id — the other stays pending.
+    let (lid, pendings): (String, Vec<String>) = {
+        let st = t.state();
+        let sec = st.split("[link_pending]").nth(1).unwrap_or("");
+        let line = sec.lines().find(|l| l.contains(" = [")).unwrap_or("");
+        let lid = line.split('=').next().unwrap_or("").trim().to_string();
+        let pendings = line.split('[').nth(1).unwrap_or("")
+            .split(']').next().unwrap_or("")
+            .split(',').map(|s| s.trim().trim_matches('"').to_string())
+            .filter(|s| !s.is_empty()).collect();
+        (lid, pendings)
+    };
+    assert!(pendings.len() >= 2, "two pending obligations seeded");
+    let named = &pendings[0];
+    let (_, o, e) = t.run(&["commit", "adapt", "b.md", "--link-id", &lid,
+        "--changes", named, "--reason", "partial"]);
+    assert!(format!("{o}{e}").contains("ok"), "named-changes adapt: {o} {e}");
+    // The named pending cleared; the un-named stays.
+    let st2 = t.state();
+    let sec2 = st2.split("[link_pending]").nth(1).unwrap_or("");
+    let line2 = sec2.lines().find(|l| l.contains(&lid)).unwrap_or("");
+    assert!(!line2.contains(named), "named pending cleared: {line2}");
+    assert!(line2.contains(&pendings[1]), "un-named stays: {line2}");
+}
