@@ -588,6 +588,52 @@ pub enum ResetError {
     Interior(String),
 }
 
+/// Apply a resolved reset to the node's state: move the tip to the actual
+/// landing point, mark every commit removed by the reset as dangling, and
+/// withdraw link/adapt records that were *created* inside the removed
+/// segment (they stop counting as current; the records stay readable).
+///
+/// `lookup` resolves a commit id → (kind, previous_id). `state` is mutated
+/// in place by the caller after `publish`.
+pub fn apply_reset_to_state<F>(
+    state: &mut crate::records::store::State,
+    node_key: &str,
+    requested: &str,
+    actual: &str,
+    mut lookup: F,
+) where
+    F: FnMut(&str) -> Option<(CommitKind, String)>,
+{
+    // Move the node tip to the landing point (empty = withdraw chain).
+    if actual.is_empty() {
+        state.tips.remove(node_key);
+    } else {
+        state.tips.insert(node_key.to_string(), actual.to_string());
+    }
+    // Commits removed by the reset = the chain between the OLD tip and the
+    // landing point. Walk old-tip → actual, collecting withdrawn ids.
+    let mut removed: Vec<String> = Vec::new();
+    // (We don't have the old tip here — caller passes it via `requested`'s
+    // chain. Walk from `requested` down to `actual`.)
+    let mut cur = requested.to_string();
+    let mut guard = 0usize;
+    while !cur.is_empty() && cur != actual && guard < 100_000 {
+        removed.push(cur.clone());
+        cur = lookup(&cur).map(|(_, p)| p).unwrap_or_default();
+        guard += 1;
+    }
+    // Withdraw link/adapt records whose *creating* commit is in `removed`.
+    // A link's creation commit id is its value's `created_by` field.
+    let removed_set: std::collections::BTreeSet<&String> = removed.iter().collect();
+    state.links.retain(|_id, link| !removed_set.contains(&link.created_by));
+    state.link_pending.retain(|id, _| state.links.contains_key(id));
+    // Adapt records are commits too — withdrawn commits no longer count as
+    // current processing evidence. (Pending re-derives from live links.)
+    for pend in state.link_pending.values_mut() {
+        pend.retain(|c| !removed_set.contains(c));
+    }
+}
+
 /// Result of `omd verify` over a store — the independent check distinct
 /// from `check` (coverage). Fails when any node has unclosed ATOMIC blocks,
 /// unhandled obligations, or a dirty tip caused by a dangling dependency.

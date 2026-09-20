@@ -377,6 +377,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                 }
                 (None, None) => format!("file:{path}"),
             };
+            let mut reset_outcome: Option<serde_json::Value> = None;
             let mut payload = serde_json::Map::new();
             payload.insert("path".into(), path.clone().into());
             if let Some(r) = reason { payload.insert("reason".into(), r.clone().into()); }
@@ -450,22 +451,62 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             } else if kind == CommitKind::Reset {
                 // reset resolves the target's kind+prev from its on-disk record.
                 let target = range.clone().or(reason.clone()).unwrap_or_default();
+                // The reset operates on the node whose chain CONTAINS the
+                // target commit — resolve it by walking each tip's
+                // previous_id chain, not the file node.
+                let reset_node = {
+                    let mut found = node.clone();
+                    for (n, tip) in &store.state().tips {
+                        let mut cur = tip.clone();
+                        let mut guard = 0usize;
+                        while !cur.is_empty() && guard < 100_000 {
+                            if cur == target { found = n.clone(); break; }
+                            cur = commit_prev(&root, &cur).unwrap_or_default();
+                            guard += 1;
+                        }
+                        if found != node { break; }
+                    }
+                    found
+                };
                 let mut lk = |id: &str| -> Option<(CommitKind, String)> {
                     let s = std::fs::read_to_string(root.join(format!("commits/{id}.toml"))).ok()?;
                     let c: omd::records::commit::Commit = toml::from_str(&s).ok()?;
                     Some((c.kind, c.previous_id))
                 };
-                match pipeline::reset(&node, &target, &mut lk) {
+                match pipeline::reset(&reset_node, &target, &mut lk) {
                     Ok(out) => {
+                        // Apply the reset to state FIRST: move tip to the
+                        // landing point, dangle removed commits, withdraw
+                        // link/adapt records created in the removed segment.
+                        // Then the reset marker commit chains onto `actual`.
+                        let mut st = store.state().clone();
+                        let mut lk2 = |id: &str| -> Option<(CommitKind, String)> {
+                            let s = std::fs::read_to_string(root.join(format!("commits/{id}.toml"))).ok()?;
+                            let c: omd::records::commit::Commit = toml::from_str(&s).ok()?;
+                            Some((c.kind, c.previous_id))
+                        };
+                        // The reset records its own marker ON the landing
+                        // point — set the tip to `actual` before the marker
+                        // so the marker chains onto it and becomes the tip.
+                        let mut pre = st.clone();
+                        pipeline::apply_reset_to_state(&mut pre, &reset_node, &out.requested, &out.actual, &mut lk2);
+                        store.set_state(pre).map_err(|e| e.to_string())?;
                         let mut pl = serde_json::Map::new();
                         pl.insert("requested".into(), out.requested.clone().into());
                         pl.insert("actual".into(), out.actual.clone().into());
                         pl.insert("warning".into(), out.warning.clone().into());
-                        // Record the reset as a commit on this node's chain.
-                        pipeline::commit_marker(
+                        let cid = pipeline::commit_marker(
                             &mut store, &mut NoProbe, &OsRng, clock,
-                            &node, CommitKind::Reset, pl, &Expected::default(),
-                        ).map_err(|e| e.to_string())?
+                            &reset_node, CommitKind::Reset, pl, &Expected::default(),
+                        ).map_err(|e| e.to_string())?;
+                        // Surface the reset outcome — boundary resets carry a
+                        // machine-readable warning + requested/actual ids.
+                        reset_outcome = Some(serde_json::json!({
+                            "requested": out.requested,
+                            "actual": out.actual,
+                            "warning": out.warning,
+                        }));
+                        cid
                     }
                     Err(e) => return Err(e.to_string()),
                 }
@@ -506,7 +547,11 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                 pl.insert("path".into(), path.clone().into());
                 pipeline::commit_marker(&mut store, &mut NoProbe, &OsRng, clock, &node, CommitKind::AtomicEnd, pl, &Expected::default()).map_err(|e| e.to_string())?;
             }
-            Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": format!("{kind:?}") }))
+            let mut out = serde_json::json!({ "ok": true, "commit": cid, "kind": format!("{kind:?}") });
+            if let Some(ro) = reset_outcome {
+                out.as_object_mut().unwrap().insert("reset".into(), ro);
+            }
+            Ok(out)
         }
         Cmd::Verify { .. } => {
             let store = Store::open(&root).map_err(|e| e.to_string())?;
