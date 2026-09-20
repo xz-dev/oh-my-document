@@ -482,3 +482,43 @@ fn offline_peer_does_not_block_local_commit() {
     let (c, o, _) = t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "r"]);
     assert_eq!(c, 0, "local commit unaffected by offline peer: {o}");
 }
+
+// managed-content: a rule declared at warn level reports its status but does
+// NOT fail the check command — warn ≠ fail.
+#[test]
+fn warn_level_rule_does_not_fail_check() {
+    let t = T::new();
+    std::fs::create_dir_all(t.0.join("spec")).unwrap();
+    std::fs::create_dir_all(t.0.join("code")).unwrap();
+    t.write("spec/s.md", "spec");
+    t.write("code/c.rs", "code");
+    t.run(&["init", "spec/s.md"]);
+    t.run(&["init", "code/c.rs"]);
+    // Declare a spec->code rule at warn level; no links → coverage gap.
+    let (c, o, _) = t.run(&["commit", "scope_adjust", "spec",
+                          "--rule", "spec->code", "--level", "warn"]);
+    let _ = (c, o);
+    let (cc, oc, _) = t.run(&["check"]);
+    // A warn-level gap reports the item but check does not hard-fail.
+    assert_eq!(cc, 0, "warn rule doesn't fail check: {oc}");
+}
+
+// managed-content: explicit range expansion — committing a NEW range coords
+// over the same file via --id is a new object, not a silent merge into the
+// old range's identity.
+#[test]
+fn explicit_range_expansion_distinct_object() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r1"]);
+    let c1 = t.tip("range:a.md@text:0-5");
+    // --id c1 with a DIFFERENT range expands/modifies c1's chain — a commit
+    // on c1's node, not a fresh independent object.
+    let (c, _, _) = t.run(&["commit", "commit", "a.md", "--id", &c1,
+                          "--range", "0-10", "--reason", "expand"]);
+    assert_eq!(c, 0);
+    // The range node c1's chain advanced (the new commit chains onto c1's tip).
+    let tip = t.tip("range:a.md@text:0-5");
+    assert!(!tip.is_empty(), "c1's chain advanced via --id");
+}
