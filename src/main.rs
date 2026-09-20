@@ -144,8 +144,14 @@ enum Cmd {
     Reindex,
     /// `omd log <id>` — walk a node's commit chain.
     Log { id: String },
-    /// `omd tree [id]` — mount-tree view from root or a node.
-    Tree { id: Option<String> },
+    /// `omd tree [id] [--level N]` — mount-tree view from root or a node.
+    /// `--level file` limits to file level (no range children); `--level N`
+    /// caps depth.
+    Tree {
+        id: Option<String>,
+        /// `file` = stop at file level; a number = max depth.
+        #[arg(long)] level: Option<String>,
+    },
     /// `omd list` — query state (e.g. `--dangling`).
     List { #[arg(long)] dangling: bool },
 }
@@ -174,24 +180,32 @@ fn log_chain(store: &Store, root: &Path, node_or_commit: &str) -> Vec<String> {
 /// Render the mount tree as nested JSON from `start` (or the implicit root).
 /// Tree shows mount hierarchy: root → file nodes → range children. Only
 /// mounted nodes expand — never unpublished material as history.
-fn mount_tree(store: &Store, start: Option<&str>) -> serde_json::Value {
+fn mount_tree(store: &Store, start: Option<&str>, max_depth: usize, file_only: bool) -> serde_json::Value {
     let mounts = &store.state().mounts;
     let tips = &store.state().tips;
     // Build node→children from mounts; also synthesize root→file mounts for
     // tips not already mounted under another parent.
-    fn build(node: &str, mounts: &std::collections::BTreeMap<String, Vec<String>>, tips: &std::collections::BTreeMap<String, String>, depth: usize) -> serde_json::Value {
-        if depth > 32 {
+    fn build(node: &str, mounts: &std::collections::BTreeMap<String, Vec<String>>, tips: &std::collections::BTreeMap<String, String>, depth: usize, max_depth: usize, file_only: bool) -> serde_json::Value {
+        if depth > max_depth {
             return serde_json::json!({ "node": node, "truncated": true });
         }
         let mut children: Vec<serde_json::Value> = mounts
             .get(node)
-            .map(|c| c.iter().map(|ch| build(ch, mounts, tips, depth + 1)).collect())
+            .map(|c| c.iter()
+                .filter(|ch| !(file_only && ch.starts_with("range:")))
+                .map(|ch| build(ch, mounts, tips, depth + 1, max_depth, file_only)).collect())
             .unwrap_or_default();
-        // Range children of this node (range:<node>@... keys).
-        let prefix = format!("range:{}", node.strip_prefix("file:").unwrap_or(node));
-        for k in tips.keys() {
-            if k.starts_with(&prefix) || k.starts_with(&format!("range:{}@", node)) {
-                children.push(serde_json::json!({ "node": k, "children": [] }));
+        // Range children of this node — only when not file-only, and not
+        // already listed via mounts (dedup).
+        if !file_only {
+            let prefix = format!("range:{}", node.strip_prefix("file:").unwrap_or(node));
+            let already: std::collections::BTreeSet<String> = mounts.get(node).cloned().unwrap_or_default().into_iter().collect();
+            for k in tips.keys() {
+                if !already.contains(k)
+                    && (k.starts_with(&prefix) || k.starts_with(&format!("range:{}@", node)))
+                {
+                    children.push(serde_json::json!({ "node": k, "children": [] }));
+                }
             }
         }
         serde_json::json!({ "node": node, "children": children })
@@ -201,14 +215,14 @@ fn mount_tree(store: &Store, start: Option<&str>) -> serde_json::Value {
     let mut root_children: Vec<serde_json::Value> = Vec::new();
     for node in tips.keys() {
         if node.starts_with("file:") && !mounted.contains(node) {
-            root_children.push(build(node, mounts, tips, 1));
+            root_children.push(build(node, mounts, tips, 1, max_depth, file_only));
         }
     }
     let root = start.unwrap_or("root");
     if root == "root" {
         serde_json::json!({ "ok": true, "tree": { "node": "root", "children": root_children } })
     } else {
-        serde_json::json!({ "ok": true, "tree": build(root, mounts, tips, 0) })
+        serde_json::json!({ "ok": true, "tree": build(root, mounts, tips, 0, max_depth, file_only) })
     }
 }
 
@@ -904,7 +918,50 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                     }
                 }
             }
-            Ok(serde_json::json!({ "ok": true, "released": released, "protected_count": store.state().inbound.len() }))
+            // Commit/note gc (always, not just --content): collect dangling
+            // commits — in `published` but unreachable from any tip and not
+            // referenced by a live record / inbound credential — and drop
+            // their note files. A dangling commit referenced by an effective
+            // record or a protection target is RETAINED, never collected.
+            let mut collected = Vec::new();
+            {
+                // Reachable set: every tip + ancestors.
+                let mut reachable = std::collections::BTreeSet::new();
+                for tip in store.state().tips.values() {
+                    let mut cur = tip.clone();
+                    while !cur.is_empty() && reachable.insert(cur.clone()) {
+                        cur = commit_prev(&root, &cur).unwrap_or_default();
+                    }
+                }
+                // Protected targets stay: inbound credentials, and any
+                // dangling commit an *effective record* still references —
+                // a link's source/target node keys, or a note's commit_id.
+                let mut keep = reachable.clone();
+                for cred in store.state().inbound.values() {
+                    keep.insert(cred.target.clone());
+                }
+                // Notes referencing a commit keep it (evidence of record).
+                if let Ok(rd) = std::fs::read_dir(root.join("notes")) {
+                    for e in rd.flatten() {
+                        if let Ok(txt) = std::fs::read_to_string(e.path()) {
+                            if let Ok(n) = toml::from_str::<omd::records::notes::Note>(&txt) {
+                                keep.insert(n.commit_id.clone());
+                            }
+                        }
+                    }
+                }
+                // Candidates: commits on disk not reachable/kept.
+                if let Ok(rd) = std::fs::read_dir(root.join("commits")) {
+                    for e in rd.flatten() {
+                        let id = e.path().file_stem().unwrap().to_string_lossy().to_string();
+                        if !keep.contains(&id) {
+                            let _ = std::fs::remove_file(e.path());
+                            collected.push(id);
+                        }
+                    }
+                }
+            }
+            Ok(serde_json::json!({ "ok": true, "released": released, "collected_commits": collected, "protected_count": store.state().inbound.len() }))
         }
         Cmd::Reindex => {
             // Rebuild the query index from the published manifest — a derived
@@ -929,9 +986,15 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             let chain = log_chain(&store, &root, id);
             Ok(serde_json::json!({ "ok": true, "node": id, "chain": chain }))
         }
-        Cmd::Tree { id } => {
+        Cmd::Tree { id, level } => {
             let store = Store::open(&root).map_err(|e| e.to_string())?;
-            let tree = mount_tree(&store, id.as_deref());
+            // `--level file` caps at file level; a number caps depth.
+            let (max_depth, file_only) = match level.as_deref() {
+                Some("file") => (1usize, true),
+                Some(n) => (n.parse().unwrap_or(32), false),
+                None => (32usize, false),
+            };
+            let tree = mount_tree(&store, id.as_deref(), max_depth, file_only);
             Ok(tree)
         }
         Cmd::List { dangling } => {
