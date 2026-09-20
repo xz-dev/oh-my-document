@@ -4,8 +4,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use omd::records::ids::Id128;
-use omd::records::ops::{Adapt, Link};
-use omd::relations::dirty::{DirtyReason, DirtyState};
+use omd::records::ops::Link;
+use omd::relations::dirty::DirtyState;
 
 #[test]
 fn unclean_obligations_stack_not_merge() {
@@ -35,16 +35,10 @@ fn dangling_dependency_fails_at_first_broken_hop() {
     assert!(s.is_dirty("b1"));
 }
 
-#[test]
-fn history_or_clean_cannot_repair_dangling() {
-    // Once a commit is marked for a dangling dependency, a subsequent clean /
-    // note / ordinary commit does not auto-repair it — it stays dirty until
-    // rebuilt on a fresh valid basis with a new id.
-    let mut s = DirtyState::default();
-    s.mark("b1", DirtyReason::DependencyDangling { dependency: "a1".into() });
-    // A clean commit lands but cannot clear the dangling mark.
-    assert!(s.is_dirty("b1"));
-}
+// `history_or_clean_cannot_repair_dangling` removed — it marked then
+// `is_dirty` without attempting repair (vacuous). Dangling/non-repair
+// coverage is real in tests/reset.rs + tests/traceability.rs
+// `dangling_commit_still_inspectable`.
 
 #[test]
 fn link_instances_with_same_endpoints_are_distinct() {
@@ -70,12 +64,7 @@ fn cycles_terminate_without_repeat_obligations() {
     assert!(order.contains(&"A".to_string()) && order.contains(&"B".to_string()) && order.contains(&"C".to_string()));
 }
 
-#[test]
-fn adapt_requires_link_id_changes_reason() {
-    // Adaptation needs all three: explicit link_id + changes + reason.
-    // A partial Adapt is incomplete by construction.
-    let a = Adapt { link_id: Id128([1; 16]), changes: "h1".into(), reason: "handled".into(), stop: false };
-    assert!(!a.link_id.to_hex().is_empty());
-    assert!(!a.changes.is_empty());
-    assert!(!a.reason.is_empty());
-}
+// `adapt_requires_link_id_changes_reason` removed — asserting struct fields
+// non-empty is a tautology. Real adapt-rejection coverage in tests/guards.rs:
+// adapt_without_link_id_rejected / adapt_without_reason_rejected /
+// adapt_no_reason_rejected.

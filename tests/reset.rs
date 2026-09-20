@@ -117,3 +117,36 @@ fn new_commit_after_reset_continues_chain() {
     let (c, _, _) = t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "fresh"]);
     assert_eq!(c, 0, "commit after reset must succeed");
 }
+
+// Re-audit BUG1: reset to BEGIN withdraws links created in the removed
+// segment — the link must not survive its creating commit's removal.
+#[test]
+fn reset_to_begin_withdraws_link_created_in_segment() {
+    let t = T::new();
+    t.write("a.md", "a");
+    t.write("b.md", "b");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "ra"]);
+    // BEGIN on b's range, then a LINK commit inside, then END.
+    t.run(&["commit", "commit", "b.md", "--range", "0-1",
+            "--link-from", "a.md@text:0-1", "--reason", "lb"]);
+    let st = t.state();
+    assert!(st.contains("[links."), "link created: {st}");
+    // Find the block's BEGIN commit = the chain member whose previous_id is
+    // empty (the block root) under range:b.md.
+    let begin = std::fs::read_dir(t.0.join(".omd/commits")).unwrap()
+        .flatten()
+        .find_map(|e| {
+            let txt = std::fs::read_to_string(e.path()).ok()?;
+            if txt.contains("kind = \"atomic_begin\"") {
+                Some(e.path().file_stem().unwrap().to_string_lossy().to_string())
+            } else { None }
+        }).expect("a BEGIN commit exists");
+    // Reset b's range to the block BEGIN — removed segment = commit+link+end.
+    let (c, o, e) = t.run(&["commit", "reset", "b.md", "--reason", &begin]);
+    assert_eq!(c, 0, "{o} {e}");
+    let st2 = t.state();
+    // The link created in the removed segment is withdrawn.
+    assert!(!st2.contains("[links."), "link withdrawn after reset: {st2}");
+}

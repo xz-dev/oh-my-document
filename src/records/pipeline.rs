@@ -86,6 +86,48 @@ fn with_content(version: &SourceVersion) -> SourceVersion {
 
 /// Full pipeline for one file commit: observe → version → commit → publish.
 /// Returns the derived commit id hex. `expected` is checked under the lock.
+/// Commit a command-sourced version: run `exe argv` in `project_root`,
+/// capture complete stdout as the version's content, and record
+/// `Acquisition::Command`. Only `exit 0` produces content — a failed run
+/// keeps the previous version and is an error, never partial output.
+pub fn commit_command_source(
+    store: &mut Store,
+    probe: &mut dyn PublishProbe,
+    rng: &dyn Rng,
+    clock: &dyn Clock,
+    node_key: &str,
+    exe: &str,
+    argv: &[String],
+    project_root: &Path,
+    kind: CommitKind,
+    payload: serde_json::Map<String, serde_json::Value>,
+    expected: &Expected,
+) -> Result<String, PipelineError> {
+    store.lock()?;
+    store.check_expected(expected)?;
+    let out = crate::sources::command::observe_command(exe, argv, project_root)
+        .map_err(PipelineError::Source)?;
+    let obs = out.into_observation()
+        .ok_or(PipelineError::Source(SourceError::Command))?;
+    let acquisition = Acquisition::Command {
+        executable: exe.into(),
+        args: argv.to_vec(),
+    };
+    let version = make_version(rng, &obs, acquisition);
+    let version = with_content(&version);
+    let prev = store.state().tips.get(node_key).cloned().unwrap_or_default();
+    let is_first = !store.state().tips.contains_key(node_key);
+    let commit = make_commit(rng, clock, kind, &prev, &version, payload);
+    commit.validate(is_first).map_err(|e| PipelineError::Commit(e.to_string()))?;
+    let cid = commit.derive_id(&obs.bytes).map_err(|e| PipelineError::Commit(e.to_string()))?.to_hex();
+    let mut new_state: State = store.state().clone();
+    new_state.publication += 1;
+    new_state.tips.insert(node_key.to_string(), cid.clone());
+    new_state.retained.push(cid.clone());
+    store.publish(probe, &commit, &cid, Some(&version), Some(&obs.bytes), new_state)?;
+    Ok(cid)
+}
+
 pub fn commit_file(
     store: &mut Store,
     probe: &mut dyn PublishProbe,
@@ -606,24 +648,26 @@ pub fn apply_reset_to_state<F>(
 ) where
     F: FnMut(&str) -> Option<(CommitKind, String)>,
 {
+    // The removed segment = commits between the OLD tip and the landing
+    // point — i.e. the OLD tip's descendants down to `actual`. Capture the
+    // old tip BEFORE moving it, then walk old-tip → actual.
+    let old_tip = state.tips.get(node_key).cloned().unwrap_or_default();
     // Move the node tip to the landing point (empty = withdraw chain).
     if actual.is_empty() {
         state.tips.remove(node_key);
     } else {
         state.tips.insert(node_key.to_string(), actual.to_string());
     }
-    // Commits removed by the reset = the chain between the OLD tip and the
-    // landing point. Walk old-tip → actual, collecting withdrawn ids.
+    // Commits removed by the reset = old-tip → actual (successor direction).
     let mut removed: Vec<String> = Vec::new();
-    // (We don't have the old tip here — caller passes it via `requested`'s
-    // chain. Walk from `requested` down to `actual`.)
-    let mut cur = requested.to_string();
+    let mut cur = old_tip;
     let mut guard = 0usize;
     while !cur.is_empty() && cur != actual && guard < 100_000 {
         removed.push(cur.clone());
         cur = lookup(&cur).map(|(_, p)| p).unwrap_or_default();
         guard += 1;
     }
+    let _ = requested; // landing-point arg kept for the report
     // Withdraw link/adapt records whose *creating* commit is in `removed`.
     // A link's creation commit id is its value's `created_by` field.
     let removed_set: std::collections::BTreeSet<&String> = removed.iter().collect();
@@ -706,6 +750,27 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
                             locate.entry(range_key.to_string())
                                 .or_default()
                                 .push(format!("ambiguous: {} candidates for '{}'", cands.len(), frag));
+                        } else if cands.len() == 1 && cands[0] != s as usize {
+                            // Pure position move: the fragment survives intact
+                            // but at a NEW offset — a candidate migration the
+                            // spec requires explicit review for, never an
+                            // auto-kept confirmation, never a silent CLEAN.
+                            locate.entry(range_key.to_string())
+                                .or_default()
+                                .push(format!("moved: fragment now at {} (was {}), needs review", cands[0], s));
+                        }
+                        // Myers dirty check: a hunk overlapping the recorded
+                        // range marks it dirty even when the fragment still
+                        // locates — in-range edits always need review.
+                        let hunks = crate::relations::diff::diff_text(&old, &cur);
+                        let ranges = [crate::relations::range::Range {
+                            start: s, end: e,
+                            mode: crate::relations::range::Mode::Text,
+                        }];
+                        if crate::relations::diff::dirtied_by(&hunks, &ranges)[0] {
+                            dirty.entry(range_key.to_string())
+                                .or_insert_with(Vec::new)
+                                .push(format!("in-range edit at {}", tip_id));
                         }
                     }
                 }

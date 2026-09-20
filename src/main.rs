@@ -38,6 +38,13 @@ struct Cli {
     #[arg(long, global = true)]
     encoding: Option<String>,
 
+    /// Acquisition source-ref for init/commit (`--source-ref`).
+    /// `command::<exe>::<JSON argv>` runs the command and records its stdout
+    /// as the version's `Acquisition::Command` (vs a file read). Only when
+    /// the flag is given does the command run — never on config load.
+    #[arg(long, global = true)]
+    source_ref: Option<String>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -611,18 +618,33 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                         }
                     }
                 }
-                // Resolve encoding: --encoding flag > recorded > file cfg
-                // > project default > user default > UTF-8.
-                let enc = omd::sources::encoding::resolve(&omd::sources::encoding::EncodingChoice {
-                    cli: cli.encoding.clone(),
-                    recorded: None, file_config: None,
-                    project_default: None, user_default: None,
-                });
-                pipeline::commit_file(
-                    &mut store, &mut NoProbe, &OsRng, clock,
-                    &node, Path::new(path), kind, payload, &Expected::default(),
-                    Some(&enc),
-                ).map_err(|e| e.to_string())?
+                // Command source: `--source-ref 'command::<exe>::<args>'`
+                // runs the command and records Acquisition::Command.
+                if let Some(sr) = &cli.source_ref {
+                    if let Ok((exe, argv)) = omd::sources::command::parse_command_ref(sr) {
+                        let proj = std::env::current_dir().map_err(|e| e.to_string())?;
+                        pipeline::commit_command_source(
+                            &mut store, &mut NoProbe, &OsRng, clock,
+                            &node, &exe, &argv, &proj,
+                            kind, payload.clone(), &Expected::default(),
+                        ).map_err(|e| e.to_string())?
+                    } else {
+                        return Err(format!("--source-ref not a command ref: {sr}"));
+                    }
+                } else {
+                    // Resolve encoding: --encoding flag > recorded > file cfg
+                    // > project default > user default > UTF-8.
+                    let enc = omd::sources::encoding::resolve(&omd::sources::encoding::EncodingChoice {
+                        cli: cli.encoding.clone(),
+                        recorded: None, file_config: None,
+                        project_default: None, user_default: None,
+                    });
+                    pipeline::commit_file(
+                        &mut store, &mut NoProbe, &OsRng, clock,
+                        &node, Path::new(path), kind, payload, &Expected::default(),
+                        Some(&enc),
+                    ).map_err(|e| e.to_string())?
+                }
             };
             // Create the requested links inside the block, then close it.
             // --link-from/--link-to connect RANGE nodes: the committing node

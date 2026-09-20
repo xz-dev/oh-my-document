@@ -110,42 +110,11 @@ fn reset_to_ordinary_commit_outside_block_restores() {
     assert_eq!(land, ResetLanding::RestoreTarget("x".into()));
 }
 
-#[test]
-fn interior_commit_advances_before_end() {
-    // Spec: a successful interior commit advances the range's current state
-    // immediately — it is not a hidden draft waiting on end. open_blocks
-    // only tracks closure; it does not gate the tip.
-    let mut s = AtomicStack::default();
-    s.begin("begin1");
-    // Interior commit b1 lands and becomes the tip while the block is open.
-    assert!(s.is_open());
-    // The tip advance is orthogonal to closure — the block stays open but
-    // b1's effect is already current (modeled by tip move in state).
-}
-
-#[test]
-fn end_does_not_hide_prior_interior_state() {
-    // Spec: writing end closes the block, it does NOT first-publish the
-    // already-advanced interior. So after end the current range stays as the
-    // interior commit set it — not reverted to pre-begin.
-    let mut s = AtomicStack::default();
-    s.begin("b");
-    assert_eq!(s.end(), Some("b".into()));
-    assert!(!s.is_open());
-    // Interior commits remain the tip — end only flips closure, not content.
-}
-
-#[test]
-fn link_other_end_chain_not_merged_into_block() {
-    // Spec: a block-scoped link to another range must NOT pull the other's
-    // chain into this block. Membership is per-node-chain only.
-    let mut a_block = AtomicStack::default();
-    let mut b_block = AtomicStack::default();
-    a_block.begin("a_begin");
-    // L1 links A→B; only A's chain has the open block.
-    assert!(a_block.is_open());
-    assert!(!b_block.is_open()); // B's chain unaffected by A's block
-}
+// NOTE: `interior_commit_advances_before_end`, `end_does_not_hide_prior_interior_state`,
+// `link_other_end_chain_not_merged_into_block` removed — they were vacuous
+// struct-level tautologies. Their spec clauses are covered by real executed
+// checks: tests/reset.rs (block tip movement, link withdrawal) and
+// tests/guards.rs (per-chain block/link isolation).
 
 #[test]
 fn file_reset_restores_recorded_child_tips_exactly() {

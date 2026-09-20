@@ -34,12 +34,10 @@ fn out_of_bounds_rejected_not_clamped() {
 }
 
 #[test]
-fn same_coordinates_independent_ranges() {
-    // Two ranges at identical coords are distinct tracked objects.
-    let a = Range::new(0, 5, Mode::Text, 10).unwrap();
-    let b = Range::new(0, 5, Mode::Text, 10).unwrap();
-    assert_eq!(a, b); // equal coords, but they are independent *commits*
-}
+// `same_coordinates_independent_ranges` removed — asserting two equal-coord
+// Range structs are equal says nothing about independent chain identity.
+// Real coverage: commit without --id mints a nonce'd independent chain
+// (src/relations/node.rs range_key_nonce + commit arm).
 
 #[test]
 fn byte_mode_counts_offsets() {

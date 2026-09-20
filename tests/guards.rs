@@ -197,3 +197,42 @@ fn duplicate_check_scoped_per_invocation() {
     assert_eq!(c1, 0);
     assert_eq!(c2, 0, "same --link-from across invocations is allowed (distinct links)");
 }
+
+// Re-audit BUG3: --source-ref 'command::…' records Acquisition::Command and
+// verify reports it `unverified` when the command isn't permitted to run.
+#[test]
+fn command_source_records_acquisition_and_unverified() {
+    let t = T::new();
+    // init the file as a command-sourced version.
+    let (c, o, e) = t.run(&["commit", "init", "f.txt",
+                          "--source-ref", "command::echo::[\"hi\"]"]);
+    assert_eq!(c, 0, "{o} {e}");
+    // The version's acquisition is Command, not File.
+    let mut found = false;
+    if let Ok(rd) = std::fs::read_dir(t.0.join(".omd/versions")) {
+        for en in rd.flatten() {
+            if let Ok(txt) = std::fs::read_to_string(en.path()) {
+                if txt.contains("[acquisition.command]") { found = true; }
+            }
+        }
+    }
+    assert!(found, "Acquisition::Command recorded");
+    // verify without --run-command reports it unverified, not clean.
+    let (_, o, _) = t.run(&["verify", "f.txt"]);
+    assert!(o.contains("unverified"), "unverified reported: {o}");
+}
+
+// Re-audit BUG2: a pure position move (fragment intact at a new offset) is
+// a candidate migration requiring review — never a silent CLEAN.
+#[test]
+fn pure_position_move_reports_moved_not_clean() {
+    let t = T::new();
+    t.write("a.md", "HEADERSPLITMORE");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r"]);
+    // Insert a char before the range — fragment now at offset 1, text intact.
+    t.write("a.md", "XHEADERSPLITMORE");
+    let (_, o, _) = t.run(&["verify", "a.md"]);
+    assert!(o.contains("moved") || o.contains("needs review"),
+            "moved/review reported: {o}");
+}
