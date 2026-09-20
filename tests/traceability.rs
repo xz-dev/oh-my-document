@@ -231,3 +231,30 @@ fn repeated_tag_reports_current_content() {
     let st = std::fs::read_to_string(t.0.join(".omd/state.toml")).unwrap();
     assert!(st.contains("v1") || st.contains("file:a.md"), "tag recorded: {st}");
 }
+
+// 13.x/9.1: meta dir discovery — running from a subdirectory finds the
+// ancestor .omd/ store; OMD_META env overrides.
+#[test]
+fn meta_discovery_from_subdirectory() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    // From a nested subdir, no --meta: ancestor .omd found.
+    std::fs::create_dir_all(t.0.join("sub/deep")).unwrap();
+    let o = Command::new(omd()).arg("list")
+        .current_dir(t.0.join("sub/deep")).output().unwrap();
+    let s = String::from_utf8_lossy(&o.stdout);
+    assert!(s.contains("file:a.md"), "ancestor .omd discovered: {s}");
+}
+
+#[test]
+fn omd_meta_env_overrides() {
+    let t = T::new();
+    let store = t.0.join("custom-store");
+    let o = Command::new(omd()).arg("list")
+        .env("OMD_META", &store)
+        .current_dir(&t.0).output().unwrap();
+    // A fresh OMD_META dir gets initialized and reports ok.
+    let s = String::from_utf8_lossy(&o.stdout);
+    assert!(s.contains("ok") || store.exists(), "OMD_META honored: {s}");
+}
