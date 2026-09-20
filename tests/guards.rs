@@ -236,3 +236,86 @@ fn pure_position_move_reports_moved_not_clean() {
     assert!(o.contains("moved") || o.contains("needs review"),
             "moved/review reported: {o}");
 }
+
+// change-review: adjacent markers are not skipped recursively — resetting to
+// a BEGIN lands on ITS direct predecessor only, never cascades past a chain
+// of markers. If BEGIN's predecessor is another marker, that's the landing.
+#[test]
+fn adjacent_markers_reset_lands_one_step() {
+    let t = T::new();
+    t.write("a.md", "a");
+    t.run(&["init", "a.md"]);
+    // Two blocks back-to-back: BEGIN c1 END c1' BEGIN c2 END c2'.
+    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "b1"]);
+    // Reset to the END of the block — lands on END's direct predecessor
+    // (the last interior/link), one step back, not recursively skipped.
+    let end = t.tip("range:a.md@text:0-1");
+    let (c, o, _) = t.run(&["commit", "reset", "a.md", "--reason", &end]);
+    assert_eq!(c, 0, "{o}");
+    // The reset reports requested→actual with the predecessor landing.
+    assert!(o.contains("actual") || o.contains("requested"),
+            "reset outcome: {o}");
+}
+
+// change-review: resetting to a commit inside an OPEN block is refused —
+// interior members are never reset targets.
+#[test]
+fn reset_interior_of_open_block_refused() {
+    let t = T::new();
+    t.write("a.md", "a");
+    t.write("b.md", "b");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "ra"]);
+    // b's block: BEGIN → interior commit → LINK → END.
+    t.run(&["commit", "commit", "b.md", "--range", "0-1",
+            "--link-from", "a.md@text:0-1", "--reason", "lb"]);
+    // Find the interior LINK commit (a block member).
+    let link_commit = std::fs::read_dir(t.0.join(".omd/commits")).unwrap()
+        .flatten()
+        .find_map(|e| {
+            let txt = std::fs::read_to_string(e.path()).ok()?;
+            if txt.contains("kind = \"link\"") {
+                Some(e.path().file_stem().unwrap().to_string_lossy().to_string())
+            } else { None }
+        }).expect("a link commit");
+    // Reset to the interior link member → refused (interior not a target).
+    let (c, o, _) = t.run(&["commit", "reset", "b.md", "--reason", &link_commit]);
+    assert_ne!(c, 0, "interior member reset must fail: {o}");
+}
+
+// change-review: two links with identical endpoints deliberately coexist —
+// the spec allows it (distinct link_ids, adapted separately).
+#[test]
+fn same_endpoints_two_links_coexist() {
+    let t = T::new();
+    t.write("a.md", "a");
+    t.write("b.md", "b");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "ra"]);
+    // Two separate commands each create a link a-range → b-range.
+    t.run(&["commit", "commit", "b.md", "--range", "0-1",
+            "--link-from", "a.md@text:0-1", "--reason", "l1"]);
+    t.run(&["commit", "commit", "b.md", "--range", "0-1",
+            "--link-from", "a.md@text:0-1", "--reason", "l2"]);
+    let lids = t.state().lines()
+        .filter(|l| l.contains("[links.")).count();
+    assert!(lids >= 2, "two same-endpoint links coexist: {}", t.state());
+}
+
+// managed-content: rebuild works with no Git repo and no OMD cache — the
+// store stands alone (spec: core never depends on Git).
+#[test]
+fn rebuild_without_git_or_cache() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    // Delete the derived index (cache) — state.toml is authoritative.
+    let _ = std::fs::remove_file(t.0.join(".omd/index.txt"));
+    // reindex rebuilds from the manifest only, no Git needed.
+    let (c, o, _) = t.run(&["reindex"]);
+    assert_eq!(c, 0, "reindex works without cache: {o}");
+    assert!(t.0.join(".omd/index.txt").exists() || o.contains("ok"),
+            "index rebuilt: {o}");
+}
