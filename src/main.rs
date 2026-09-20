@@ -26,6 +26,12 @@ struct Cli {
     #[arg(long, global = true, value_name = "DIR")]
     meta: Option<PathBuf>,
 
+    /// Permit command sources to run during this verify/check
+    /// (`--run-command` / `--run-command=false`). One call's flag never
+    /// carries into another; built-in default is `false`.
+    #[arg(long, global = true, default_missing_value = "true", num_args = 0..=1)]
+    run_command: Option<bool>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -555,7 +561,9 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
         }
         Cmd::Verify { .. } => {
             let store = Store::open(&root).map_err(|e| e.to_string())?;
-            let rep = pipeline::verify(&store);
+            let run_cmd = omd::sources::permission::may_run(
+                &omd::sources::permission::RunChoice { cli: cli.run_command, config: None });
+            let rep = pipeline::verify(&store, run_cmd);
             Ok(serde_json::to_value(rep).unwrap())
         }
         Cmd::Check { path } => {

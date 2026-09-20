@@ -652,11 +652,17 @@ pub struct VerifyReport {
     /// Tracked file paths that vanished without a tombstone — `missing`,
     /// never auto-deleted nor silently OK.
     pub missing: Vec<String>,
+    /// Command-sourced versions verify could NOT check because running the
+    /// command wasn't permitted (`may_run` false). `unverified` is honest
+    /// incomplete state — never counted as pass, never a silent failure.
+    pub unverified: Vec<String>,
 }
 
 /// Run verify against the persisted state — reads what's on disk, never
-/// fabricates a passing result from a moving target.
-pub fn verify(store: &Store) -> VerifyReport {
+/// fabricates a passing result from a moving target. `run_cmd` is the
+/// invocation's `--run-command` decision (from `may_run`); command-sourced
+/// versions report `unverified` when running isn't permitted.
+pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
     let st = store.state();
     let open_blocks: Vec<String> = st
         .open_blocks
@@ -725,7 +731,22 @@ pub fn verify(store: &Store) -> VerifyReport {
             }
         }
     }
+    // Command-sourced versions: without `run_cmd` permission we cannot get
+    // their current output — report them `unverified` (incomplete), never
+    // a fabricated pass and never a hidden failure.
+    let mut unverified: Vec<String> = Vec::new();
+    if !run_cmd {
+        for (k, tip) in &st.tips {
+            if let Ok(c) = store.read_commit(tip) {
+                if let Ok(v) = store.read_version(&c.content_ref) {
+                    if let crate::records::version::Acquisition::Command { .. } = v.acquisition {
+                        unverified.push(format!("{k} (command source, not run)"));
+                    }
+                }
+            }
+        }
+    }
     let ok = open_blocks.is_empty() && obligations.is_empty() && dirty.is_empty()
-        && locate.is_empty() && missing.is_empty();
-    VerifyReport { ok, open_blocks, obligations, dirty, locate, missing }
+        && locate.is_empty() && missing.is_empty() && unverified.is_empty();
+    VerifyReport { ok, open_blocks, obligations, dirty, locate, missing, unverified }
 }
