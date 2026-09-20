@@ -1214,12 +1214,14 @@ fn reader_detects_changed_participant() {
     let t = T::new();
     t.write("a.md", "x");
     t.run(&["init", "a.md"]);
-    // Tamper: point a tip at a commit file that doesn't exist.
+    // Tamper: point the TIPS entry at a commit file that doesn't exist.
+    // (replace the tips line specifically — the id also appears in retained.)
     let st_path = t.0.join(".omd/state.toml");
     let st = std::fs::read_to_string(&st_path).unwrap();
+    let tip = t.tip("file:a.md");
     let tampered = st.replacen(
-        &t.tip("file:a.md"),
-        &"f".repeat(64), 1);
+        &format!("\"file:a.md\" = \"{tip}\""),
+        &format!("\"file:a.md\" = \"{}\"", "f".repeat(64)), 1);
     std::fs::write(&st_path, tampered).unwrap();
     // verify must not silently succeed on a tip pointing at nothing — the
     // reader detects the changed participant (non-zero exit + error).
