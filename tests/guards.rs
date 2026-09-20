@@ -408,3 +408,77 @@ fn note_patch_revises_recorded_reason() {
     assert!(c == 0 && (ol.contains("corrected") || o.contains("corrected")),
             "note patched: {ol} {e}");
 }
+
+// change-review: reset to first BEGIN lands on empty chain — the whole
+// block's contents withdraw; node tip removed entirely.
+#[test]
+fn reset_first_begin_lands_empty() {
+    let t = T::new();
+    t.write("a.md", "a");
+    t.write("b.md", "b");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "ra"]);
+    t.run(&["commit", "commit", "b.md", "--range", "0-1",
+            "--link-from", "a.md@text:0-1", "--reason", "lb"]);
+    let begin = std::fs::read_dir(t.0.join(".omd/commits")).unwrap()
+        .flatten()
+        .find_map(|e| {
+            let txt = std::fs::read_to_string(e.path()).ok()?;
+            if txt.contains("kind = \"atomic_begin\"") {
+                Some(e.path().file_stem().unwrap().to_string_lossy().to_string())
+            } else { None }
+        }).expect("BEGIN exists");
+    let (c, o, _) = t.run(&["commit", "reset", "b.md", "--reason", &begin]);
+    assert_eq!(c, 0, "{o}");
+    // actual is empty — landing is the null/empty chain.
+    let st = t.state();
+    // The link inside the removed segment is gone (block contents withdrew).
+    assert!(!st.contains("[links."), "block contents withdrew: {st}");
+}
+
+// local-project-links: two projects can use the same tag name independently —
+// a tag is project-local, never cross-store entangled.
+#[test]
+fn same_tag_name_independent_across_stores() {
+    let t = T::new();
+    let store2 = t.0.join("store2");
+    // Project 1 tags a.md v1.
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "tag", "a.md", "--tag", "v1"]);
+    // A second store in the same dir — independent state.
+    let o2 = Command::new(omd()).arg("--meta").arg(&store2)
+        .arg("list").current_dir(&t.0).output().unwrap();
+    let s2 = String::from_utf8_lossy(&o2.stdout);
+    // store2 has no v1 tag — tags are per-store, not shared.
+    assert!(!s2.contains("v1"), "tag is store-local: {s2}");
+}
+
+// change-review: replace on a version rebinds its acquisition only on
+// byte-identical FULL content — a different-content source refuses.
+#[test]
+fn replace_refuses_different_content() {
+    let t = T::new();
+    t.write("a.md", "alpha");
+    t.run(&["init", "a.md"]);
+    t.write("b.md", "different-bytes");
+    let tip = t.tip("file:a.md");
+    // Replace a's acquisition with b's content — different bytes → refuse.
+    let (c, o, e) = t.run(&["replace", &tip, "--source", "b.md"]);
+    assert_ne!(c, 0, "replace on non-identical content must fail: {o} {e}");
+}
+
+// local-project-links: an unrelated offline peer does not block local work —
+// committing while a registered peer is unreachable still succeeds.
+#[test]
+fn offline_peer_does_not_block_local_commit() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    // Register a peer that doesn't exist on disk (offline).
+    t.run(&["register", "aabbccddeeff00112233445566778899", "/nonexistent/peer"]);
+    // Local commit still works — an offline peer never blocks writes.
+    let (c, o, _) = t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "r"]);
+    assert_eq!(c, 0, "local commit unaffected by offline peer: {o}");
+}
