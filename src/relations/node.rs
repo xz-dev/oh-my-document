@@ -12,15 +12,21 @@ pub fn file_key(path: &str) -> String {
     format!("file:{path}")
 }
 
-/// Key for a range node: `range:<path>@<mode>:<start>-<end>`.
-/// The span is part of identity — `--range` on an existing key targets that
-/// chain; a different span is a different chain entirely.
+/// Key for a range node: `range:<path>@<mode>:<start>-<end>` for the
+/// canonical whole-span chain, or `range:<path>@<mode>:<start>-<end>#<nonce>`
+/// for a duplicate-span independent chain. The span is part of identity; a
+/// nonce distinguishes two tracked objects over identical coordinates.
 pub fn range_key(path: &str, mode: Mode, start: u64, end: u64) -> String {
     let m = match mode {
         Mode::Text => "text",
         Mode::Byte => "byte",
     };
     format!("range:{path}@{m}:{start}-{end}")
+}
+
+/// A duplicate-coordinate independent range chain (`#nonce` suffix).
+pub fn range_key_nonce(path: &str, mode: Mode, start: u64, end: u64, nonce: &str) -> String {
+    format!("{}#{}", range_key(path, mode, start, end), nonce)
 }
 
 /// Parse a `--range` arg like `0-5` or `byte:0-5` into (mode, start, end).

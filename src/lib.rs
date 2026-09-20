@@ -1,6 +1,7 @@
 //! OMD core library: records/storage, sources/diff, relations/checks.
 //! The CLI crate surface stays thin; all behavior lives behind this library.
 
+pub mod output;
 pub mod records;
 pub mod relations;
 pub mod sources;

@@ -55,6 +55,9 @@ enum Cmd {
         #[arg(long = "link-from")] link_from: Vec<String>,
         /// `commit ... --link-to R` — create this→R link in the block.
         #[arg(long = "link-to")] link_to: Vec<String>,
+        /// `--id <commit>` — append to an existing range chain vs create a new
+        /// one (same coords without --id = a new independent range object).
+        #[arg(long)] id: Option<String>,
     },
     /// `omd verify` — full-store check (distinct from `commit verify <path>`).
     Verify { path: Option<String> },
@@ -169,7 +172,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             ).map_err(|e| e.to_string())?;
             Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": format!("{kind:?}") }))
         }
-        Cmd::Commit { kind, path, reason, range, timestamp, source, target, link_id, changes, stop, no_reason, link_from, link_to } => {
+        Cmd::Commit { kind, path, reason, range, timestamp, source, target, link_id, changes, stop, no_reason, link_from, link_to, id } => {
             let kind = match kind.as_str() {
                 "init" => CommitKind::Init,
                 "commit" => CommitKind::Commit,
@@ -208,13 +211,23 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             }
             // Resolve the node: --range targets a first-class range chain
             // mounted under the file; bare path targets the file chain.
-            let node = match range {
-                Some(r) => {
+            let node = match (range, id) {
+                // --id names an existing chain node key to append to.
+                (_, Some(node_id)) => node_id.clone(),
+                // New independent range over identical coords gets a nonce.
+                (Some(r), None) => {
                     let (mode, s, e) = omd::relations::node::parse_range_arg(r)
                         .ok_or_else(|| format!("bad --range: {r}"))?;
-                    omd::relations::node::range_key(path, mode, s, e)
+                    let base = omd::relations::node::range_key(path, mode, s, e);
+                    if store.state().tips.contains_key(&base) {
+                        // Same coords, no --id: a NEW independent object.
+                        let nonce = format!("{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos());
+                        omd::relations::node::range_key_nonce(path, mode, s, e, &nonce)
+                    } else {
+                        base
+                    }
                 }
-                None => format!("file:{path}"),
+                (None, None) => format!("file:{path}"),
             };
             let mut payload = serde_json::Map::new();
             payload.insert("path".into(), path.clone().into());

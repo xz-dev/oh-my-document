@@ -6,8 +6,12 @@
 //! an index snapshot. Decode happens only in text mode under a chosen
 //! encoding; byte mode never decodes.
 
+pub mod command;
+pub mod discovery;
 pub mod encoding;
 pub mod file;
+pub mod permission;
+pub mod reference;
 
 use std::path::Path;
 
