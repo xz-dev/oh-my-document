@@ -1063,13 +1063,21 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
             dirty.insert(node.clone(), ids);
         }
     }
+    // Command/file observation failures collect here — verify never reports
+    // clean on content it could not actually observe.
+    let mut unverified: Vec<String> = Vec::new();
     // Locate diagnostics: a range node whose recorded fragment now matches
     // ambiguously in the current file is a problem — candidates reported, the
     // track is never silently re-pointed nor kept as a valid confirmation.
     let mut locate: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-    let mut scan = |range_key: &str, tip_id: &str| {
+    let mut scan = |range_key: &str, tip_id: &str, unverified: &mut Vec<String>| {
         // Recover the recorded fragment from the range's tip commit's version
         // and count its occurrences in the *current* file. >1 = ambiguous.
+        // Any read/decode failure pushes `unverified` — verify never reports
+        // clean on content it could not actually observe.
+        let fail = |unverified: &mut Vec<String>, why: String| {
+            unverified.push(format!("{range_key}: {why}"));
+        };
         if let Ok(commit) = store.read_commit(tip_id) {
             let path = commit
                 .payload
@@ -1083,13 +1091,35 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-            if let (Some((_, s, e)), Ok(cur)) = (
-                crate::relations::node::parse_range_arg(&range_arg),
-                std::fs::read_to_string(&path),
-            ) && let Ok(ver) = store.read_version(&commit.content_ref)
-                && let Ok(old_bytes) = store.read_content(&ver.sha256)
+            let ver = match store.read_version(&commit.content_ref) {
+                Ok(v) => v,
+                Err(_) => return fail(unverified, format!("version record missing ({})", commit.content_ref)),
+            };
+            let old_bytes = match store.read_content(&ver.sha256) {
+                Ok(b) => b,
+                Err(_) => return fail(unverified, format!("content blob missing {}", ver.sha256)),
+            };
+            // Decode CURRENT bytes under the version's recorded acquisition
+            // encoding — a non-UTF-8 recorded file is not invalid, it just
+            // needs its own decoder (same path commit uses).
+            let recorded_enc = match &ver.acquisition {
+                crate::records::version::Acquisition::File { encoding, .. } => encoding.clone(),
+                _ => "utf-8".to_string(),
+            };
+            let cur_bytes = match std::fs::read(&path) {
+                Ok(b) => b,
+                Err(e) => return fail(unverified, format!("cannot read {path}: {e}")),
+            };
+            let cur = match crate::sources::decode(&cur_bytes, &recorded_enc) {
+                Ok(s) => s,
+                Err(_) => return fail(unverified, format!("cannot decode {path} as {recorded_enc}")),
+            };
+            let old = match crate::sources::decode(&old_bytes, &recorded_enc) {
+                Ok(s) => s,
+                Err(_) => return fail(unverified, format!("recorded content undecodable as {recorded_enc}")),
+            };
+            if let Some((_, s, e)) = crate::relations::node::parse_range_arg(&range_arg)
             {
-                let old = String::from_utf8_lossy(&old_bytes);
                 let frag: String = old
                     .chars()
                     .skip(s as usize)
@@ -1138,7 +1168,7 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
     };
     for (k, tip) in &st.tips {
         if crate::relations::node::is_range_key(k) {
-            scan(k, tip);
+            scan(k, tip, &mut unverified);
         }
     }
     // Missing-source diagnostics: a tracked file node whose registered path
@@ -1172,7 +1202,6 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
     // Command-sourced versions: without `run_cmd` permission we cannot get
     // their current output — report them `unverified` (incomplete), never
     // a fabricated pass and never a hidden failure.
-    let mut unverified: Vec<String> = Vec::new();
     let proj_root = std::env::current_dir().unwrap_or_default();
     for (k, tip) in &st.tips {
         if let Ok(c) = store.read_commit(tip)
@@ -1188,12 +1217,20 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
                 // output → dirty; identical → stays confirmed.
                 match crate::sources::command::observe_command(executable, args, &proj_root) {
                     Ok(out) if out.exit_ok => {
-                        let recorded = store.read_content(&v.sha256).unwrap_or_default();
-                        if out.stdout != recorded {
-                            dirty
-                                .entry(k.clone())
-                                .or_insert_with(Vec::new)
-                                .push(format!("command output changed ({})", tip));
+                        // A missing recorded blob is not "empty output" — it
+                        // is a store-integrity failure, never compared equal.
+                        match store.read_content(&v.sha256) {
+                            Ok(recorded) => {
+                                if out.stdout != recorded {
+                                    dirty
+                                        .entry(k.clone())
+                                        .or_insert_with(Vec::new)
+                                        .push(format!("command output changed ({})", tip));
+                                }
+                            }
+                            Err(_) => unverified.push(format!(
+                                "{k} (recorded content blob missing {})", v.sha256
+                            )),
                         }
                     }
                     _ => {
@@ -1247,19 +1284,32 @@ pub fn range_needs_review(store: &Store, tip_id: &str) -> bool {
         Some(t) => t,
         None => return false,
     };
-    let cur = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(_) => return true,
-    };
     let ver = match store.read_version(&commit.content_ref) {
         Ok(v) => v,
         Err(_) => return false,
     };
     let old_bytes = match store.read_content(&ver.sha256) {
         Ok(b) => b,
-        Err(_) => return false,
+        Err(_) => return true, // missing blob = cannot prove clean → block
     };
-    let old = String::from_utf8_lossy(&old_bytes);
+    // Decode both sides under the version's recorded acquisition encoding —
+    // a non-UTF-8 file fails read_to_string but is perfectly decodable here.
+    let recorded_enc = match &ver.acquisition {
+        crate::records::version::Acquisition::File { encoding, .. } => encoding.clone(),
+        _ => "utf-8".to_string(),
+    };
+    let cur_bytes = match std::fs::read(&path) {
+        Ok(b) => b,
+        Err(_) => return true,
+    };
+    let cur = match crate::sources::decode(&cur_bytes, &recorded_enc) {
+        Ok(s) => s,
+        Err(_) => return true, // cannot decode = cannot prove clean → block
+    };
+    let old = match crate::sources::decode(&old_bytes, &recorded_enc) {
+        Ok(s) => s,
+        Err(_) => return true,
+    };
     let frag: String = old
         .chars()
         .skip(s as usize)

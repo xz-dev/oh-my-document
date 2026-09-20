@@ -69,7 +69,7 @@ pub fn observe_file(
 /// big5, euc-jp/kr, koi8-r, …). An unknown label or undecodable input is an
 /// error, never a silent fallback — a recorded encoding freezes that
 /// observation, never reinterprets history.
-fn decode(bytes: &[u8], encoding: &str) -> Result<String, SourceError> {
+pub(crate) fn decode(bytes: &[u8], encoding: &str) -> Result<String, SourceError> {
     let enc = encoding_rs::Encoding::for_label(encoding.trim().as_bytes())
         .ok_or(SourceError::Encoding)?;
     // decode_without_bom_handling_and_without_replacement returns None on
