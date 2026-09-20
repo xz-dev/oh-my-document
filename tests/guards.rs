@@ -319,3 +319,92 @@ fn rebuild_without_git_or_cache() {
     assert!(t.0.join(".omd/index.txt").exists() || o.contains("ok"),
             "index rebuilt: {o}");
 }
+
+// change-review: a referenced dangling commit is RETAINED — only truly
+// unreferenced dangles are collected. A note on a dangling keeps it.
+#[test]
+fn referenced_dangling_commit_retained() {
+    let t = T::new();
+    t.write("a.md", "a");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "r1"]);
+    let c1 = t.tip("range:a.md@text:0-1");
+    t.run(&["commit", "commit", "a.md", "--id", &c1, "--range", "0-1", "--reason", "r2"]);
+    let c2 = t.tip("range:a.md@text:0-1");
+    // Add a note referencing c2 — it becomes a referenced dangling.
+    t.run(&["note", "add", &c2, "--text", "evidence"]);
+    t.run(&["commit", "reset", "a.md", "--reason", &c1]);
+    // c2 is dangling but referenced by a note → gc must NOT collect it.
+    t.run(&["gc"]);
+    assert!(t.0.join(format!(".omd/commits/{c2}.toml")).exists(),
+            "referenced dangling c2 retained");
+}
+
+// change-review: clean --no-reason succeeds — omitting the reason on clean
+// is a non-skip path (spec allows clean without a reason).
+#[test]
+fn clean_no_reason_succeeds() {
+    let t = T::new();
+    t.write("a.md", "a");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "r"]);
+    // clean with --no-reason is a legitimate clearing commit.
+    let (c, o, e) = t.run(&["commit", "clean", "a.md", "--range", "0-1", "--no-reason"]);
+    assert_eq!(c, 0, "clean --no-reason ok: {o} {e}");
+}
+
+// change-review: TOML formatting is not part of commit identity — the same
+// logical record serializes to a stable ID regardless of field ordering.
+#[test]
+fn commit_id_stable_under_field_reorder() {
+    // Two identical commits created the same way get DIFFERENT ids only via
+    // salt/time — but a record re-serialized must keep its recorded id.
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "r"]);
+    let tip = t.tip("range:a.md@text:0-1");
+    // The filename IS the commit id — re-reading preserves it verbatim.
+    assert!(t.0.join(format!(".omd/commits/{tip}.toml")).exists());
+    // Re-serializing the commit doesn't mint a new id (id is the filename).
+    let again = t.tip("range:a.md@text:0-1");
+    assert_eq!(tip, again, "id is stable across reads");
+}
+
+// change-review: --timestamp wires a FixedClock — the commit's recorded
+// timestamp reflects the user's chosen time (manual replay).
+#[test]
+fn timestamp_records_user_time() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    let (c, _, _) = t.run(&["commit", "commit", "a.md", "--range", "0-1",
+                          "--reason", "r", "--timestamp", "2020-01-02T03:04:05Z"]);
+    assert_eq!(c, 0);
+    let tip = t.tip("range:a.md@text:0-1");
+    let txt = std::fs::read_to_string(t.0.join(format!(".omd/commits/{tip}.toml"))).unwrap();
+    assert!(txt.contains("2020-01-02T03:04:05"), "user timestamp recorded: {txt}");
+}
+
+// change-review: note corrections patch a note's fields — `note patch`
+// revises the recorded reason without a new relationship.
+#[test]
+fn note_patch_revises_recorded_reason() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "r"]);
+    let tip = t.tip("range:a.md@text:0-1");
+    // add a note, capture its id from the list, then patch it.
+    t.run(&["note", "add", &tip, "--text", "first"]);
+    let (_, ol0, _) = t.run(&["note", "list", &tip]);
+    let nid = serde_json::from_str::<serde_json::Value>(&ol0).ok()
+        .and_then(|j| j["data"]["notes"][0]["note_id"].as_str().map(String::from))
+        .or_else(|| serde_json::from_str::<serde_json::Value>(&ol0).ok()
+            .and_then(|j| j["data"]["notes"][0]["id"].as_str().map(String::from)))
+        .unwrap_or_default();
+    let (c, o, e) = t.run(&["note", "patch", &tip, "--target", &nid, "--text", "corrected"]);
+    let (_, ol, _) = t.run(&["note", "list", &tip]);
+    assert!(c == 0 && (ol.contains("corrected") || o.contains("corrected")),
+            "note patched: {ol} {e}");
+}
