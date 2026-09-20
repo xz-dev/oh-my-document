@@ -904,8 +904,10 @@ fn link_to_nonexistent_range_rejected() {
     t.write("a.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r"]);
-    // Linking FROM a real range TO a never-initialized range must fail.
-    let (c, o, e) = t.run(&["commit", "link", "range:a.md@text:0-5", "range:zz.md@text:0-9"]);
+    // Linking FROM a real range TO a never-initialized range must fail — the
+    // ENDPOINT-EXISTENCE guard, not a clap arg-parse error (--source/--target).
+    let (c, o, e) = t.run(&["commit", "link", "a.md",
+        "--source", "range:a.md@text:0-5", "--target", "range:zz.md@text:0-9"]);
     assert_ne!(c, 0, "phantom endpoint rejected: {o} {e}");
     assert!(format!("{o}{e}").contains("does not exist") || format!("{o}{e}").contains("error"),
             "diagnostic: {o} {e}");
@@ -955,7 +957,7 @@ fn combo_reports_early_success_member() {
     t.write("a.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r"]);
-    // Combo: valid link-from + invalid link-from — the failure is reported.
+    // Combo: valid link-from + an INVALID one — the endpoint guard fires.
     let (c, o, e) = t.run(&["commit", "commit", "a.md", "--range", "0-3",
         "--link-from", "a.md@text:0-5", "--link-from", "zz.md@text:0-9", "--reason", "r"]);
     assert_ne!(c, 0, "combo with bad member fails: {o} {e}");
@@ -1334,10 +1336,13 @@ fn timestamp_replay_records_time_not_conflict() {
     let (c, o, e) = t.run(&["commit", "commit", "a.md", "--range", "0-2",
         "--timestamp", "2020-01-01T00:00:00Z", "--reason", "replay"]);
     assert_eq!(c, 0, "timestamp accepted: {o} {e}");
-    // The recorded commit carries the replayed timestamp.
-    let st = t.state();
-    assert!(st.contains("2020-01-01") || t.tip("range:a.md@text:0-2").len() == 64,
-            "replay timestamp recorded");
+    // The recorded commit carries the replayed timestamp — strict check on
+    // the commit file, not a tautological tip-length fallback.
+    let tip = t.tip("range:a.md@text:0-2");
+    let commit_toml = std::fs::read_to_string(
+        t.0.join(format!(".omd/commits/{tip}.toml"))).unwrap_or_default();
+    assert!(commit_toml.contains("2020-01-01"),
+            "replay timestamp recorded on commit: {commit_toml}");
 }
 
 // change-review #16/#17: a range advances inside an open block before END —
@@ -1387,4 +1392,20 @@ fn framed_inputs_no_concat_confusion() {
     let id2 = c2.derive_id(b"bcd").unwrap().to_hex();
     assert_ne!(id1, id2,
             "field-boundary shift → different hash (framing prevents concat confusion)");
+}
+
+// change-review #16: verify FAILS while a block is open — the open BEGIN is
+// itself an outstanding obligation, reported in open_blocks.
+#[test]
+fn verify_fails_while_block_open() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "begin", "a.md"]);
+    let (_, o, _) = t.run(&["verify", "a.md"]);
+    let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
+    assert_eq!(j["data"]["ok"].as_bool(), Some(false),
+            "open block fails verify: {o}");
+    assert!(j["data"]["open_blocks"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
+            "open_blocks reported: {o}");
 }
