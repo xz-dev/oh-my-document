@@ -6,6 +6,7 @@ use std::rc::Rc;
 use omd::relations::{Node, NodeKind, chain_to_root, restore_range_tips};
 use omd::sources::{SourceError, file};
 use omd::testing::Sandbox;
+static TDIR_UNIQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[test]
 fn observe_reads_current_path_not_head() {
@@ -98,11 +99,9 @@ fn node_kinds_cover_root_file_range() {
 #[test]
 fn non_utf8_encoding_decodes() {
     let dir = std::env::temp_dir().join(format!(
-        "omd-enc-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "omd-enc-{}-{}",
+        std::process::id(),
+        TDIR_UNIQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&dir).unwrap();
     let p = dir.join("f.txt");

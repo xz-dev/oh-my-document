@@ -1,6 +1,7 @@
 //! Group 5.3/5.4: path lifecycle + import scope via the real binary.
 
 use std::process::Command;
+static TDIR_UNIQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn omd() -> std::path::PathBuf {
     if let Some(p) = option_env!("CARGO_BIN_EXE_omd") {
@@ -16,7 +17,11 @@ fn omd() -> std::path::PathBuf {
 struct T(std::path::PathBuf);
 impl T {
     fn new() -> Self {
-        let r = std::env::temp_dir().join(format!("omd-lc-{}", nanos()));
+        let r = std::env::temp_dir().join(format!(
+            "omd-lc-{}-{}",
+            std::process::id(),
+            TDIR_UNIQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
         std::fs::create_dir_all(&r).unwrap();
         Self(r)
     }
@@ -47,12 +52,6 @@ impl Drop for T {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
-}
-fn nanos() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_nanos()
 }
 
 #[test]

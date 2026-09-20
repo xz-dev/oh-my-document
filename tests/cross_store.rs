@@ -9,6 +9,7 @@
 //!   - A copied store dir refuses business writes + gc until re-registered.
 
 use std::process::Command;
+static TDIR_UNIQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 fn omd() -> std::path::PathBuf {
     if let Some(p) = option_env!("CARGO_BIN_EXE_omd") {
@@ -25,12 +26,10 @@ struct Store(std::path::PathBuf);
 impl Store {
     fn new(tag: &str) -> Self {
         let r = std::env::temp_dir().join(format!(
-            "omd-xs-{}-{}",
+            "omd-xs-{}-{}-{}",
             tag,
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            std::process::id(),
+            TDIR_UNIQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&r).unwrap();
         Self(r)
@@ -123,11 +122,9 @@ fn copied_store_refuses_writes_until_activated() {
     // Simulate a copy: clone .omd dir, then clear activation (as an
     // un-registered copy would be).
     let copy_root = std::env::temp_dir().join(format!(
-        "omd-copy-{}",
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
+        "omd-copy-{}-{}",
+        std::process::id(),
+        TDIR_UNIQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
     std::fs::create_dir_all(&copy_root).unwrap();
     // Copy the .omd tree.
