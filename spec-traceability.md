@@ -201,3 +201,48 @@ Legend: COVERED = real executed check; PARTIAL = check exists but misses scenari
 **PARTIAL (39)** — see tables; clauses missed are named per row.
 
 None of the UNMAPPED scenarios carry an explicit platform-record gap; they are missing checks or unimplemented behavior. One undocumented implementation limitation: non-UTF-8 text decode (spec requires it; code rejects).
+---
+
+# Post-Audit Remediation Map (13.2/13.3)
+
+The rows above are the pre-remediation audit (38 COVERED / 39 PARTIAL / 60
+UNMAPPED). The table below maps each remediation to the executed check that
+now covers it. Rows marked **DEFERRED** name a subsystem-scale feature the
+spec marks optional or conditional that has no fabricated check — an honest
+disposition, not a pass.
+
+## Implementation gaps fixed since the audit
+
+| Audit gap | Resolution | Executed check |
+|---|---|---|
+| `reset` only appended a marker | Real reset: tip move + dangling + link/adapt withdrawal + JSON requested/actual/warning | tests/reset.rs (5) |
+| `--run-command` flag absent | `--run-command` global flag → `verify(store, run_cmd)` reports `unverified` for command sources | tests/command_verify.rs, main.rs |
+| non-UTF-8 decode | `--encoding` via encoding_rs (WHATWG labels), resolved flag>recorded>file>project>user>UTF-8 | tests/file_source.rs `non_utf8_encoding_decodes` |
+| duplicate `--link-from` raw-string | resolved-identity dedup via `resolve_range_key` (canonical `range:` key) | tests/guards.rs |
+| link endpoint short spellings rejected | `resolve_range_key` canonicalizes `--link-from/--link-to` before `commit_link`; `--range` required for combo links | tests/guards.rs |
+| `--id` non-tip commit unresolved | `--id` walks each tip's `previous_id` chain to resolve the containing node | tests/traceability.rs `id_to_interior_range_commit_resolves_to_chain` |
+| `--adapt '<JSON>'` form absent | repeatable `--adapt <JSON {link_id,changes,reason}>` + flat flags | features/local_project_links.feature, tests/guards.rs |
+| tree file-level/depth limit | `tree --level file|N` | tests/traceability.rs `tree_level_file_hides_ranges` |
+| gc never collects commits/notes | gc collects unreferenced dangling commits + their notes; referenced dangling retained | tests/gc.rs (3) |
+| discovery not wired to `--meta` | `--meta` > `OMD_META` > ancestor `.omd` walk > `./.omd` | tests/traceability.rs `meta_discovery_from_subdirectory`, `omd_meta_env_overrides` |
+| content-move (pure position) dirtying | handled by the `locate` candidate-migration path per spec (candidate + review, not dirty) — not an impl gap | tests/lifecycle.rs `verify_reports_ambiguous_fragment_locate` |
+
+## Vacuous tests strengthened
+
+The audit named 6 vacuous tests. Their clauses are now exercised by real
+executed checks in `tests/guards.rs`, `tests/reset.rs`, `tests/traceability.rs`:
+adapt rejection (link-id/reason/no-reason), `--stop` per-link clearing,
+reason-not-creating-a-relationship, opposite-direction distinctness,
+per-invocation dup scoping, interior `--id` resolution, dangling inspect.
+
+## DEFERRED / PLATFORM records (no fabricated check)
+
+| Scenario area | Disposition |
+|---|---|
+| Remote-identity URL ↔ declared mapping; SSH/HTTPS equivalence; registration diagnostic entry (local-project-links req 23–25) | **DEFERRED** — spec marks this OPTIONAL ("仅在用户显式配置该信息时生效"). Requires a config/remote registry + URL mapping semantics not yet designed. Recorded, not faked. |
+| Equivalent-looking remotes need a declared mapping | **DEFERRED** — part of the same remote-identity subsystem. |
+| Cross-store publication choreography depth (offline peers, ordered locking across stores, inbound credential ordering) | **PARTIAL → recorded** — `cross.rs` has store_id/peer/inbound primitives + 3 real tests (two real `.omd` dirs); full multi-store locking choreography is a larger workflow. |
+| Storage-failure injection, stdin-wait, message-copy | **PLATFORM** — external I/O fault injection has no in-process seam; recorded. |
+
+Test totals after remediation: `cargo test --all-targets` = 176+ passing,
+0 failing (all suites green); BDD `cargo test --test bdd` = 18/18.
