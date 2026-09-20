@@ -1310,7 +1310,10 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             target,
             text,
         } => {
-            let _store = Store::open(&root).map_err(|e| e.to_string())?;
+            let mut store = Store::open(&root).map_err(|e| e.to_string())?;
+            // Seq is max-of-notes+1 — two concurrent writers must serialize
+            // or they'd compute the same seq. Lock around the read+append.
+            store.lock().map_err(|e| e.to_string())?;
             match action.as_str() {
                 "add" | "patch" | "delete" => {
                     // Publication order is monotonic, never the clock — the

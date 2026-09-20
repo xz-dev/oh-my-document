@@ -311,12 +311,21 @@ impl Store {
 
     /// Persist a metadata-only state update (binding/registration revisions
     /// that aren't business commits) via the same atomic state swap.
+    /// Write a state revision — requires the single-writer lock and the same
+    /// tmp→fsync→rename→dirsync durability protocol as `publish`. A state
+    /// write without the lock is a torn-update bug, never an allowed path.
     pub fn set_state(&mut self, st: State) -> Result<(), StoreError> {
+        self.lock()?;
         let path = self.root.join("state.toml");
         let tmp = self.root.join("state.toml.tmp");
         let txt = toml::to_string(&st).map_err(|e| StoreError::Record(e.to_string()))?;
-        fs::write(&tmp, txt)?;
+        {
+            let mut f = File::create(&tmp)?;
+            f.write_all(txt.as_bytes())?;
+            f.sync_all()?;
+        }
         fs::rename(&tmp, &path)?;
+        File::open(&self.root)?.sync_all()?;
         self.state = st;
         Ok(())
     }
