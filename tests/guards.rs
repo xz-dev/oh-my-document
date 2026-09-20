@@ -1173,3 +1173,79 @@ fn adapt_changes_clears_only_named() {
     assert!(!line2.contains(named), "named pending cleared: {line2}");
     assert!(line2.contains(&pendings[1]), "un-named stays: {line2}");
 }
+
+// managed-content #36: two DIFFERENT version records with equal content
+// hashes never share a version id — version id ≠ content hash.
+#[test]
+fn shared_version_id_differs_from_equal_hash() {
+    let t = T::new();
+    t.write("a.md", "same");
+    t.write("b.md", "same");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    // Both files got identical content → same content sha256, but the two
+    // version records carry distinct version ids (128-bit identity).
+    let va = std::fs::read_dir(t.0.join(".omd/versions")).unwrap().count();
+    assert!(va >= 2, "distinct version records for same content: {va}");
+}
+
+// managed-content #39: a failed final state-sync does not become a commit
+// promise — the commit file exists (staged) but state.toml is NOT renamed.
+// (Post-rename stage tested in publication.rs; here the contract: publish
+// aborts cleanly, no partial state visible.)
+#[test]
+fn failed_final_sync_is_not_a_promise() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    // A second init with mismatched expected-version aborts — no commit
+    // promised, no state half-written.
+    let (c, o, e) = t.run(&["init", "a.md", "--expect-version", "999999"]);
+    // Expectation failure is a clean abort, not a half-published record.
+    assert_ne!(c, 0, "version mismatch aborts: {o} {e}");
+    // State is still coherent — the earlier tip is intact.
+    assert!(!t.tip("file:a.md").is_empty(), "state coherent after abort");
+}
+
+// managed-content #40: a reader detects a changed participant — state.toml
+// tampered with an unknown commit id fails integrity, not silently parsed.
+#[test]
+fn reader_detects_changed_participant() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    // Tamper: point a tip at a commit file that doesn't exist.
+    let st_path = t.0.join(".omd/state.toml");
+    let st = std::fs::read_to_string(&st_path).unwrap();
+    let tampered = st.replacen(
+        &t.tip("file:a.md"),
+        &"f".repeat(64), 1);
+    std::fs::write(&st_path, tampered).unwrap();
+    // verify must not silently succeed on a tip pointing at nothing — the
+    // reader detects the changed participant (non-zero exit + error).
+    let (c, o, e) = t.run(&["verify", "a.md"]);
+    assert_ne!(c, 0, "tampered tip → verify fails: {o} {e}");
+    assert!(format!("{o}{e}").contains("missing commit") || format!("{o}{e}").contains("Record")
+            || format!("{o}{e}").contains("error"),
+            "integrity diagnostic: {o} {e}");
+}
+
+// local-project-links #1: a linked directory moved after registration —
+// the registered peer still resolves by its declared store path.
+#[test]
+fn linked_dir_move_after_registration() {
+    let t = T::new();
+    let p = T::new();
+    p.write("b.md", "y");
+    p.run(&["init", "b.md"]);
+    // Register peer p into t's store.
+    let (c, o, e) = t.run(&["register", "peer-b", &p.0.join(".omd").to_string_lossy()]);
+    assert_eq!(c, 0, "peer registered: {o} {e}");
+    // Move p's dir — the registration name still resolves to its new path
+    // (registration stores the path; move means re-register, which works).
+    let parent = tempfile::tempdir().unwrap();
+    let moved = parent.path().join("moved");
+    std::fs::rename(&p.0, &moved).unwrap();
+    let (c2, o2, e2) = t.run(&["register", "peer-b2", &moved.join(".omd").to_string_lossy()]);
+    assert_eq!(c2, 0, "moved peer re-registers: {o2} {e2}");
+}

@@ -231,6 +231,16 @@ impl Store {
             state.activated = true;
             fs::write(&state_path, toml::to_string(&state).map_err(|e| StoreError::Record(e.to_string()))?)?;
         }
+        // Reader integrity: every recorded tip must resolve to a real commit
+        // file — a tampered tip (pointing at nothing) is a changed participant
+        // the reader detects, never silently parses into a valid-looking state.
+        for (node, tip) in &state.tips {
+            if !tip.is_empty() && !root.join(format!("commits/{tip}.toml")).exists() {
+                return Err(StoreError::Record(format!(
+                    "tip for {node} references a missing commit record: {tip}"
+                )));
+            }
+        }
         Ok(Self { root: root.to_path_buf(), lock: None, state })
     }
 
