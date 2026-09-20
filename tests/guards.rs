@@ -1362,3 +1362,29 @@ fn range_advances_inside_block_end_closes_advanced() {
     assert_eq!(t.tip("range:a.md@text:0-3"), newtip,
             "END preserved advanced range tip");
 }
+
+// change-review #52: length-prefix framing means two different field
+// splittings can never collide to the same commit id — "AB" in one field
+// ≠ "A"+"B" split across two, because the u64 length prefixes differ.
+#[test]
+fn framed_inputs_no_concat_confusion() {
+    // Derive a commit id twice with field contents that would concat to the
+    // same bytes UNFRAMED — framing (u64 length prefix per field) keeps them
+    // distinct. Direct unit-level check on the id derivation.
+    use omd::records::commit::{Commit, CommitKind};
+    // Two commits identical except the previous_id/content field boundary:
+    // prev="ab"+content="cd" vs prev="a"+content="bcd". Unframed concat is
+    // identical ("ab"+"cd" = "a"+"bcd"); the u64 length prefix on previous_id
+    // differs (2 vs 1) so the framed byte streams differ → different ids.
+    let base = Commit {
+        id: None, salt: "aaaaaaaaaaaaaaaa".into(), timestamp: "t".into(), schema: "1".into(),
+        kind: CommitKind::Init, content_ref: "r".into(),
+        payload: serde_json::Map::new(), range_tips: Default::default(),
+        previous_id: "ab".into(),
+    };
+    let c2 = Commit { previous_id: "a".into(), ..base.clone() };
+    let id1 = base.derive_id(b"cd").unwrap().to_hex();
+    let id2 = c2.derive_id(b"bcd").unwrap().to_hex();
+    assert_ne!(id1, id2,
+            "field-boundary shift → different hash (framing prevents concat confusion)");
+}

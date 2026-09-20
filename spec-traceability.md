@@ -71,12 +71,12 @@ covered by a named Rust test below). Commits unsigned.
 | 49 | Skipping a failed check does not confirm a range | COVERED | tags `skip_does_not_confirm_content` |
 | 50 | Tree is machine-readable | COVERED | traceability `tree_json_is_parseable` |
 | 51 | TOML formatting does not alter a commit ID | COVERED | guards `commit_id_stable_under_field_reorder` |
-| 52 | Framed inputs cannot be confused by concatenation | PARTIAL | `src/records/id.rs` length-prefix framing present; no dedicated concat-confusion unit test (publication `immutable_records_use_per_id_paths` indirect) |
+| 52 | Framed inputs cannot be confused by concatenation | COVERED | guards `framed_inputs_no_concat_confusion` (boundary-shift → different hash) |
 | 53 | A selected link does not implicitly select all its changes | COVERED | guards `adapt_changes_clears_only_named` |
 | 54 | Unknown current output is not empty successful coverage | COVERED | `check` reports missing tracked source `incomplete`; traceability `check_emits_structured_json` |
 | 55 | A combination reports earlier successful members | COVERED | guards `combo_reports_early_success_member` (invalid member fails, names the member) |
 
-change-review: **54 COVERED / 1 PARTIAL / 0 UNMAPPED / 0 DEFERRED**
+change-review: **55 COVERED / 0 PARTIAL / 0 UNMAPPED / 0 DEFERRED**
 
 ## command-verification/spec.md (20 scenarios)
 
@@ -187,11 +187,11 @@ managed-content-tracking: **40 COVERED / 0 PARTIAL / 0 UNMAPPED / 0 DEFERRED-PLA
 
 | spec | COVERED | PARTIAL | UNMAPPED | DEFERRED-PLATFORM |
 |---|---|---|---|---|
-| change-review (55) | 54 | 1 | 0 | 0 |
+| change-review (55) | 55 | 0 | 0 | 0 |
 | command-verification (20) | 19 | 0 | 0 | 1 |
 | local-project-links (22) | 19 | 0 | 0 | 2 |
 | managed-content-tracking (40) | 40 | 0 | 0 | 0 |
-| **total (137)** | **132** | **1** | **0** | **3** |
+| **total (137)** | **133** | **0** | **0** | **3** |
 
 ## Real bugs found + fixed during remediation
 
