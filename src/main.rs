@@ -619,6 +619,20 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                             ));
                         }
                     }
+                    // Outstanding (not-yet-persisted) range work also blocks:
+                    // re-run the Myers dirty check on each child range tip —
+                    // an uncommitted edit that would mark the range dirty
+                    // prevents a clean file-verify from hiding it (4.5).
+                    for (k, tip) in &store.state().tips {
+                        if omd::relations::node::is_range_key(k)
+                            && omd::relations::node::parent_of(k) == node
+                            && pipeline::range_needs_review(&store, tip)
+                        {
+                            return Err(format!(
+                                "verify blocked: range {k} has uncommitted changes needing review"
+                            ));
+                        }
+                    }
                 }
                 // Command source: `--source-ref 'command::<exe>::<args>'`
                 // runs the command and records Acquisition::Command.

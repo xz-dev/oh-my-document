@@ -842,3 +842,30 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
         && locate.is_empty() && missing.is_empty() && unverified.is_empty();
     VerifyReport { ok, open_blocks, obligations, dirty, locate, missing, unverified }
 }
+
+/// Recompute whether a range node's recorded content still matches the
+/// current file — the same Myers check verify runs, exposed so a FileVerify
+/// commit can block on outstanding (not-yet-persisted) range dirt. Returns
+/// true when the range is dirty or has a position problem needing review.
+pub fn range_needs_review(store: &Store, tip_id: &str) -> bool {
+    let commit = match store.read_commit(tip_id) { Ok(c) => c, Err(_) => return false };
+    let path = commit.payload.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let range_arg = commit.payload.get("range").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let (_, s, e) = match crate::relations::node::parse_range_arg(&range_arg) {
+        Some(t) => t, None => return false,
+    };
+    let cur = match std::fs::read_to_string(&path) { Ok(c) => c, Err(_) => return true };
+    let ver = match store.read_version(&commit.content_ref) { Ok(v) => v, Err(_) => return false };
+    let old_bytes = match store.read_content(&ver.sha256) { Ok(b) => b, Err(_) => return false };
+    let old = String::from_utf8_lossy(&old_bytes);
+    let frag: String = old.chars().skip(s as usize).take((e - s) as usize).collect();
+    let cands = crate::relations::diff::locate_candidates(&frag, &cur);
+    if cands.len() > 1 || (cands.len() == 1 && cands[0] != s as usize) {
+        return true; // ambiguous or moved — needs review
+    }
+    let hunks = crate::relations::diff::diff_text(&old, &cur);
+    let ranges = [crate::relations::range::Range {
+        start: s, end: e, mode: crate::relations::range::Mode::Text,
+    }];
+    crate::relations::diff::dirtied_by(&hunks, &ranges)[0]
+}

@@ -818,3 +818,33 @@ fn vacated_path_reuse_separate_history() {
     assert!(!new_tip.is_empty() && new_tip != old_tip,
             "reused path → separate identity: {new_tip} vs {old_tip}");
 }
+
+// managed-content (4.5): a file-verify commit is BLOCKED while any child
+// range carries uncommitted changes needing review — the new file hash
+// cannot hide a range's outstanding work.
+#[test]
+fn file_verify_blocked_by_uncommitted_range_edit() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r"]);
+    // Edit inside the range — creates outstanding (unpersisted) dirty.
+    t.write("a.md", "012XX56789");
+    let (c, o, e) = t.run(&["commit", "verify", "a.md"]);
+    assert_ne!(c, 0, "verify blocked by range dirty: {o} {e}");
+    let all = format!("{o}{e}");
+    assert!(all.contains("blocked") || all.contains("needs review"), "block diag: {all}");
+}
+
+// managed-content (4.5): file-verify PASSES when children are clean — no
+// outstanding work, so a new hash commit is legitimate.
+#[test]
+fn file_verify_passes_when_ranges_clean() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r"]);
+    // No edits — ranges clean, verify commit allowed.
+    let (c, o, _) = t.run(&["commit", "verify", "a.md"]);
+    assert_eq!(c, 0, "verify ok when clean: {o}");
+}
