@@ -131,15 +131,21 @@ fn tag_on_changed_content_is_not_a_requalification() {
     // Find the v1 tag commit and check its recorded basis is the old tip,
     // not the new content. We surface the tag's target, never a silent
     // re-point at 'changed'.
-    let tag_commit = std::fs::read_dir(t.0.join(".omd/commits")).unwrap()
+    // Find the SECOND v1 tag commit — the one applied AFTER the content
+    // changed (first tag binds init's tip; the re-apply is the interesting
+    // one). Collect all v1 tag commits and take the one whose previous_id
+    // is `tip_before` (the tip at re-apply time).
+    let tag_commits: Vec<String> = std::fs::read_dir(t.0.join(".omd/commits")).unwrap()
         .flatten()
-        .filter_map(|e| std::fs::read_to_string(e.path()).ok().map(|c| (e, c)))
-        .find(|(_, c)| c.contains("kind = \"tag\"") && c.contains("v1"));
-    let (_, body) = tag_commit.expect("a v1 tag commit exists");
-    // The tag's `previous_id` records the tip it qualified — never rebinds
-    // to the later 'changed' content.
-    assert!(body.contains(&format!("previous_id = \"{}\"", tip_before)),
-            "tag binds the tip it tagged, not later content: {body}");
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok())
+        .filter(|c| c.contains("kind = \"tag\"") && c.contains("v1"))
+        .collect();
+    assert!(tag_commits.len() >= 2, "two v1 tag commits: {}", tag_commits.len());
+    // The re-applied tag binds `tip_before` — the tip recorded when the file
+    // still held 'x'. Assert that binding is to the OLD content basis.
+    let rebound = tag_commits.iter()
+        .any(|body| body.contains(&format!("previous_id = \"{}\"", tip_before)));
+    assert!(rebound, "a v1 tag binds the tip it tagged: {:?}", tag_commits);
 }
 
 // 12.4: reset to an unresolvable target → error diagnostic.

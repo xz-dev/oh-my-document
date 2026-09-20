@@ -28,8 +28,10 @@ struct Cli {
 
     /// Permit command sources to run during this verify/check
     /// (`--run-command` / `--run-command=false`). One call's flag never
-    /// carries into another; built-in default is `false`.
-    #[arg(long, global = true, default_missing_value = "true", num_args = 0..=1)]
+    /// carries into another; built-in default is `false`. `require_equals`
+    /// keeps a bare `--run-command` from greedily consuming the subcommand.
+    #[arg(long, global = true, default_missing_value = "true",
+         num_args = 0..=1, require_equals = true)]
     run_command: Option<bool>,
 
     /// Text encoding for this observation (`--encoding utf-16le`, etc.).

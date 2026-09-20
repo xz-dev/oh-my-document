@@ -792,8 +792,14 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
             let is_tombstone = store.read_commit(tip)
                 .map(|c| c.kind == CommitKind::Delete)
                 .unwrap_or(false);
+            // A command/git-sourced file node is virtual — it has no disk
+            // path to go missing. Only FILE-acquired nodes check the FS.
+            let is_virtual = store.read_commit(tip)
+                .and_then(|c| store.read_version(&c.content_ref).map(|v| v.acquisition.clone()))
+                .map(|a| !matches!(a, crate::records::version::Acquisition::File { .. }))
+                .unwrap_or(false);
             let proj_root = std::env::current_dir().unwrap_or_default();
-            if !is_tombstone && !proj_root.join(path).exists() {
+            if !is_tombstone && !is_virtual && !proj_root.join(path).exists() {
                 missing.push(format!("{path} (no tombstone)"));
             }
         }
@@ -802,12 +808,31 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
     // their current output — report them `unverified` (incomplete), never
     // a fabricated pass and never a hidden failure.
     let mut unverified: Vec<String> = Vec::new();
-    if !run_cmd {
-        for (k, tip) in &st.tips {
-            if let Ok(c) = store.read_commit(tip) {
-                if let Ok(v) = store.read_version(&c.content_ref) {
-                    if let crate::records::version::Acquisition::Command { .. } = v.acquisition {
+    let proj_root = std::env::current_dir().unwrap_or_default();
+    for (k, tip) in &st.tips {
+        if let Ok(c) = store.read_commit(tip) {
+            if let Ok(v) = store.read_version(&c.content_ref) {
+                if let crate::records::version::Acquisition::Command { executable, args } = &v.acquisition {
+                    if !run_cmd {
                         unverified.push(format!("{k} (command source, not run)"));
+                    } else {
+                        // Re-run the command and compare its stdout to the
+                        // recorded content — like a file re-read. Changed
+                        // output → dirty; identical → stays confirmed.
+                        match crate::sources::command::observe_command(executable, args, &proj_root) {
+                            Ok(out) if out.exit_ok => {
+                                let recorded = store.read_content(&v.sha256).unwrap_or_default();
+                                if out.stdout != recorded {
+                                    dirty.entry(k.clone()).or_insert_with(Vec::new)
+                                        .push(format!("command output changed ({})", tip));
+                                }
+                            }
+                            _ => {
+                                // Non-zero exit / spawn failure → unverified,
+                                // never a fabricated clean.
+                                unverified.push(format!("{k} (command failed to run)"));
+                            }
+                        }
                     }
                 }
             }

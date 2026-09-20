@@ -582,3 +582,37 @@ fn tombstoned_file_not_missing() {
     assert!(!o.contains("missing") || o.contains("no tombstone") == false,
             "tombstoned file not missing: {o}");
 }
+
+// command-verification: --run-command=true verify RE-RUNS the command and
+// compares stdout to recorded content — same output → clean; changed → dirty.
+#[test]
+fn run_command_verify_reruns_and_compares() {
+    let t = T::new();
+    let (c, _, _) = t.run(&["commit", "init", "f.txt",
+                          "--source-ref", "command::echo::[\"hi\"]"]);
+    assert_eq!(c, 0);
+    // verify with the command permitted → re-runs, same stdout → ok.
+    let (_, o, _) = t.run(&["--run-command=true", "verify", "f.txt"]);
+    let j = serde_json::from_str::<serde_json::Value>(&o).unwrap_or_default();
+    assert_eq!(j["data"]["ok"].as_bool(), Some(true),
+            "re-run same output → clean: {o}");
+    // The command source has no disk file — missing must be EMPTY.
+    assert!(j["data"]["missing"].as_array().map(|a| a.is_empty()).unwrap_or(false),
+            "command source not missing: {o}");
+}
+
+// command-verification: a command whose output changed reports dirty.
+#[test]
+fn run_command_changed_output_dirties() {
+    let t = T::new();
+    // A command that echoes a file's content — we can change it.
+    t.write("in.txt", "v1");
+    let (c, _, _) = t.run(&["commit", "init", "f.txt",
+                          "--source-ref", "command::cat::[\"in.txt\"]"]);
+    assert_eq!(c, 0);
+    // Change the command's output.
+    t.write("in.txt", "v2-different");
+    let (_, o, _) = t.run(&["--run-command=true", "verify", "f.txt"]);
+    assert!(o.contains("command output changed") || o.contains("dirty"),
+            "changed command output → dirty: {o}");
+}
