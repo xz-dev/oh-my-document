@@ -690,13 +690,47 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                 if !omd::relations::node::is_range_key(&node) {
                     return Err("--link-from/--link-to require --range: links connect ranges, not whole files".into());
                 }
+                // Track succeeded member link-ids + operation id so a mid-block
+                // failure reports WHICH members published, the failed step, and
+                // the still-open block boundary — never a silent partial commit.
+                let mut ok_members: Vec<String> = Vec::new();
+                let operation_id = {
+                    let mut idb = [0u8; 16];
+                    omd::testing::Rng::fill(&OsRng, &mut idb);
+                    hex::encode(idb)
+                };
+                let open_block = store.state().open_blocks.get(&node).cloned().unwrap_or_default();
+                let mut run_member = |src: String, tgt: String, dir: &str| -> Result<String, String> {
+                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, clock, &node, &src, &tgt, "combo", &Expected::default())
+                        .map_err(|e| format!("{dir}:{e}"))
+                };
                 for r in link_from {
                     let src = resolve_range_key(r);
-                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, clock, &node, &src, &node, "combo", &Expected::default()).map_err(|e| e.to_string())?;
+                    match run_member(src.clone(), node.clone(), "from") {
+                        Ok(lid) => ok_members.push(lid),
+                        Err(e) => return Err(serde_json::json!({
+                            "ok": false, "kind": "combo_partial_failure",
+                            "succeeded_members": ok_members,
+                            "failed_step": format!("link-from {src}"),
+                            "open_block": open_block,
+                            "operation_id": operation_id,
+                            "error": e,
+                        }).to_string()),
+                    }
                 }
                 for r in link_to {
                     let tgt = resolve_range_key(r);
-                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, clock, &node, &node, &tgt, "combo", &Expected::default()).map_err(|e| e.to_string())?;
+                    match run_member(node.clone(), tgt.clone(), "to") {
+                        Ok(lid) => ok_members.push(lid),
+                        Err(e) => return Err(serde_json::json!({
+                            "ok": false, "kind": "combo_partial_failure",
+                            "succeeded_members": ok_members,
+                            "failed_step": format!("link-to {tgt}"),
+                            "open_block": open_block,
+                            "operation_id": operation_id,
+                            "error": e,
+                        }).to_string()),
+                    }
                 }
                 let mut pl = serde_json::Map::new();
                 pl.insert("path".into(), path.clone().into());

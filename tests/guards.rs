@@ -1675,3 +1675,29 @@ fn transitive_breakage_reaches_chain_end() {
     assert!(pending_links >= 2,
             "transitive breakage flagged both B and C links: {sec}");
 }
+
+// change-review #55: a mid-block combo write that fails on a later member
+// reports the succeeded member link-ids + the failed step + the still-open
+// block boundary + an operation id — never a silent partial commit.
+#[test]
+fn combo_failure_reports_succeeded_step_boundary_opid() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.write("b.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "ra"]);
+    t.run(&["commit", "begin", "b.md"]);
+    t.run(&["commit", "commit", "b.md", "--range", "0-3",
+        "--link-from", "a.md@text:0-5", "--reason", "m1"]);
+    // Second commit in the block: valid member + invalid → partial failure.
+    let (c, o, e) = t.run(&["commit", "commit", "b.md", "--range", "0-6",
+        "--link-from", "a.md@text:0-5", "--link-from", "zz.md@text:0-9",
+        "--reason", "m2"]);
+    assert_ne!(c, 0, "combo partial failure: {o} {e}");
+    let all = format!("{o}{e}");
+    assert!(all.contains("succeeded_members"), "succeeded ids reported: {all}");
+    assert!(all.contains("failed_step"), "failed step reported: {all}");
+    assert!(all.contains("open_block"), "open boundary reported: {all}");
+    assert!(all.contains("operation_id"), "operation id reported: {all}");
+}

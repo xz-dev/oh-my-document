@@ -58,7 +58,7 @@ covered by a named Rust test below). Commits unsigned.
 | 36 | Reset the file without separately resetting its range | COVERED | file_source `file_reset_restores_range_tips`; guards `file_reset_restores_child_range_tips_e2e` |
 | 37 | A file target inside a child block rejects the whole reset | COVERED | coverage_atomic `file_reset_rejects_when_child_is_block_member` |
 | 38 | A file snapshot preserves a recorded child END | COVERED | guards `file_reset_restores_child_end_closed` (open_blocks empty after reset — sealed state kept) |
-| 39 | Indirect breakage is visible before an intermediate reset | PARTIAL | gap: 3-level transitive `unreachable_link` diagnosis c1->b1->a1 without B resetting not asserted — test has one link only |
+| 39 | Indirect breakage is visible before an intermediate reset | COVERED | transitive `link_pending` propagation implemented + guards `transitive_breakage_reaches_chain_end` (B and C both flagged) |
 | 40 | Reading data does not repair its validity | COVERED | guards `reading_dangling_does_not_repair`; traceability `dangling_commit_still_inspectable` |
 | 41 | Copying a record does not change its identity | COVERED | guards `copy_gives_new_identity` |
 | 42 | A replay time does not bypass a version conflict | COVERED | guards `timestamp_replay_records_time_not_conflict` (strict commit-file timestamp); publication `expected_version_conflict_aborts`; lock_contention `two_processes_cannot_hold_write_lock` |
