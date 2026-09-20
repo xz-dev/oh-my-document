@@ -217,8 +217,9 @@ fn log_chain(store: &Store, root: &Path, node_or_commit: &str) -> Vec<String> {
         .cloned()
         .unwrap_or_else(|| node_or_commit.to_string());
     let mut out = Vec::new();
+    let mut visited = std::collections::BTreeSet::new();
     let mut cur = start;
-    while !cur.is_empty() {
+    while !cur.is_empty() && visited.insert(cur.clone()) {
         out.push(cur.clone());
         cur = commit_prev(root, &cur).unwrap_or_default();
     }
@@ -573,17 +574,15 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                         None => {
                             // Walk every tip's chain for the commit id.
                             let mut found = None;
-                            for (node, tip) in &store.state().tips {
+                            'outer: for (node, tip) in &store.state().tips {
                                 let mut cur = tip.clone();
-                                while !cur.is_empty() {
+                                let mut visited = std::collections::BTreeSet::new();
+                                while !cur.is_empty() && visited.insert(cur.clone()) {
                                     if cur == *cid {
                                         found = Some(node.clone());
-                                        break;
+                                        break 'outer;
                                     }
                                     cur = commit_prev(&root, &cur).unwrap_or_default();
-                                }
-                                if found.is_some() {
-                                    break;
                                 }
                             }
                             found.ok_or_else(|| format!("--id: no chain contains commit {cid}"))?
