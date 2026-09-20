@@ -360,7 +360,14 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             if let Some(r) = rule { payload.insert("rule".into(), r.clone().into()); }
             if let Some(l) = level { payload.insert("level".into(), l.clone().into()); }
             if *skip { payload.insert("skip".into(), true.into()); }
-            let _ = timestamp; // manual replay timestamp — wired in commit path later
+            // --timestamp: manual replay — pin the clock to the user's
+            // recorded time so the commit's canonical timestamp (and thus
+            // its id) reflects it. Used to order commits for conflict replay.
+            let fixed = timestamp.as_deref()
+                .map(|t| omd::records::time::parse_rfc3339(t).ok_or("bad --timestamp: need RFC3339"))
+                .transpose()?;
+            let fixed_clock = fixed.map(omd::records::time::FixedClock);
+            let clock: &dyn omd::testing::Clock = fixed_clock.as_ref().map(|c| c as &dyn omd::testing::Clock).unwrap_or(&SystemClock);
             // State-only kinds observe no file; content kinds read the file.
             let state_only = matches!(kind,
                 CommitKind::Unclean | CommitKind::Clean |
@@ -373,14 +380,14 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             if combo {
                 let mut pl = serde_json::Map::new();
                 pl.insert("path".into(), path.clone().into());
-                pipeline::commit_marker(&mut store, &mut NoProbe, &OsRng, &SystemClock, &node, CommitKind::AtomicBegin, pl, &Expected::default()).map_err(|e| e.to_string())?;
+                pipeline::commit_marker(&mut store, &mut NoProbe, &OsRng, clock, &node, CommitKind::AtomicBegin, pl, &Expected::default()).map_err(|e| e.to_string())?;
             }
             let cid = if kind == CommitKind::Link {
                 let src = source.clone().unwrap_or_default();
                 let tgt = target.clone().unwrap_or_default();
                 let r = reason.clone().unwrap_or_default();
                 pipeline::commit_link(
-                    &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                    &mut store, &mut NoProbe, &OsRng, clock,
                     &node, &src, &tgt, &r, &Expected::default(),
                 ).map_err(|e| e.to_string())?
             } else if kind == CommitKind::Adapt {
@@ -388,7 +395,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                 let ch: Vec<String> = changes.clone().unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
                 let r = reason.clone().unwrap_or_default();
                 pipeline::commit_adapt(
-                    &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                    &mut store, &mut NoProbe, &OsRng, clock,
                     &node, &lid, &ch, &r, *stop, &Expected::default(),
                 ).map_err(|e| e.to_string())?
             } else if kind == CommitKind::Reset {
@@ -407,7 +414,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                         pl.insert("warning".into(), out.warning.clone().into());
                         // Record the reset as a commit on this node's chain.
                         pipeline::commit_marker(
-                            &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                            &mut store, &mut NoProbe, &OsRng, clock,
                             &node, CommitKind::Reset, pl, &Expected::default(),
                         ).map_err(|e| e.to_string())?
                     }
@@ -415,7 +422,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                 }
             } else if state_only {
                 pipeline::commit_marker(
-                    &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                    &mut store, &mut NoProbe, &OsRng, clock,
                     &node, kind, payload, &Expected::default(),
                 ).map_err(|e| e.to_string())?
             } else {
@@ -434,21 +441,21 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                     }
                 }
                 pipeline::commit_file(
-                    &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                    &mut store, &mut NoProbe, &OsRng, clock,
                     &node, Path::new(path), kind, payload, &Expected::default(),
                 ).map_err(|e| e.to_string())?
             };
             // Create the requested links inside the block, then close it.
             if combo {
                 for r in link_from {
-                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, &SystemClock, &node, r, &node, "combo" , &Expected::default()).map_err(|e| e.to_string())?;
+                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, clock, &node, r, &node, "combo" , &Expected::default()).map_err(|e| e.to_string())?;
                 }
                 for r in link_to {
-                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, &SystemClock, &node, &node, r, "combo", &Expected::default()).map_err(|e| e.to_string())?;
+                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, clock, &node, &node, r, "combo", &Expected::default()).map_err(|e| e.to_string())?;
                 }
                 let mut pl = serde_json::Map::new();
                 pl.insert("path".into(), path.clone().into());
-                pipeline::commit_marker(&mut store, &mut NoProbe, &OsRng, &SystemClock, &node, CommitKind::AtomicEnd, pl, &Expected::default()).map_err(|e| e.to_string())?;
+                pipeline::commit_marker(&mut store, &mut NoProbe, &OsRng, clock, &node, CommitKind::AtomicEnd, pl, &Expected::default()).map_err(|e| e.to_string())?;
             }
             Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": format!("{kind:?}") }))
         }
@@ -541,17 +548,29 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                     (covered, denom)
                 };
                 let (fc, fd) = cov(src_tag, tgt_tag);
+                // A member whose content can't be read contributes to the
+                // denominator but its covered positions are unknown → the
+                // item is `incomplete`, never a fabricated 0%/100%.
+                let mut any_unreadable = false;
+                for node in tag_member_nodes(&store, &proj_root, src_tag) {
+                    let p = node.strip_prefix("file:").unwrap_or(&node);
+                    if !proj_root.join(p).exists() { any_unreadable = true; }
+                }
                 let forward_ok = fd == 0 || fc >= fd;
                 let mut pass = forward_ok;
                 if two_way {
                     let (rc, rd) = cov(tgt_tag, src_tag);
                     pass = pass && (rd == 0 || rc >= rd);
                 }
-                let status = if rule.skip { "skipped" } else if pass { "pass" } else { "fail" };
-                if !rule.skip && !pass && rule.level == "fail" { check_failed = true; }
+                let status = if rule.skip { "skipped" }
+                    else if any_unreadable { "incomplete" }
+                    else if pass { "pass" } else { "fail" };
+                if !rule.skip && !any_unreadable && !pass && rule.level == "fail" { check_failed = true; }
                 rules_out.push(serde_json::json!({
                     "rule": name, "level": rule.level, "status": status,
-                    "coverage": if fd == 0 { serde_json::Value::Null } else { serde_json::json!(fc * 100 / fd) },
+                    "unit": "position",
+                    "covered": fc, "total": fd,
+                    "coverage": if fd == 0 || any_unreadable { serde_json::Value::Null } else { serde_json::json!(fc * 100 / fd) },
                 }));
             }
             report.insert("rules".into(), rules_out.into());

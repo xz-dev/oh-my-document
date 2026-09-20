@@ -76,8 +76,8 @@
 
 - [x] 12.1 实现 append-only note/add/patch/delete 与反查；验证字段、独立 ID、持久追加顺序、时钟回退不颠倒修订，dangling/tombstone 的 note 可读，note 不改变 commit ID/理由/责任，且无回复树或审批状态。
 - [x] 12.2 实现显式 gc 与 gc --content，结合本地有效根及外来保护；验证可收集无引用 dangling 并清理其 note，保留被有效记录引用的 dangling/共享内容/传递依据，释放最后本地副本前检查精确 Git 恢复依据，查询/reset/verify 不自动 gc。
-- [ ] 12.3 实现 list --dangling、log、tree 与可删除重建的 SQLite 索引；验证重建不用来源程序或 Git 来补普通来源历史，log 保留记录排序稳定，tree 只展开挂载且支持起点/深度，未发布材料不冒充历史。
-- [ ] 12.4 统一全部命令的 JSON envelope、诊断、检查结果、覆盖单位、发布结果及退出码；验证 stdout 为单一可解析 JSON、stderr 不混入，未知当前内容为 incomplete/null 而非空内容 100%，reset 请求/实际 ID、组合部分成功和不确定发布均可机器判别。
+- [x] 12.3 实现 list --dangling、log、tree 与可删除重建的 SQLite 索引；验证重建不用来源程序或 Git 来补普通来源历史，log 保留记录排序稳定，tree 只展开挂载且支持起点/深度，未发布材料不冒充历史。
+- [x] 12.4 统一全部命令的 JSON envelope、诊断、检查结果、覆盖单位、发布结果及退出码；验证 stdout 为单一可解析 JSON、stderr 不混入，未知当前内容为 incomplete/null 而非空内容 100%，reset 请求/实际 ID、组合部分成功和不确定发布均可机器判别。
 
 ## 13. 系统验收与交接（依赖 1～12）
 
