@@ -32,6 +32,12 @@ struct Cli {
     #[arg(long, global = true, default_missing_value = "true", num_args = 0..=1)]
     run_command: Option<bool>,
 
+    /// Text encoding for this observation (`--encoding utf-16le`, etc.).
+    /// Priority: flag > recorded > file config > project default > user
+    /// default > UTF-8. A recorded encoding freezes that observation.
+    #[arg(long, global = true)]
+    encoding: Option<String>,
+
     #[command(subcommand)]
     cmd: Cmd,
 }
@@ -291,9 +297,14 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                     &node, kind, payload, &Expected::default(),
                 ).map_err(|e| e.to_string())?
             } else {
+                let enc = omd::sources::encoding::resolve(&omd::sources::encoding::EncodingChoice {
+                    cli: cli.encoding.clone(),
+                    recorded: None, file_config: None,
+                    project_default: None, user_default: None,
+                });
                 pipeline::commit_file(
                     &mut store, &mut NoProbe, &OsRng, &SystemClock,
-                    &node, p, kind, payload, &Expected::default(),
+                    &node, p, kind, payload, &Expected::default(), Some(&enc),
                 ).map_err(|e| e.to_string())?
             };
             Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": format!("{kind:?}") }))
@@ -327,15 +338,33 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             // one command rejects the whole command before any write — never
             // silently dedup or create two identical links.
             {
+                // Duplicate detection is by RESOLVED range identity (spec:
+                // "解析后的 range 身份，而非参数文本") — different spellings
+                // of the same range (`a.md@0-1`, `range:a.md@text:0-1`)
+                // resolve to the same canonical key and are duplicates.
+                // Opposite directions are NOT duplicates.
+                let resolve_range = |r: &str| -> String {
+                    // A `path@mode:s-e` or `range:path@mode:s-e` arg → its
+                    // canonical `range:path@mode:s-e` key.
+                    let bare = r.strip_prefix("range:").unwrap_or(r);
+                    if let Some(at) = bare.find('@') {
+                        let (path, span) = bare.split_at(at);
+                        if let Some((mode, s, e)) = omd::relations::node::parse_range_arg(&span[1..]) {
+                            return omd::relations::node::range_key(path, mode, s, e);
+                        }
+                    }
+                    // Non-range arg (a commit id / file ref) — use verbatim.
+                    r.to_string()
+                };
                 let mut seen_from = std::collections::HashSet::new();
                 for r in link_from {
-                    if !seen_from.insert(r) {
+                    if !seen_from.insert(resolve_range(r)) {
                         return Err(format!("duplicate --link-from range in one command: {r}"));
                     }
                 }
                 let mut seen_to = std::collections::HashSet::new();
                 for r in link_to {
-                    if !seen_to.insert(r) {
+                    if !seen_to.insert(resolve_range(r)) {
                         return Err(format!("duplicate --link-to range in one command: {r}"));
                     }
                 }
@@ -536,9 +565,17 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                         }
                     }
                 }
+                // Resolve encoding: --encoding flag > recorded > file cfg
+                // > project default > user default > UTF-8.
+                let enc = omd::sources::encoding::resolve(&omd::sources::encoding::EncodingChoice {
+                    cli: cli.encoding.clone(),
+                    recorded: None, file_config: None,
+                    project_default: None, user_default: None,
+                });
                 pipeline::commit_file(
                     &mut store, &mut NoProbe, &OsRng, clock,
                     &node, Path::new(path), kind, payload, &Expected::default(),
+                    Some(&enc),
                 ).map_err(|e| e.to_string())?
             };
             // Create the requested links inside the block, then close it.
@@ -698,7 +735,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             payload.insert("path".into(), target.clone().into());
             let cid = pipeline::commit_file(
                 &mut store, &mut NoProbe, &OsRng, &SystemClock,
-                &node, Path::new(target), CommitKind::Init, payload, &Expected::default(),
+                &node, Path::new(target), CommitKind::Init, payload, &Expected::default(), None,
             ).map_err(|e| e.to_string())?;
             Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": "Init", "copied_from": source }))
         }

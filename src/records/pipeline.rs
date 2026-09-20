@@ -96,6 +96,7 @@ pub fn commit_file(
     kind: CommitKind,
     payload: serde_json::Map<String, serde_json::Value>,
     expected: &Expected,
+    encoding: Option<&str>,
 ) -> Result<String, PipelineError> {
     store.lock()?;
     store.check_expected(expected)?;
@@ -104,10 +105,11 @@ pub fn commit_file(
     // Resolve the source path relative to the process CWD — the caller
     // supplies the project root as its working directory. Observation reads
     // the real file *now*, never a snapshot.
-    let obs = observe_file(path, true, Some("utf-8"))?;
+    let enc = encoding.unwrap_or("utf-8");
+    let obs = observe_file(path, true, Some(enc))?;
     let version = make_version(rng, &obs, Acquisition::File {
         path: path.to_string_lossy().into(),
-        encoding: "utf-8".into(),
+        encoding: enc.into(),
     });
     let version = with_content(&version);
 

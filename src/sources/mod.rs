@@ -52,13 +52,20 @@ pub fn observe_file(path: &Path, text: bool, encoding: Option<&str>) -> Result<O
     }
 }
 
-/// Decode bytes under a named encoding. Only utf-8 and a small fixed set are
-/// supported; unknown or undecodable input is an error, not a fallback.
+/// Decode bytes under a named encoding via `encoding_rs` (WHATWG labels:
+/// utf-8, utf-16le/be, latin1/iso-8859-*, windows-125*, shift_jis, gbk,
+/// big5, euc-jp/kr, koi8-r, …). An unknown label or undecodable input is an
+/// error, never a silent fallback — a recorded encoding freezes that
+/// observation, never reinterprets history.
 fn decode(bytes: &[u8], encoding: &str) -> Result<String, SourceError> {
-    match encoding.to_ascii_lowercase().as_str() {
-        "utf-8" | "utf8" => String::from_utf8(bytes.to_vec()).map_err(|_| SourceError::Encoding),
-        _ => Err(SourceError::Encoding),
-    }
+    let enc = encoding_rs::Encoding::for_label(encoding.trim().as_bytes())
+        .ok_or(SourceError::Encoding)?;
+    // decode_without_bom_handling_and_without_replacement returns None on
+    // malformed input — invalid text under the chosen encoding is a source
+    // error, not silently stored garbage.
+    enc.decode_without_bom_handling_and_without_replacement(bytes)
+        .map(|cow| cow.into_owned())
+        .ok_or(SourceError::Encoding)
 }
 pub mod scope;
 pub mod git;

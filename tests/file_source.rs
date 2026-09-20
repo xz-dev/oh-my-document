@@ -70,3 +70,19 @@ fn node_kinds_cover_root_file_range() {
     assert_eq!(file.parent, "root");
     assert_eq!(range.parent, "file:a");
 }
+
+#[test]
+fn non_utf8_encoding_decodes() {
+    let dir = std::env::temp_dir().join(format!("omd-enc-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let p = dir.join("f.txt");
+    // 0xE9 = é in latin-1, invalid standalone UTF-8.
+    std::fs::write(&p, b"caf\xe9").unwrap();
+    // UTF-8 rejects it.
+    assert!(omd::sources::file::observe_text(&p, Some("utf-8")).is_err());
+    // iso-8859-1 / windows-1252 decode it.
+    let o = omd::sources::file::observe_text(&p, Some("iso-8859-1")).unwrap();
+    assert!(o.text);
+    assert_eq!(o.encoding.as_deref(), Some("iso-8859-1"));
+    let _ = std::fs::remove_dir_all(&dir);
+}
