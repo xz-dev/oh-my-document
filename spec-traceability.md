@@ -33,14 +33,14 @@ covered by a named Rust test below). Commits unsigned.
 | 11 | Explicitly omit the stop reason | COVERED | guards `clean_no_reason_succeeds` |
 | 12 | Two requests for review use identical content | COVERED | guards `equal_output_does_not_create_review` |
 | 13 | Check a circular set of references | COVERED | domain_semantics `cycles_terminate_without_repeat_obligations` |
-| 14 | Membership follows one range chain | PARTIAL | gap: link ops on B's chain auto-belonging to B's block (vs A's chain) not asserted — current test only refuses file endpoints |
+| 14 | Membership follows one range chain | COVERED | guards `link_inside_b_block_is_member` (link in B's block, A has none) + `membership_follows_one_range_chain` |
 | 15 | Closing an inner block leaves outer open | COVERED | coverage_atomic `innermost_end_closes_nearest_begin` |
 | 16 | The current range advances before end | COVERED | guards `range_advances_inside_block_end_closes_advanced` + `verify_fails_while_block_open` |
 | 17 | End closes an already advanced state | COVERED | guards `range_advances_inside_block_end_closes_advanced` |
 | 18 | Reset targets a commit inside a closed block | COVERED | coverage_atomic `reset_to_block_interior_member_refused`; reset `reset_interior_member_refused` |
 | 19 | An open block does not make its current interior commit resettable | COVERED | guards `reset_interior_of_open_block_refused` |
 | 20 | Reset begin withdraws the opening marker as well | COVERED | reset `reset_to_begin_withdraws_link_created_in_segment` |
-| 21 | Reset end reopens the block at its direct predecessor | PARTIAL | gap: reopen exercised; landing point/s-in-chain/range extent/L1-L2 states unchecked |
+| 21 | Reset end reopens the block at its direct predecessor | COVERED | guards `reset_end_reopens_block` + `reset_end_landing_and_dangle` (lands on predecessor, END dangles) |
 | 22 | A boundary reset warning is present in JSON | COVERED | reset `reset_reports_requested_actual_in_json` |
 | 23 | Nested boundaries use the same immediate predecessor rule | COVERED | coverage_atomic `reset_to_marker_lands_on_direct_predecessor` |
 | 24 | Adjacent markers are not skipped recursively | COVERED | guards `adjacent_markers_reset_lands_one_step` |
@@ -53,11 +53,11 @@ covered by a named Rust test below). Commits unsigned.
 | 31 | Different references to one range are still duplicates | COVERED | `resolve_range_key` canonicalizes `a.md@…` ≡ `range:a.md@…` |
 | 32 | Opposite directions to one range are distinct | COVERED | guards `opposite_directions_to_one_range_are_distinct` |
 | 33 | The duplicate check is scoped to one invocation | COVERED | guards `duplicate_check_scoped_per_invocation` |
-| 34 | Undo a range extension | PARTIAL | gap: spec wants reset-to-r0 restoring extent (r1 dangles, notes viewable) — test does forward `--id` re-commit, not a reset |
+| 34 | Undo a range extension | COVERED | guards `reset_to_r0_restores_extent` (reset restores 0-5, extension dangles) |
 | 35 | Create a new commit after range reset | COVERED | reset `new_commit_after_reset_continues_chain` |
 | 36 | Reset the file without separately resetting its range | COVERED | file_source `file_reset_restores_range_tips`; guards `file_reset_restores_child_range_tips_e2e` |
 | 37 | A file target inside a child block rejects the whole reset | COVERED | coverage_atomic `file_reset_rejects_when_child_is_block_member` |
-| 38 | A file snapshot preserves a recorded child END | PARTIAL | gap: file-reset-to-F restoring child to END e keeping closed state not asserted — test resets ON the END marker (different scenario) |
+| 38 | A file snapshot preserves a recorded child END | COVERED | guards `file_reset_restores_child_end_closed` (open_blocks empty after reset — sealed state kept) |
 | 39 | Indirect breakage is visible before an intermediate reset | PARTIAL | gap: 3-level transitive `unreachable_link` diagnosis c1->b1->a1 without B resetting not asserted — test has one link only |
 | 40 | Reading data does not repair its validity | COVERED | guards `reading_dangling_does_not_repair`; traceability `dangling_commit_still_inspectable` |
 | 41 | Copying a record does not change its identity | COVERED | guards `copy_gives_new_identity` |
@@ -96,7 +96,7 @@ change-review: **47 COVERED / 8 PARTIAL / 0 UNMAPPED / 0 DEFERRED**
 | 12 | Partial stdout followed by nonzero exit | COVERED | command_source `non_zero_exit_is_failure_not_content` |
 | 13 | Clean does not execute a side-effecting command again | COVERED | guards `clean_does_not_rerun_command` (version count unchanged) |
 | 14 | Equal output does not cancel explicit review work | COVERED | guards `equal_output_does_not_create_review`; `full_coverage_keeps_obligation` |
-| 15 | Rebuilding a cache from unfamiliar metadata | PARTIAL | gap: spec clause — metadata with a not-yet-run COMMAND must not launch on rebuild — test has no command source, only index regen |
+| 15 | Rebuilding a cache from unfamiliar metadata | COVERED | guards `reindex_does_not_launch_command` (version count unchanged — never re-runs) |
 | 16 | Replacing with a command does not grant future automatic execution | COVERED | replace_source `replace_refused_on_mismatched_full_content`; `execution_permission_precedence` |
 | 17 | A successful but different output cannot replace history | COVERED | replace_source `replace_refused_on_mismatched_full_content` |
 | 18 | A program waits for standard input | COVERED | `command::cat::[]` stdin→`Stdio::null()` exits 0 (no hang) |

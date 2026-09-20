@@ -1649,3 +1649,29 @@ fn project_move_preserves_ids() {
         .and_then(|l| l.split('"').nth(3)).unwrap_or("").to_string();
     assert_eq!(tip_before, tip_after, "commit ids unchanged across move");
 }
+
+// change-review #39: indirect breakage propagates TRANSITIVELY — a commit on
+// A flags B's link AND C's downstream link (C→B→A), the obligation reaching
+// the end of the chain without B resetting.
+#[test]
+fn transitive_breakage_reaches_chain_end() {
+    let t = T::new();
+    t.write("a.md", "aaa");
+    t.write("b.md", "bbb");
+    t.write("c.md", "ccc");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["init", "c.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "ra"]);
+    t.run(&["commit", "commit", "b.md", "--range", "0-3", "--link-from", "a.md@text:0-3", "--reason", "rb"]);
+    t.run(&["commit", "commit", "c.md", "--range", "0-3", "--link-from", "b.md@text:0-3", "--reason", "rc"]);
+    // A commits → both B's link AND C's transitive link flag pending.
+    let tip = t.tip("range:a.md@text:0-3");
+    t.run(&["commit", "commit", "a.md", "--id", &tip, "--range", "0-3", "--reason", "up"]);
+    let st = t.state();
+    let sec = st.split("[link_pending]").nth(1).unwrap_or("");
+    let pending_links = sec.lines().take_while(|l| !l.starts_with('['))
+        .filter(|l| l.contains(" = [") && l.contains('"')).count();
+    assert!(pending_links >= 2,
+            "transitive breakage flagged both B and C links: {sec}");
+}

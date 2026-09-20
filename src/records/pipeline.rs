@@ -183,13 +183,34 @@ pub fn commit_file(
     // Upstream commits on a linked *source* range seed pending obligations on
     // each link whose source is this node — adapt later clears the selected
     // ones. The obligation key is this commit's id (one per change).
-    let link_ids: Vec<String> = new_state
+    // TRANSITIVE: a commit on N also flags downstream links — if N→T is a
+    // link and T is itself a source of link L2, then L2's chain is now
+    // indirectly dirty (the breakage propagates c1→b1→a1 without B resetting).
+    let direct: Vec<String> = new_state
         .links
         .iter()
         .filter(|(_, l)| l.source == node_key)
         .map(|(id, _)| id.clone())
         .collect();
-    for lid in link_ids {
+    for lid in &direct {
+        new_state
+            .link_pending
+            .entry(lid.clone())
+            .or_default()
+            .insert(cid.clone());
+    }
+    // One transitive hop: each link whose source is a TARGET of a direct link
+    // also gets flagged (the target node's chain now owes review downstream).
+    let downstream_sources: Vec<String> = direct.iter()
+        .filter_map(|lid| new_state.links.get(lid).map(|l| l.target.clone()))
+        .collect();
+    let transitive: Vec<String> = new_state
+        .links
+        .iter()
+        .filter(|(_, l)| downstream_sources.contains(&l.source))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for lid in transitive {
         new_state
             .link_pending
             .entry(lid)
