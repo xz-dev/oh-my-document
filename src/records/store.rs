@@ -182,6 +182,28 @@ impl Store {
         &self.state
     }
 
+    /// Read a commit record by id (immutable `commits/<id>.toml`).
+    pub fn read_commit(&self, id: &str) -> Result<crate::records::commit::Commit, StoreError> {
+        let s = fs::read_to_string(self.root.join(format!("commits/{id}.toml")))?;
+        toml::from_str(&s).map_err(|e| StoreError::Record(e.to_string()))
+    }
+
+    /// Read a version record by id (`versions/<id>.toml`).
+    pub fn read_version(&self, id: &str) -> Result<crate::records::version::SourceVersion, StoreError> {
+        let s = fs::read_to_string(self.root.join(format!("versions/{id}.toml")))?;
+        toml::from_str(&s).map_err(|e| StoreError::Record(e.to_string()))
+    }
+
+    /// Read stored content bytes by sha256 (`content/<sha256>`).
+    pub fn read_content(&self, sha256: &str) -> Result<Vec<u8>, StoreError> {
+        Ok(fs::read(self.root.join(format!("content/{sha256}")))?)
+    }
+
+    /// The store root path (for resolving `commits/`, `versions/`, `content/`).
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// Verify caller-observed preconditions under the held lock.
     /// Any mismatch aborts the write — never silently uses the newer value.
     pub fn check_expected(&self, exp: &Expected) -> Result<(), StoreError> {

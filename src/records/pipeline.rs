@@ -234,6 +234,95 @@ pub fn commit_marker(
     Ok(cid)
 }
 
+/// Lifecycle verbs that move node identity, not just append a record.
+///
+/// - `rename`: a commit on the source node recording `{path:{source,target}}`;
+///   the tip + mounts + dirty state + ranges migrate to `file:<target>` — the
+///   identity continues, the path changes. No Myers diff runs.
+/// - `delete`: a tombstone on `file:<source>` (`target` null); history and
+///   notes keep, dependents report `broken`. A vanished file with no tombstone
+///   is `missing` — never auto-interpreted as a delete.
+/// - `copy`: a fresh `init` on `file:<target>` — new identity, no copied
+///   association. The source object is untouched.
+pub fn commit_lifecycle(
+    store: &mut Store,
+    probe: &mut dyn PublishProbe,
+    rng: &dyn Rng,
+    clock: &dyn Clock,
+    kind: CommitKind,
+    source_path: &str,
+    target_path: Option<&str>,
+    reason: &str,
+    expected: &Expected,
+) -> Result<String, PipelineError> {
+    store.lock()?;
+    store.check_expected(expected)?;
+
+    let src_key = format!("file:{source_path}");
+    let empty_obs = Observation { bytes: Vec::new(), text: false, encoding: None };
+    let version = make_version(rng, &empty_obs, Acquisition::File {
+        path: source_path.into(), encoding: "utf-8".into(),
+    });
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("path".into(), source_path.into());
+    payload.insert("source".into(), source_path.into());
+    if let Some(t) = target_path { payload.insert("target".into(), t.into()); }
+    payload.insert("reason".into(), reason.into());
+
+    let prev = store.state().tips.get(&src_key).cloned().unwrap_or_default();
+    let is_first = !store.state().tips.contains_key(&src_key);
+    let commit = make_commit(rng, clock, kind, &prev, &version, payload);
+    commit.validate(is_first).map_err(|e| PipelineError::Commit(e.to_string()))?;
+    let cid = commit.derive_id(b"").map_err(|e| PipelineError::Commit(e.to_string()))?.to_hex();
+
+    let mut new_state: State = store.state().clone();
+    new_state.publication += 1;
+    new_state.retained.push(cid.clone());
+
+    match kind {
+        CommitKind::Rename => {
+            let target = target_path.expect("rename needs target");
+            let dst_key = format!("file:{target}");
+            // Migrate the node: tip moves to the target key, mounts and dirty
+            // state follow, ranges under the file keep their identity.
+            new_state.tips.remove(&src_key);
+            new_state.tips.insert(dst_key.clone(), cid.clone());
+            if let Some(m) = new_state.mounts.remove(&src_key) {
+                // Re-key child range nodes: `range:<path>@...` → `range:<target>@...`.
+                // The range identity (its tip/chain) is preserved; only the
+                // path component of its key follows the rename.
+                let remap = |c: &str| c.replacen(
+                    &format!("range:{source_path}@"),
+                    &format!("range:{target}@"), 1);
+                for child in &m {
+                    let new_child = remap(child);
+                    if let Some(tip) = new_state.tips.remove(child) {
+                        new_state.tips.insert(new_child.clone(), tip);
+                    }
+                    if let Some(ds) = new_state.dirty.remove(child) {
+                        new_state.dirty.insert(new_child.clone(), ds);
+                    }
+                }
+                let remounted: Vec<String> = m.iter().map(|c| remap(c)).collect();
+                new_state.mounts.insert(dst_key.clone(), remounted);
+            }
+            if let Some(ds) = new_state.dirty.remove(&src_key) {
+                new_state.dirty.insert(dst_key.clone(), ds);
+            }
+        }
+        CommitKind::Delete => {
+            // Tombstone: tip stays on the source node recording target=null;
+            // dependents on this node report broken (handled at read).
+            new_state.tips.insert(src_key.clone(), cid.clone());
+        }
+        _ => {}
+    }
+
+    store.publish(probe, &commit, &cid, None, None, new_state)?;
+    Ok(cid)
+}
+
 /// Create a link instance between two range-commits. Refuses file-level
 /// linking (source/target must name a range, not a whole file). Each link
 /// gets a fresh 128-bit id; identical endpoints+direction coexist as
@@ -481,6 +570,9 @@ pub struct VerifyReport {
     pub obligations: Vec<String>,
     /// Dirty commits keyed by node.
     pub dirty: std::collections::BTreeMap<String, Vec<String>>,
+    /// Locate problems: a range whose recorded fragment is ambiguous in the
+    /// current source — reports old coords + candidates, never auto-picks.
+    pub locate: std::collections::BTreeMap<String, Vec<String>>,
 }
 
 /// Run verify against the persisted state — reads what's on disk, never
@@ -504,6 +596,40 @@ pub fn verify(store: &Store) -> VerifyReport {
             dirty.insert(node.clone(), ids);
         }
     }
-    let ok = open_blocks.is_empty() && obligations.is_empty() && dirty.is_empty();
-    VerifyReport { ok, open_blocks, obligations, dirty }
+    // Locate diagnostics: a range node whose recorded fragment now matches
+    // ambiguously in the current file is a problem — candidates reported, the
+    // track is never silently re-pointed nor kept as a valid confirmation.
+    let mut locate: std::collections::BTreeMap<String, Vec<String>> = Default::default();
+    let mut scan = |range_key: &str, tip_id: &str| {
+        // Recover the recorded fragment from the range's tip commit's version
+        // and count its occurrences in the *current* file. >1 = ambiguous.
+        if let Ok(commit) = store.read_commit(tip_id) {
+            let path = commit.payload.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let range_arg = commit.payload.get("range").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if let (Some((_, s, e)), Ok(cur)) = (
+                crate::relations::node::parse_range_arg(&range_arg),
+                std::fs::read_to_string(&path),
+            ) {
+                if let Ok(ver) = store.read_version(&commit.content_ref) {
+                    if let Ok(old_bytes) = store.read_content(&ver.sha256) {
+                        let old = String::from_utf8_lossy(&old_bytes);
+                        let frag: String = old.chars().skip(s as usize).take((e - s) as usize).collect();
+                        let cands = crate::relations::diff::locate_candidates(&frag, &cur);
+                        if cands.len() > 1 {
+                            locate.entry(range_key.to_string())
+                                .or_default()
+                                .push(format!("ambiguous: {} candidates for '{}'", cands.len(), frag));
+                        }
+                    }
+                }
+            }
+        }
+    };
+    for (k, tip) in &st.tips {
+        if crate::relations::node::is_range_key(k) {
+            scan(k, tip);
+        }
+    }
+    let ok = open_blocks.is_empty() && obligations.is_empty() && dirty.is_empty() && locate.is_empty();
+    VerifyReport { ok, open_blocks, obligations, dirty, locate }
 }

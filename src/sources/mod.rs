@@ -60,3 +60,4 @@ fn decode(bytes: &[u8], encoding: &str) -> Result<String, SourceError> {
         _ => Err(SourceError::Encoding),
     }
 }
+pub mod scope;

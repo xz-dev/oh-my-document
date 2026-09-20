@@ -61,6 +61,30 @@ pub fn diff_text(old: &str, new: &str) -> Vec<Hunk> {
     hunks
 }
 
+/// Locate-candidate diagnostics for a fragment that lost reliable placement.
+///
+/// When a tracked range can no longer be matched unambiguously, the spec
+/// requires reporting old coordinates, the difference, and *candidate*
+/// positions — never silently re-point the track at one same-text match or
+/// keep a stale confirmation. `locate_candidates` returns every start index
+/// where `fragment` occurs in `content`; >1 is ambiguous (a duplicate
+/// fragment, not a chosen placement).
+pub fn locate_candidates(fragment: &str, content: &str) -> Vec<usize> {
+    if fragment.is_empty() {
+        return vec![];
+    }
+    content
+        .match_indices(fragment)
+        .map(|(i, _)| i)
+        .collect()
+}
+
+/// Is the fragment's placement ambiguous — more than one same-text match?
+/// Ambiguity MUST surface candidates; the system MUST NOT pick one.
+pub fn ambiguous_placement(fragment: &str, content: &str) -> bool {
+    locate_candidates(fragment, content).len() > 1
+}
+
 /// Which tracked ranges does a hunk dirty?
 ///
 /// A range is dirtied when a hunk *overlaps* it (change inside the range) or

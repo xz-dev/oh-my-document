@@ -64,7 +64,12 @@ enum Cmd {
     /// `omd check` — content/link coverage report.
     Check { path: Option<String> },
     /// `omd import` — alias for `commit import` (statistics inclusion).
-    Import { path: String },
+    /// Includes subdirs; `--exclude`/`--include` layer patterns over the scope.
+    Import {
+        path: String,
+        #[arg(long = "exclude")] exclude: Vec<String>,
+        #[arg(long = "include")] include: Vec<String>,
+    },
     /// `omd remove` — alias for `commit remove` (statistics removal).
     Remove { path: String },
     /// `omd delete` — alias for `commit delete` (tombstone).
@@ -153,12 +158,19 @@ fn emit(cli: &Cli, v: serde_json::Value) {
 fn run(cli: &Cli) -> Result<serde_json::Value, String> {
     let root = meta_root(cli);
     match &cli.cmd {
-        Cmd::Init { path } | Cmd::Import { path } | Cmd::Remove { path } | Cmd::Delete { path } => {
+        Cmd::Delete { path } => {
+            let mut store = Store::open(&root).map_err(|e| e.to_string())?;
+            let cid = pipeline::commit_lifecycle(
+                &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                CommitKind::Delete, path, None, "", &Expected::default(),
+            ).map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": "Delete" }))
+        }
+        Cmd::Init { path } | Cmd::Import { path, .. } | Cmd::Remove { path } => {
             let kind = match &cli.cmd {
                 Cmd::Init { .. } => CommitKind::Init,
                 Cmd::Import { .. } => CommitKind::Import,
                 Cmd::Remove { .. } => CommitKind::Remove,
-                Cmd::Delete { .. } => CommitKind::Delete,
                 _ => unreachable!(),
             };
             let mut store = Store::open(&root).map_err(|e| e.to_string())?;
@@ -166,10 +178,28 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             let node = format!("file:{path}");
             let mut payload = serde_json::Map::new();
             payload.insert("path".into(), path.clone().into());
-            let cid = pipeline::commit_file(
-                &mut store, &mut NoProbe, &OsRng, &SystemClock,
-                &node, p, kind, payload, &Expected::default(),
-            ).map_err(|e| e.to_string())?;
+            if let Cmd::Import { exclude, include, .. } = &cli.cmd {
+                payload.insert("exclude".into(), exclude.clone().into());
+                payload.insert("include".into(), include.clone().into());
+                // Record the resolved scope so statistics can re-resolve it:
+                // excludes applied first, includes override (gitignore !-cascade).
+                let mut stream: Vec<String> = exclude.clone();
+                stream.extend(include.iter().map(|i| format!("!{i}")));
+                payload.insert("scope".into(), stream.into());
+            }
+            // A directory import/remove records the statistics scope (no file
+            // bytes to observe); a file path is an ordinary tracked object.
+            let cid = if p.is_dir() {
+                pipeline::commit_marker(
+                    &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                    &node, kind, payload, &Expected::default(),
+                ).map_err(|e| e.to_string())?
+            } else {
+                pipeline::commit_file(
+                    &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                    &node, p, kind, payload, &Expected::default(),
+                ).map_err(|e| e.to_string())?
+            };
             Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": format!("{kind:?}") }))
         }
         Cmd::Commit { kind, path, reason, range, timestamp, source, target, link_id, changes, stop, no_reason, link_from, link_to, id } => {
@@ -293,6 +323,20 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                     &node, kind, payload, &Expected::default(),
                 ).map_err(|e| e.to_string())?
             } else {
+                // commit verify <file>: a file hash commit MUST NOT pass while
+                // any child range still carries an unhandled obligation or a
+                // dirty mark — the new hash cannot hide a range's debt (4.5).
+                if kind == CommitKind::FileVerify {
+                    for (k, ds) in &store.state().dirty {
+                        if omd::relations::node::parent_of(k) == node
+                            && (!ds.obligations.is_empty() || !ds.dirty.is_empty())
+                        {
+                            return Err(format!(
+                                "verify blocked: range {k} still has unhandled obligations/dirty"
+                            ));
+                        }
+                    }
+                }
                 pipeline::commit_file(
                     &mut store, &mut NoProbe, &OsRng, &SystemClock,
                     &node, Path::new(path), kind, payload, &Expected::default(),
@@ -317,11 +361,73 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             let rep = pipeline::verify(&store);
             Ok(serde_json::to_value(rep).unwrap())
         }
-        Cmd::Check { .. } => {
-            Ok(serde_json::json!({ "ok": true, "note": "coverage check — wired in coverage tasks" }))
+        Cmd::Check { path } => {
+            let store = Store::open(&root).map_err(|e| e.to_string())?;
+            // Resolve every recorded Import scope against the live FS, then
+            // report which in-scope files carry unexpired confirmed coverage.
+            // New members auto-enter statistics because scope re-resolves now.
+            let mut scopes: Vec<(String, Vec<String>)> = Vec::new();
+            if let Ok(rd) = std::fs::read_dir(root.join("commits")) {
+                for e in rd.flatten() {
+                    if let Ok(txt) = std::fs::read_to_string(e.path()) {
+                        if let Ok(c) = toml::from_str::<omd::records::commit::Commit>(&txt) {
+                            if c.kind == omd::records::commit::CommitKind::Import {
+                                let path = c.payload.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let scope: Vec<String> = c.payload.get("scope")
+                                    .and_then(|v| v.as_array())
+                                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                                    .unwrap_or_default();
+                                scopes.push((path, scope));
+                            }
+                        }
+                    }
+                }
+            }
+            let mut report = serde_json::Map::new();
+            let mut all_files = Vec::new();
+            let proj_root = std::env::current_dir().unwrap_or_default();
+            for (dir, pats) in &scopes {
+                let base = if dir.is_empty() { proj_root.clone() } else { proj_root.join(dir) };
+                let scope = omd::sources::scope::resolve(&base, pats);
+                for f in &scope.files {
+                    let node = format!("file:{}/{}", dir, f.display());
+                    let covered = store.state().tips.contains_key(&node);
+                    all_files.push(serde_json::json!({
+                        "file": f.display().to_string(),
+                        "scope": dir,
+                        "tracked": covered,
+                    }));
+                }
+                if !scope.problems.is_empty() {
+                    report.insert("problems".into(), scope.problems.clone().into());
+                }
+            }
+            report.insert("files".into(), all_files.into());
+            if let Some(p) = path {
+                report.insert("query".into(), p.clone().into());
+            }
+            Ok(serde_json::json!({ "ok": true, "check": report }))
         }
-        Cmd::Rename { .. } | Cmd::Copy { .. } => {
-            Ok(serde_json::json!({ "ok": true, "note": "lifecycle verb — wired in path-lifecycle tasks" }))
+        Cmd::Rename { source, target } => {
+            let mut store = Store::open(&root).map_err(|e| e.to_string())?;
+            let cid = pipeline::commit_lifecycle(
+                &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                CommitKind::Rename, source, Some(target), "", &Expected::default(),
+            ).map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": "Rename" }))
+        }
+        Cmd::Copy { source, target } => {
+            // copy = a fresh init on the target path — new identity, source
+            // untouched. Target file must exist to observe.
+            let mut store = Store::open(&root).map_err(|e| e.to_string())?;
+            let node = format!("file:{target}");
+            let mut payload = serde_json::Map::new();
+            payload.insert("path".into(), target.clone().into());
+            let cid = pipeline::commit_file(
+                &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                &node, Path::new(target), CommitKind::Init, payload, &Expected::default(),
+            ).map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": "Init", "copied_from": source }))
         }
         Cmd::Log { id } => {
             let store = Store::open(&root).map_err(|e| e.to_string())?;
