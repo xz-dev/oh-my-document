@@ -73,7 +73,11 @@ impl CommandOutcome {
     /// Empty stdout on success is a legitimate empty content.
     pub fn into_observation(self) -> Option<Observation> {
         if self.exit_ok {
-            Some(Observation { bytes: self.stdout, text: true, encoding: Some("utf-8".into()) })
+            Some(Observation {
+                bytes: self.stdout,
+                text: true,
+                encoding: Some("utf-8".into()),
+            })
         } else {
             None
         }

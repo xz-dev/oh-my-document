@@ -2,8 +2,8 @@
 //! matching, empty/deleted ranges.
 
 use omd::relations::diff::{diff_text, dirtied_by};
-use omd::relations::range::{text_len, text_slice, Mode, Range, RangeError};
-use omd::sources::encoding::{resolve, EncodingChoice};
+use omd::relations::range::{Mode, Range, RangeError, text_len, text_slice};
+use omd::sources::encoding::{EncodingChoice, resolve};
 
 #[test]
 fn text_ranges_count_scalar_positions_not_bytes() {
@@ -29,16 +29,20 @@ fn range_is_left_closed_right_open() {
 
 #[test]
 fn out_of_bounds_rejected_not_clamped() {
-    assert!(matches!(Range::new(0, 10, Mode::Text, 4), Err(RangeError::OutOfBounds)));
-    assert!(matches!(Range::new(5, 3, Mode::Text, 4), Err(RangeError::Inverted)));
+    assert!(matches!(
+        Range::new(0, 10, Mode::Text, 4),
+        Err(RangeError::OutOfBounds)
+    ));
+    assert!(matches!(
+        Range::new(5, 3, Mode::Text, 4),
+        Err(RangeError::Inverted)
+    ));
 }
 
-#[test]
 // `same_coordinates_independent_ranges` removed — asserting two equal-coord
 // Range structs are equal says nothing about independent chain identity.
 // Real coverage: commit without --id mints a nonce'd independent chain
 // (src/relations/node.rs range_key_nonce + commit arm).
-
 #[test]
 fn byte_mode_counts_offsets() {
     let r = Range::new(0, 3, Mode::Byte, 6).unwrap();
@@ -106,10 +110,16 @@ fn encoding_priority_cli_beats_recorded_beats_defaults() {
     };
     assert_eq!(resolve(&c), "utf-8"); // CLI wins
 
-    let c = EncodingChoice { recorded: Some("gbk".into()), ..Default::default() };
+    let c = EncodingChoice {
+        recorded: Some("gbk".into()),
+        ..Default::default()
+    };
     assert_eq!(resolve(&c), "gbk"); // recorded beats config+defaults
 
-    let c = EncodingChoice { project_default: Some("latin1".into()), ..Default::default() };
+    let c = EncodingChoice {
+        project_default: Some("latin1".into()),
+        ..Default::default()
+    };
     assert_eq!(resolve(&c), "latin1"); // project default beats user default
 
     assert_eq!(resolve(&EncodingChoice::default()), "utf-8"); // floor

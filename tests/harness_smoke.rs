@@ -3,7 +3,9 @@
 
 use std::rc::Rc;
 
-use omd::testing::{Clock, FaultInjector, FixedClock, FixedRng, PublishStage, Rng, Sandbox, Timestamp};
+use omd::testing::{
+    Clock, FaultInjector, FixedClock, FixedRng, PublishStage, Rng, Sandbox, Timestamp,
+};
 
 #[test]
 fn sandbox_isolated_and_removable() {

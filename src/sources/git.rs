@@ -10,7 +10,7 @@
 //! its target path; we follow it (bounded) and report broken links / cycles
 //! as diagnostics — never fall back to the worktree.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::Command;
 
 use super::SourceError;
@@ -29,14 +29,27 @@ pub struct GitRef {
 pub fn parse_git_ref(s: &str) -> Result<GitRef, SourceError> {
     let json = s.strip_prefix("git::").ok_or(SourceError::Command)?;
     let v: serde_json::Value = serde_json::from_str(json).map_err(|_| SourceError::Command)?;
-    let repo = v.get("repo").and_then(|x| x.as_str()).ok_or(SourceError::Command)?;
-    let commit = v.get("commit").and_then(|x| x.as_str()).ok_or(SourceError::Command)?;
-    let path = v.get("path").and_then(|x| x.as_str()).ok_or(SourceError::Command)?;
+    let repo = v
+        .get("repo")
+        .and_then(|x| x.as_str())
+        .ok_or(SourceError::Command)?;
+    let commit = v
+        .get("commit")
+        .and_then(|x| x.as_str())
+        .ok_or(SourceError::Command)?;
+    let path = v
+        .get("path")
+        .and_then(|x| x.as_str())
+        .ok_or(SourceError::Command)?;
     // Exact commit id: 40-hex only — no branch/tag/short/ref name.
     if commit.len() != 40 || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(SourceError::Command);
     }
-    Ok(GitRef { repo: PathBuf::from(repo), commit: commit.into(), path: path.into() })
+    Ok(GitRef {
+        repo: PathBuf::from(repo),
+        commit: commit.into(),
+        path: path.into(),
+    })
 }
 
 /// Read the raw blob for `gitref` at the exact commit. `git cat-file blob
@@ -54,7 +67,11 @@ fn read_blob_depth(gitref: &GitRef, depth: usize) -> Result<Vec<u8>, SourceError
     let out = Command::new("git")
         .args(["-C"])
         .arg(&gitref.repo)
-        .args(["cat-file", "blob", &format!("{}:{}", gitref.commit, gitref.path)])
+        .args([
+            "cat-file",
+            "blob",
+            &format!("{}:{}", gitref.commit, gitref.path),
+        ])
         .output()
         .map_err(|_| SourceError::Command)?;
     if !out.status.success() {

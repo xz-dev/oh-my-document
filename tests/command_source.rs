@@ -2,15 +2,14 @@
 //! content, exit-0 requirement, execution permission precedence.
 
 use omd::sources::command::{observe_command, parse_command_ref};
-use omd::sources::permission::{may_run, RunChoice};
+use omd::sources::permission::{RunChoice, may_run};
 
 #[test]
 fn literal_argv_boundaries_preserved() {
     // Args with empty strings, spaces, and literal `::` keep their order and
     // boundaries — never re-split.
-    let (exe, argv) = parse_command_ref(
-        "command::mycmd::[\"\", \"has space\", \"a::b\", \"x\"]",
-    ).unwrap();
+    let (exe, argv) =
+        parse_command_ref("command::mycmd::[\"\", \"has space\", \"a::b\", \"x\"]").unwrap();
     assert_eq!(exe, "mycmd");
     assert_eq!(argv, vec!["", "has space", "a::b", "x"]);
 }
@@ -38,8 +37,14 @@ fn command_runs_in_project_root() {
     assert!(out.exit_ok);
     let got = String::from_utf8_lossy(&out.stdout).trim().to_string();
     // Real path may differ by symlink — compare canonicalized.
-    let want = std::fs::canonicalize(&dir).unwrap().to_string_lossy().to_string();
-    let gotc = std::fs::canonicalize(&got).unwrap().to_string_lossy().to_string();
+    let want = std::fs::canonicalize(&dir)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
+    let gotc = std::fs::canonicalize(&got)
+        .unwrap()
+        .to_string_lossy()
+        .to_string();
     assert_eq!(gotc, want);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -67,11 +72,7 @@ fn empty_stdout_on_success_is_legal_empty_content() {
 fn stderr_does_not_fail_a_successful_run() {
     let dir = std::env::temp_dir();
     // `sh -c 'echo out; echo err >&2'` exits 0 with non-empty stderr.
-    let out = observe_command(
-        "sh",
-        &["-c".into(), "echo out; echo err >&2".into()],
-        &dir,
-    ).unwrap();
+    let out = observe_command("sh", &["-c".into(), "echo out; echo err >&2".into()], &dir).unwrap();
     assert!(out.exit_ok);
     let obs = out.into_observation().unwrap();
     assert_eq!(obs.bytes, b"out\n"); // stderr kept separate, not in content
@@ -83,9 +84,13 @@ fn large_output_drains_without_deadlock() {
     let dir = std::env::temp_dir();
     let out = observe_command(
         "sh",
-        &["-c".into(), "head -c 2000000 /dev/zero | tr '\\0' 'x'".into()],
+        &[
+            "-c".into(),
+            "head -c 2000000 /dev/zero | tr '\\0' 'x'".into(),
+        ],
         &dir,
-    ).unwrap();
+    )
+    .unwrap();
     assert!(out.exit_ok);
     assert_eq!(out.stdout.len(), 2_000_000);
 }
@@ -99,7 +104,8 @@ fn init_command_captures_full_stdout() {
         "sh",
         &["-c".into(), "printf 'line1\\nline2\\n'".into()],
         &dir,
-    ).unwrap();
+    )
+    .unwrap();
     assert!(out.exit_ok);
     let obs = out.into_observation().unwrap();
     assert_eq!(obs.bytes, b"line1\nline2\n");
@@ -108,8 +114,17 @@ fn init_command_captures_full_stdout() {
 #[test]
 fn execution_permission_precedence() {
     // CLI flag > config > built-in false.
-    assert!(may_run(&RunChoice { cli: Some(true), config: Some(false) }));
-    assert!(!may_run(&RunChoice { cli: Some(false), config: Some(true) }));
-    assert!(may_run(&RunChoice { cli: None, config: Some(true) }));
+    assert!(may_run(&RunChoice {
+        cli: Some(true),
+        config: Some(false)
+    }));
+    assert!(!may_run(&RunChoice {
+        cli: Some(false),
+        config: Some(true)
+    }));
+    assert!(may_run(&RunChoice {
+        cli: None,
+        config: Some(true)
+    }));
     assert!(!may_run(&RunChoice::default())); // built-in floor = false
 }

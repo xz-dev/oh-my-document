@@ -28,7 +28,12 @@ fn two_processes_cannot_hold_write_lock() {
     // Spawn a second process that tries to lock the same store — it must be
     // refused, not queued or pried.
     let mut holder = Command::new(omd_bin())
-        .args(["--meta", meta.to_str().unwrap(), "init", src.to_str().unwrap()])
+        .args([
+            "--meta",
+            meta.to_str().unwrap(),
+            "init",
+            src.to_str().unwrap(),
+        ])
         .current_dir(sb.source_dir())
         .spawn()
         .unwrap();
@@ -36,7 +41,12 @@ fn two_processes_cannot_hold_write_lock() {
     std::thread::sleep(std::time::Duration::from_millis(150));
 
     let contender = Command::new(omd_bin())
-        .args(["--meta", meta.to_str().unwrap(), "init", src.to_str().unwrap()])
+        .args([
+            "--meta",
+            meta.to_str().unwrap(),
+            "init",
+            src.to_str().unwrap(),
+        ])
         .current_dir(sb.source_dir())
         .output()
         .unwrap();
@@ -57,7 +67,7 @@ fn mid_read_state_change_reports_conflict() {
     let before = omd::records::store::pin_state(&root).unwrap().publication;
 
     s.lock().unwrap();
-    let mut c = omd::records::commit::Commit {
+    let c = omd::records::commit::Commit {
         id: None,
         salt: "abcdefghijklmnop".into(),
         previous_id: "".into(),
@@ -65,13 +75,18 @@ fn mid_read_state_change_reports_conflict() {
         schema: "omd.commit/1".into(),
         kind: omd::records::commit::CommitKind::Init,
         content_ref: "empty".into(),
-        payload: { let mut m = serde_json::Map::new(); m.insert("path".into(), "a".into()); m },
+        payload: {
+            let mut m = serde_json::Map::new();
+            m.insert("path".into(), "a".into());
+            m
+        },
         range_tips: Default::default(),
     };
     let mut st = s.state().clone();
     st.publication += 1;
     c.validate(true).unwrap();
-    s.publish(&mut omd::records::store::NoProbe, &c, "c1", None, None, st).unwrap();
+    s.publish(&mut omd::records::store::NoProbe, &c, "c1", None, None, st)
+        .unwrap();
 
     let after = omd::records::store::pin_state(&root).unwrap().publication;
     // The reader's pinned marker (before) differs from post-publish (after):

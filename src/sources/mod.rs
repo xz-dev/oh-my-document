@@ -39,16 +39,28 @@ pub enum SourceError {
 /// Read the file at its registered path *right now*.
 /// `text` selects decoded-text semantics; `encoding` is used when `text`.
 /// Byte mode never decodes.
-pub fn observe_file(path: &Path, text: bool, encoding: Option<&str>) -> Result<Observation, SourceError> {
+pub fn observe_file(
+    path: &Path,
+    text: bool,
+    encoding: Option<&str>,
+) -> Result<Observation, SourceError> {
     let bytes = std::fs::read(path)?;
     if text {
         let enc = encoding.unwrap_or("utf-8");
         // Decode-check now: invalid text under the chosen encoding is a
         // source error, not silently stored as byte garbage.
         decode(&bytes, enc)?;
-        Ok(Observation { bytes, text: true, encoding: Some(enc.to_string()) })
+        Ok(Observation {
+            bytes,
+            text: true,
+            encoding: Some(enc.to_string()),
+        })
     } else {
-        Ok(Observation { bytes, text: false, encoding: None })
+        Ok(Observation {
+            bytes,
+            text: false,
+            encoding: None,
+        })
     }
 }
 
@@ -67,5 +79,5 @@ fn decode(bytes: &[u8], encoding: &str) -> Result<String, SourceError> {
         .map(|cow| cow.into_owned())
         .ok_or(SourceError::Encoding)
 }
-pub mod scope;
 pub mod git;
+pub mod scope;

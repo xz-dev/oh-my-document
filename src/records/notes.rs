@@ -28,12 +28,10 @@ pub struct Note {
 }
 
 /// Append a note record into `notes/<id>.toml`. Returns the note id.
-pub fn append(
-    root: &std::path::Path,
-    note: &Note,
-) -> Result<String, std::io::Error> {
+pub fn append(root: &std::path::Path, note: &Note) -> Result<String, std::io::Error> {
     let path = root.join(format!("notes/{}.toml", note.id));
-    let txt = toml::to_string(note).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let txt = toml::to_string(note)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(&path, txt)?;
     Ok(note.id.clone())
 }
@@ -43,12 +41,11 @@ pub fn list_for(root: &std::path::Path, commit_id: &str) -> Vec<Note> {
     let mut out: Vec<Note> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(root.join("notes")) {
         for e in rd.flatten() {
-            if let Ok(txt) = std::fs::read_to_string(e.path()) {
-                if let Ok(n) = toml::from_str::<Note>(&txt) {
-                    if n.commit_id == commit_id {
-                        out.push(n);
-                    }
-                }
+            if let Ok(txt) = std::fs::read_to_string(e.path())
+                && let Ok(n) = toml::from_str::<Note>(&txt)
+                && n.commit_id == commit_id
+            {
+                out.push(n);
             }
         }
     }
@@ -61,12 +58,11 @@ pub fn revisions_of(root: &std::path::Path, note_id: &str) -> Vec<Note> {
     let mut out: Vec<Note> = Vec::new();
     if let Ok(rd) = std::fs::read_dir(root.join("notes")) {
         for e in rd.flatten() {
-            if let Ok(txt) = std::fs::read_to_string(e.path()) {
-                if let Ok(n) = toml::from_str::<Note>(&txt) {
-                    if n.target_note_id == note_id {
-                        out.push(n);
-                    }
-                }
+            if let Ok(txt) = std::fs::read_to_string(e.path())
+                && let Ok(n) = toml::from_str::<Note>(&txt)
+                && n.target_note_id == note_id
+            {
+                out.push(n);
             }
         }
     }

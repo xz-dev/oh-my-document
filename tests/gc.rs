@@ -3,50 +3,80 @@
 use std::process::Command;
 
 fn omd() -> std::path::PathBuf {
-    if let Some(p) = option_env!("CARGO_BIN_EXE_omd") { return p.into(); }
+    if let Some(p) = option_env!("CARGO_BIN_EXE_omd") {
+        return p.into();
+    }
     let mut p = std::env::current_exe().unwrap();
-    p.pop(); p.pop(); p.push("omd"); p
+    p.pop();
+    p.pop();
+    p.push("omd");
+    p
 }
 
 struct T(std::path::PathBuf);
 impl T {
     fn new() -> Self {
-        let r = std::env::temp_dir().join(format!("omd-gc-{}",
-            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let r = std::env::temp_dir().join(format!(
+            "omd-gc-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         std::fs::create_dir_all(&r).unwrap();
         Self(r)
     }
     fn run(&self, args: &[&str]) -> (i32, String, String) {
-        let o = Command::new(omd()).arg("--meta").arg(self.0.join(".omd"))
-            .args(args).current_dir(&self.0).output().unwrap();
-        (o.status.code().unwrap_or(-1),
-         String::from_utf8_lossy(&o.stdout).into(),
-         String::from_utf8_lossy(&o.stderr).into())
+        let o = Command::new(omd())
+            .arg("--meta")
+            .arg(self.0.join(".omd"))
+            .args(args)
+            .current_dir(&self.0)
+            .output()
+            .unwrap();
+        (
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stdout).into(),
+            String::from_utf8_lossy(&o.stderr).into(),
+        )
     }
-    fn write(&self, p: &str, c: &str) { std::fs::write(self.0.join(p), c).unwrap(); }
+    fn write(&self, p: &str, c: &str) {
+        std::fs::write(self.0.join(p), c).unwrap();
+    }
     fn tip(&self, node: &str) -> String {
-        std::fs::read_to_string(self.0.join(".omd/state.toml")).unwrap_or_default()
-            .lines().find(|l| l.contains(&format!("\"{node}\"")) && l.contains('='))
-            .and_then(|l| l.split('=').nth(1).map(|v| v.trim().trim_matches('"').to_string()))
+        std::fs::read_to_string(self.0.join(".omd/state.toml"))
             .unwrap_or_default()
-    }
-    fn commit_count(&self) -> usize {
-        std::fs::read_dir(self.0.join(".omd/commits")).map(|d| d.count()).unwrap_or(0)
+            .lines()
+            .find(|l| l.contains(&format!("\"{node}\"")) && l.contains('='))
+            .and_then(|l| {
+                l.split('=')
+                    .nth(1)
+                    .map(|v| v.trim().trim_matches('"').to_string())
+            })
+            .unwrap_or_default()
     }
     fn commit_exists(&self, id: &str) -> bool {
         self.0.join(format!(".omd/commits/{id}.toml")).exists()
     }
 }
-impl Drop for T { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+impl Drop for T {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 #[test]
 fn gc_collects_unreferenced_dangling_commit() {
     let t = T::new();
     t.write("a.md", "a");
     t.run(&["init", "a.md"]);
-    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "r1"]);
+    t.run(&[
+        "commit", "commit", "a.md", "--range", "0-1", "--reason", "r1",
+    ]);
     let c1 = t.tip("range:a.md@text:0-1");
-    t.run(&["commit", "commit", "a.md", "--id", &c1, "--range", "0-1", "--reason", "r2"]);
+    t.run(&[
+        "commit", "commit", "a.md", "--id", &c1, "--range", "0-1", "--reason", "r2",
+    ]);
     let c2 = t.tip("range:a.md@text:0-1");
     t.run(&["commit", "reset", "a.md", "--reason", &c1]);
     // c2 is dangling (unreferenced). gc collects it.
@@ -61,7 +91,9 @@ fn gc_retains_reachable_commits() {
     let t = T::new();
     t.write("a.md", "a");
     t.run(&["init", "a.md"]);
-    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "r1"]);
+    t.run(&[
+        "commit", "commit", "a.md", "--range", "0-1", "--reason", "r1",
+    ]);
     let c1 = t.tip("range:a.md@text:0-1");
     t.run(&["gc"]);
     // The current tip chain (c1 + its ancestors) is reachable — retained.

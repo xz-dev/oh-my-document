@@ -186,20 +186,44 @@ impl Commit {
         use CommitKind::*;
         match kind {
             Init => ["path"].into_iter().collect(),
-            Commit | Clean | Unclean | FileVerify => {
-                ["path", "range", "reason", "no_reason", "expected", "link_id", "changes", "stop"]
-                    .into_iter()
-                    .collect()
-            }
+            Commit | Clean | Unclean | FileVerify => [
+                "path",
+                "range",
+                "reason",
+                "no_reason",
+                "expected",
+                "link_id",
+                "changes",
+                "stop",
+            ]
+            .into_iter()
+            .collect(),
             AtomicBegin | AtomicEnd => ["path", "chain"].into_iter().collect(),
-            Link => ["path", "link_id", "source", "target", "reason", "peer_store_id"].into_iter().collect(),
-            Adapt => ["path", "link_id", "changes", "reason", "stop"].into_iter().collect(),
+            Link => [
+                "path",
+                "link_id",
+                "source",
+                "target",
+                "reason",
+                "peer_store_id",
+            ]
+            .into_iter()
+            .collect(),
+            Adapt => ["path", "link_id", "changes", "reason", "stop"]
+                .into_iter()
+                .collect(),
             Rename => ["path", "source", "target", "reason"].into_iter().collect(),
             Delete => ["path", "source", "reason"].into_iter().collect(),
-            Import | Remove => ["path", "include", "exclude", "scope"].into_iter().collect(),
-            ScopeAdjust => ["path", "include", "exclude", "rule", "level", "skip"].into_iter().collect(),
+            Import | Remove => ["path", "include", "exclude", "scope"]
+                .into_iter()
+                .collect(),
+            ScopeAdjust => ["path", "include", "exclude", "rule", "level", "skip"]
+                .into_iter()
+                .collect(),
             Tag => ["path", "tag"].into_iter().collect(),
-            Reset => ["path", "requested", "actual", "warning"].into_iter().collect(),
+            Reset => ["path", "requested", "actual", "warning"]
+                .into_iter()
+                .collect(),
         }
     }
 

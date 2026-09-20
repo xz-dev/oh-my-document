@@ -7,18 +7,29 @@
 //! can't express unambiguously goes through `--source-json`, never a
 //! template language.
 
-use super::command::parse_command_ref;
 use super::SourceError;
+use super::command::parse_command_ref;
 
 /// A resolved source reference.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceRef {
     /// `proj:<alias>:<path>` — a file in an aliased project (`root` = self).
-    File { alias: String, path: String, byte: bool },
+    File {
+        alias: String,
+        path: String,
+        byte: bool,
+    },
     /// `command::<exe>::<args>` — virtual file from program stdout.
-    Command { executable: String, args: Vec<String> },
+    Command {
+        executable: String,
+        args: Vec<String>,
+    },
     /// `git::<JSON>` — exact-commit blob from a local repo.
-    Git { repo: String, commit: String, path: String },
+    Git {
+        repo: String,
+        commit: String,
+        path: String,
+    },
 }
 
 /// Parse a source reference string.
@@ -40,7 +51,10 @@ pub fn parse_source_ref(s: &str) -> Result<SourceRef, SourceError> {
     }
     if s.starts_with("command::") {
         let (exe, args) = parse_command_ref(s)?;
-        return Ok(SourceRef::Command { executable: exe, args });
+        return Ok(SourceRef::Command {
+            executable: exe,
+            args,
+        });
     }
     if s.starts_with("git::") {
         let g = super::git::parse_git_ref(s)?;

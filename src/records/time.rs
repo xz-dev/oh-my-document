@@ -43,20 +43,28 @@ pub fn parse_rfc3339(s: &str) -> Option<Timestamp> {
     let (date, time) = date_time.split_once('T')?;
     let (y, mo, d): (i64, i64, i64) = {
         let mut it = date.split('-');
-        (it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?)
+        (
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+        )
     };
     let (h, mi, se): (i64, i64, i64) = {
         let mut it = time.split(':');
-        (it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?)
+        (
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+            it.next()?.parse().ok()?,
+        )
     };
     // Days since epoch (civil) — Howard Hinnant algorithm.
-    let y = if mo <= 2 { y - 1 } else { y } as i64;
+    let y = if mo <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
     let yoe = y - era * 400;
     let doy = (153 * (if mo > 2 { mo - 3 } else { mo + 9 }) + 2) / 5 + d - 1;
     let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
     let days = era * 146097 + doe - 719468;
-    let secs = days * 86400 + (h * 3600 + mi * 60 + se) as i64;
+    let secs = days * 86400 + (h * 3600 + mi * 60 + se);
     let nanos: u64 = format!("{:0<9}", frac).parse().ok()?;
     Some(Timestamp(secs as u64 * 1_000_000_000 + nanos))
 }

@@ -1,8 +1,8 @@
 //! Group 5: deterministic discovery + source-reference parsing.
 
-use omd::sources::discovery::{metadata_dir, DiscoveryError};
-use omd::sources::reference::{parse_source_ref, SourceRef};
-use omd::sources::encoding::{resolve, EncodingChoice};
+use omd::sources::discovery::{DiscoveryError, metadata_dir};
+use omd::sources::encoding::{EncodingChoice, resolve};
+use omd::sources::reference::{SourceRef, parse_source_ref};
 
 #[test]
 fn proj_ref_keeps_whole_path_with_colons_and_slashes() {

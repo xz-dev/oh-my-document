@@ -60,13 +60,22 @@ impl DirtyState {
     /// Push a new unclean obligation. Distinct id each time — obligations
     /// stack, never collapse onto one entry.
     pub fn push_unclean(&mut self, commit_id: &str, reason: &str) {
-        let atop = self.obligations.last().map(|o| o.commit_id.clone()).unwrap_or_default();
+        let atop = self
+            .obligations
+            .last()
+            .map(|o| o.commit_id.clone())
+            .unwrap_or_default();
         self.obligations.push(Obligation {
             commit_id: commit_id.to_string(),
             reason: reason.to_string(),
             atop,
         });
-        self.dirty.insert(commit_id.to_string(), DirtyReason::ExplicitUnclean { reason: reason.to_string() });
+        self.dirty.insert(
+            commit_id.to_string(),
+            DirtyReason::ExplicitUnclean {
+                reason: reason.to_string(),
+            },
+        );
     }
 
     /// Is `commit` dirty?
@@ -95,7 +104,9 @@ impl DirtyState {
                 if !present(d) {
                     self.mark(
                         dependent,
-                        DirtyReason::DependencyDangling { dependency: d.clone() },
+                        DirtyReason::DependencyDangling {
+                            dependency: d.clone(),
+                        },
                     );
                     return Err(DanglingHop {
                         dependent: dependent.clone(),

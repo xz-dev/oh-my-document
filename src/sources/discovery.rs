@@ -44,13 +44,17 @@ fn env_path(var: &str, cwd: &Path) -> Option<PathBuf> {
 }
 
 fn xdg_config() -> Option<PathBuf> {
-    std::env::var("XDG_CONFIG_HOME").ok().filter(|s| !s.is_empty())
+    std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
         .map(|d| PathBuf::from(d).join("omd"))
         .or_else(|| home().map(|h| h.join(".config").join("omd")))
 }
 
 fn xdg_cache() -> Option<PathBuf> {
-    std::env::var("XDG_CACHE_HOME").ok().filter(|s| !s.is_empty())
+    std::env::var("XDG_CACHE_HOME")
+        .ok()
+        .filter(|s| !s.is_empty())
         .map(|d| PathBuf::from(d).join("omd"))
         .or_else(|| home().map(|h| h.join(".cache").join("omd")))
 }

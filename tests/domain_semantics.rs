@@ -44,8 +44,18 @@ fn dangling_dependency_fails_at_first_broken_hop() {
 fn link_instances_with_same_endpoints_are_distinct() {
     // Two links between identical source/target are separate instances via
     // distinct link_id — adaptation addresses one, not both.
-    let l1 = Link { link_id: Id128([1; 16]), source: "a@0-5:cA".into(), target: "b@0-5:cB".into(), reason: "r".into() };
-    let l2 = Link { link_id: Id128([2; 16]), source: "a@0-5:cA".into(), target: "b@0-5:cB".into(), reason: "r".into() };
+    let l1 = Link {
+        link_id: Id128([1; 16]),
+        source: "a@0-5:cA".into(),
+        target: "b@0-5:cB".into(),
+        reason: "r".into(),
+    };
+    let l2 = Link {
+        link_id: Id128([2; 16]),
+        source: "a@0-5:cA".into(),
+        target: "b@0-5:cB".into(),
+        reason: "r".into(),
+    };
     assert_ne!(l1.link_id, l2.link_id);
     assert_eq!(l1.source, l2.source);
 }
@@ -61,7 +71,11 @@ fn cycles_terminate_without_repeat_obligations() {
     let order = omd::relations::dirty::DirtyState::reachable_bounded("A", &edges);
     // Each visited once — no A re-entry.
     assert_eq!(order.len(), 3);
-    assert!(order.contains(&"A".to_string()) && order.contains(&"B".to_string()) && order.contains(&"C".to_string()));
+    assert!(
+        order.contains(&"A".to_string())
+            && order.contains(&"B".to_string())
+            && order.contains(&"C".to_string())
+    );
 }
 
 // `adapt_requires_link_id_changes_reason` removed — asserting struct fields

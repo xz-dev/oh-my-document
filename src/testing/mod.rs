@@ -17,10 +17,10 @@
 use std::cell::Cell;
 use std::collections::HashSet;
 use std::env;
-use std::sync::OnceLock;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 
 /// Fixed-point nanosecond timestamp used by `FixedClock`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -40,7 +40,11 @@ pub struct FixedClock {
 
 impl FixedClock {
     pub fn new(start: Timestamp) -> Self {
-        Self { start, step_nanos: 1, tick: Cell::new(0) }
+        Self {
+            start,
+            step_nanos: 1,
+            tick: Cell::new(0),
+        }
     }
     pub fn with_step(mut self, step_nanos: u64) -> Self {
         self.step_nanos = step_nanos;
@@ -68,7 +72,9 @@ pub struct FixedRng {
 
 impl FixedRng {
     pub fn new(seed: u64) -> Self {
-        Self { state: Cell::new(seed.max(1)) }
+        Self {
+            state: Cell::new(seed.max(1)),
+        }
     }
 }
 
@@ -182,10 +188,7 @@ fn omd_binary() -> PathBuf {
         // Fallback: derive from the test binary's location
         // (target/<profile>/deps/<test>) → target/<profile>/omd.
         let exe = env::current_exe().expect("current exe");
-        let profile_dir = exe
-            .parent()
-            .and_then(|d| d.parent())
-            .expect("profile dir");
+        let profile_dir = exe.parent().and_then(|d| d.parent()).expect("profile dir");
         profile_dir.join(if cfg!(windows) { "omd.exe" } else { "omd" })
     })
     .clone()
@@ -199,7 +202,10 @@ pub struct OmdCmd {
 
 impl OmdCmd {
     pub fn in_sandbox(sandbox: std::rc::Rc<Sandbox>) -> Self {
-        Self { sandbox, args: Vec::new() }
+        Self {
+            sandbox,
+            args: Vec::new(),
+        }
     }
 
     pub fn arg(mut self, a: impl Into<String>) -> Self {

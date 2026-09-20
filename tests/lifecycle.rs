@@ -3,9 +3,14 @@
 use std::process::Command;
 
 fn omd() -> std::path::PathBuf {
-    if let Some(p) = option_env!("CARGO_BIN_EXE_omd") { return p.into(); }
+    if let Some(p) = option_env!("CARGO_BIN_EXE_omd") {
+        return p.into();
+    }
     let mut p = std::env::current_exe().unwrap();
-    p.pop(); p.pop(); p.push("omd"); p
+    p.pop();
+    p.pop();
+    p.push("omd");
+    p
 }
 
 struct T(std::path::PathBuf);
@@ -16,11 +21,18 @@ impl T {
         Self(r)
     }
     fn run(&self, args: &[&str]) -> (i32, String, String) {
-        let o = Command::new(omd()).arg("--meta").arg(self.0.join(".omd"))
-            .args(args).current_dir(&self.0).output().unwrap();
-        (o.status.code().unwrap_or(-1),
-         String::from_utf8_lossy(&o.stdout).into(),
-         String::from_utf8_lossy(&o.stderr).into())
+        let o = Command::new(omd())
+            .arg("--meta")
+            .arg(self.0.join(".omd"))
+            .args(args)
+            .current_dir(&self.0)
+            .output()
+            .unwrap();
+        (
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stdout).into(),
+            String::from_utf8_lossy(&o.stderr).into(),
+        )
     }
     fn state(&self) -> String {
         std::fs::read_to_string(self.0.join(".omd/state.toml")).unwrap_or_default()
@@ -31,8 +43,17 @@ impl T {
         std::fs::write(&f, c).unwrap();
     }
 }
-impl Drop for T { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
-fn nanos() -> u128 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() }
+impl Drop for T {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+fn nanos() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
+}
 
 #[test]
 fn rename_migrates_node_and_ranges() {
@@ -45,9 +66,15 @@ fn rename_migrates_node_and_ranges() {
     assert!(out.contains("Rename"));
     let s = t.state();
     assert!(s.contains("\"file:b.md\""), "target node missing:\n{s}");
-    assert!(!s.contains("\"file:a.md\""), "source node should move:\n{s}");
+    assert!(
+        !s.contains("\"file:a.md\""),
+        "source node should move:\n{s}"
+    );
     // Child range identity re-keys to the target path.
-    assert!(s.contains("range:b.md@text:0-3"), "range did not follow:\n{s}");
+    assert!(
+        s.contains("range:b.md@text:0-3"),
+        "range did not follow:\n{s}"
+    );
 }
 
 #[test]
@@ -65,7 +92,8 @@ fn delete_creates_tombstone_not_erasure() {
 #[test]
 fn copy_makes_fresh_identity() {
     let t = T::new();
-    t.write("a.md", "x"); t.write("d.md", "y");
+    t.write("a.md", "x");
+    t.write("d.md", "y");
     t.run(&["init", "a.md"]);
     let (c, _, _) = t.run(&["copy", "a.md", "d.md"]);
     assert_eq!(c, 0);
@@ -78,7 +106,14 @@ fn copy_makes_fresh_identity() {
 fn import_dir_records_scope_and_patterns() {
     let t = T::new();
     t.write("docs/a.md", "a");
-    let (c, out, err) = t.run(&["import", "docs", "--exclude", "*.tmp", "--include", "docs/**"]);
+    let (c, out, err) = t.run(&[
+        "import",
+        "docs",
+        "--exclude",
+        "*.tmp",
+        "--include",
+        "docs/**",
+    ]);
     assert_eq!(c, 0, "{err}");
     assert!(out.contains("Import"));
 }
@@ -99,9 +134,9 @@ fn vacated_path_histories_stay_separate() {
     let t = T::new();
     t.write("a.md", "first");
     t.run(&["init", "a.md"]);
-    t.run(&["rename", "a.md", "b.md"]);   // a -> b (vacate a)
+    t.run(&["rename", "a.md", "b.md"]); // a -> b (vacate a)
     t.write("a.md", "second");
-    t.run(&["init", "a.md"]);              // new file takes path a
+    t.run(&["init", "a.md"]); // new file takes path a
     let s = t.state();
     // b.md chain continues the old a.md; a.md is a fresh chain.
     assert!(s.contains("\"file:b.md\""));
@@ -115,7 +150,7 @@ fn new_members_auto_enter_import_statistics() {
     let t = T::new();
     t.write("docs/a.md", "a");
     t.run(&["import", "docs"]);
-    t.write("docs/new.md", "b");              // added AFTER the import
+    t.write("docs/new.md", "b"); // added AFTER the import
     let (c, out, _) = t.run(&["check"]);
     assert_eq!(c, 0);
     assert!(out.contains("new.md"), "new member not in stats:\n{out}");
@@ -139,9 +174,12 @@ fn commit_verify_blocked_by_dirty_child_range() {
     t.write("a.md", "content");
     t.run(&["init", "a.md"]);
     t.run(&["commit", "commit", "a.md", "--range", "0-3"]);
-    t.run(&["commit", "unclean", "a.md", "--range", "0-3"]);   // dirty the range
+    t.run(&["commit", "unclean", "a.md", "--range", "0-3"]); // dirty the range
     let (c, _, err) = t.run(&["commit", "verify", "a.md"]);
-    assert!(err.contains("verify blocked") || c != 0, "expected block: {err}");
+    assert!(
+        err.contains("verify blocked") || c != 0,
+        "expected block: {err}"
+    );
 }
 
 #[test]
@@ -158,9 +196,12 @@ fn verify_reports_ambiguous_fragment_locate() {
     let t = T::new();
     t.write("a.md", "abc XX abc YY");
     t.run(&["init", "a.md"]);
-    t.run(&["commit", "commit", "a.md", "--range", "7-10"]);   // second 'abc'
+    t.run(&["commit", "commit", "a.md", "--range", "7-10"]); // second 'abc'
     let (_, out, _) = t.run(&["verify"]);
-    assert!(out.contains("ambiguous"), "expected locate diagnostic:\n{out}");
+    assert!(
+        out.contains("ambiguous"),
+        "expected locate diagnostic:\n{out}"
+    );
     assert!(out.contains("candidates"));
 }
 
@@ -172,11 +213,13 @@ fn missing_source_is_not_empty_content() {
     let t = T::new();
     t.write("a.md", "content");
     t.run(&["init", "a.md"]);
-    std::fs::remove_file(t.0.join("a.md")).unwrap();   // no tombstone
+    std::fs::remove_file(t.0.join("a.md")).unwrap(); // no tombstone
     let (_, out, _) = t.run(&["verify"]);
     // Must not silently treat as empty — a diagnostic about the file.
-    assert!(out.contains("a.md") || out.contains("missing") || !out.contains("\"ok\": true"),
-        "missing source silently OK:\n{out}");
+    assert!(
+        out.contains("a.md") || out.contains("missing") || !out.contains("\"ok\": true"),
+        "missing source silently OK:\n{out}"
+    );
 }
 
 #[test]
@@ -215,7 +258,10 @@ fn remove_keeps_ranges_and_disk_content() {
     t.write("docs/x.md", "x");
     t.run(&["init", "docs/x.md"]);
     t.run(&["remove", "docs"]);
-    assert!(t.0.join("docs/x.md").exists(), "remove must not delete disk");
+    assert!(
+        t.0.join("docs/x.md").exists(),
+        "remove must not delete disk"
+    );
     assert!(t.0.join("docs/a.md").exists());
     // The tracked file node survives statistics removal.
     assert!(t.state().contains("file:docs/x.md"));
@@ -231,12 +277,20 @@ fn self_tracking_not_auto_confirmed() {
     t.run(&["import", ".omd"]);
     // A coverage/check run must not report 100% self-confirmation.
     let (_, out, _) = t.run(&["check"]);
-    assert!(!out.contains("self-confirmed"), "self-tracking must not auto-confirm");
+    assert!(
+        !out.contains("self-confirmed"),
+        "self-tracking must not auto-confirm"
+    );
 }
 
 fn extract_tip(state: &str, node: &str) -> String {
-    state.lines()
+    state
+        .lines()
         .find(|l| l.contains(&format!("\"{node}\"")))
-        .and_then(|l| l.split('=').nth(1).map(|v| v.trim().trim_matches('"').to_string()))
+        .and_then(|l| {
+            l.split('=')
+                .nth(1)
+                .map(|v| v.trim().trim_matches('"').to_string())
+        })
         .unwrap_or_default()
 }

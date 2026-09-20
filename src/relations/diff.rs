@@ -44,12 +44,20 @@ pub fn diff_text(old: &str, new: &str) -> Vec<Hunk> {
             }
             ChangeTag::Delete => {
                 // Deletion consumes old, not new positions.
-                let h = pending.get_or_insert(Hunk { pos, len: 0, insertion: true });
+                let h = pending.get_or_insert(Hunk {
+                    pos,
+                    len: 0,
+                    insertion: true,
+                });
                 h.insertion = h.insertion && h.len == 0;
                 // deletion itself doesn't advance pos
             }
             ChangeTag::Insert => {
-                let h = pending.get_or_insert(Hunk { pos, len: 0, insertion: true });
+                let h = pending.get_or_insert(Hunk {
+                    pos,
+                    len: 0,
+                    insertion: true,
+                });
                 h.len += n;
                 pos += n;
             }
@@ -73,10 +81,7 @@ pub fn locate_candidates(fragment: &str, content: &str) -> Vec<usize> {
     if fragment.is_empty() {
         return vec![];
     }
-    content
-        .match_indices(fragment)
-        .map(|(i, _)| i)
-        .collect()
+    content.match_indices(fragment).map(|(i, _)| i).collect()
 }
 
 /// Is the fragment's placement ambiguous — more than one same-text match?

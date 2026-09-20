@@ -4,9 +4,10 @@
 //! (Python: sha256 over u64-BE-framed fields). It MUST NOT be regenerated
 //! from this crate's serializer — that would make the test tautological.
 
-use super::*;
 use crate::records::commit::{Commit, CommitKind};
-use crate::records::id::{canonical_payload_bytes, derive_commit_id, salt_from_bytes, ContentRef, OperationPayload};
+use crate::records::id::{
+    ContentRef, OperationPayload, canonical_payload_bytes, derive_commit_id, salt_from_bytes,
+};
 use crate::records::ids::Id128;
 
 fn base_commit(kind: CommitKind) -> Commit {
@@ -73,8 +74,18 @@ fn payload_key_order_is_canonical() {
     let mut f2 = serde_json::Map::new();
     f2.insert("b".into(), 2.into());
     f2.insert("a".into(), 1.into());
-    let p1 = OperationPayload { kind: "k".into(), schema: "s".into(), content_ref: ContentRef::Empty, fields: f1 };
-    let p2 = OperationPayload { kind: "k".into(), schema: "s".into(), content_ref: ContentRef::Empty, fields: f2 };
+    let p1 = OperationPayload {
+        kind: "k".into(),
+        schema: "s".into(),
+        content_ref: ContentRef::Empty,
+        fields: f1,
+    };
+    let p2 = OperationPayload {
+        kind: "k".into(),
+        schema: "s".into(),
+        content_ref: ContentRef::Empty,
+        fields: f2,
+    };
     assert_eq!(canonical_payload_bytes(&p1), canonical_payload_bytes(&p2));
 }
 
@@ -117,7 +128,8 @@ fn first_commit_rejects_nonempty_previous() {
 fn unknown_payload_field_rejected_for_kind() {
     let mut c = base_commit(CommitKind::Init);
     c.payload.insert("path".into(), "docs/a.md".into());
-    c.payload.insert("reason".into(), "not allowed on init".into());
+    c.payload
+        .insert("reason".into(), "not allowed on init".into());
     assert!(c.validate(true).is_err());
 }
 
@@ -142,7 +154,12 @@ fn file_commit_snapshot_records_range_tips() {
     c.range_tips.insert("r1".into(), "tip_a".into());
     c.range_tips.insert("r2".into(), "tip_b".into());
     let payload = c.canonical_payload();
-    let tips = payload.fields.get("range_tips").unwrap().as_object().unwrap();
+    let tips = payload
+        .fields
+        .get("range_tips")
+        .unwrap()
+        .as_object()
+        .unwrap();
     assert_eq!(tips["r1"], "tip_a");
     assert_eq!(tips["r2"], "tip_b");
 }
@@ -177,7 +194,10 @@ fn version_created_before_commit_no_self_reference() {
     let v = SourceVersion::new(
         ver_id,
         b"content",
-        Acquisition::File { path: "docs/a.md".into(), encoding: "utf-8".into() },
+        Acquisition::File {
+            path: "docs/a.md".into(),
+            encoding: "utf-8".into(),
+        },
         Some("utf-8".into()),
     );
     let mut c = base_commit(CommitKind::Commit);
@@ -193,13 +213,19 @@ fn equal_observations_reuse_version_identity() {
     let a = SourceVersion::new(
         id,
         b"same bytes",
-        Acquisition::File { path: "f".into(), encoding: "utf-8".into() },
+        Acquisition::File {
+            path: "f".into(),
+            encoding: "utf-8".into(),
+        },
         Some("utf-8".into()),
     );
     let b = SourceVersion::new(
         id,
         b"same bytes",
-        Acquisition::File { path: "f".into(), encoding: "utf-8".into() },
+        Acquisition::File {
+            path: "f".into(),
+            encoding: "utf-8".into(),
+        },
         Some("utf-8".into()),
     );
     assert_eq!(a.reuse_key(), b.reuse_key());
@@ -208,8 +234,24 @@ fn equal_observations_reuse_version_identity() {
 #[test]
 fn different_content_gives_different_hash() {
     let id = Id128([7; 16]);
-    let a = SourceVersion::new(id, b"x", Acquisition::File { path: "f".into(), encoding: "utf-8".into() }, None);
-    let b = SourceVersion::new(id, b"y", Acquisition::File { path: "f".into(), encoding: "utf-8".into() }, None);
+    let a = SourceVersion::new(
+        id,
+        b"x",
+        Acquisition::File {
+            path: "f".into(),
+            encoding: "utf-8".into(),
+        },
+        None,
+    );
+    let b = SourceVersion::new(
+        id,
+        b"y",
+        Acquisition::File {
+            path: "f".into(),
+            encoding: "utf-8".into(),
+        },
+        None,
+    );
     assert_ne!(a.sha256, b.sha256);
 }
 

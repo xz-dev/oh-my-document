@@ -45,7 +45,9 @@ fn walk(
             return;
         }
         Err(e) => {
-            scope.problems.push(format!("unreadable: {}: {e}", dir.display()));
+            scope
+                .problems
+                .push(format!("unreadable: {}: {e}", dir.display()));
             return;
         }
         _ => {}
@@ -53,7 +55,9 @@ fn walk(
     let rd = match std::fs::read_dir(dir) {
         Ok(r) => r,
         Err(e) => {
-            scope.problems.push(format!("unreadable: {}: {e}", dir.display()));
+            scope
+                .problems
+                .push(format!("unreadable: {}: {e}", dir.display()));
             return;
         }
     };
@@ -63,7 +67,9 @@ fn walk(
         let ft = entry.file_type();
         // Broken symlink: file_type errors / canonicalize fails.
         if p.is_symlink() && p.canonicalize().is_err() {
-            scope.problems.push(format!("broken link: {}", rel.display()));
+            scope
+                .problems
+                .push(format!("broken link: {}", rel.display()));
             continue;
         }
         // Follow symlinks: `p.is_dir()` traverses to the target so a
@@ -85,12 +91,17 @@ fn included(rel: &Path, is_dir: bool, patterns: &[String]) -> bool {
     let s = rel.to_string_lossy().replace('\\', "/");
     let mut inc = true; // default: everything is in scope
     for pat in patterns {
-        let (neg, pat) = pat.strip_prefix('!').map_or((false, pat.as_str()), |p| (true, p));
+        let (neg, pat) = pat
+            .strip_prefix('!')
+            .map_or((false, pat.as_str()), |p| (true, p));
         let (dir_only, pat) = pat.strip_suffix('/').map_or((false, pat), |p| (true, p));
         if dir_only && !is_dir {
             continue;
         }
-        if glob_match(pat, &s) || glob_match(&format!("{pat}/**"), &s) || s.starts_with(&format!("{pat}/")) {
+        if glob_match(pat, &s)
+            || glob_match(&format!("{pat}/**"), &s)
+            || s.starts_with(&format!("{pat}/"))
+        {
             // bare match excludes; `!` match re-includes (gitignore polarity).
             inc = neg;
         }
@@ -123,15 +134,22 @@ fn seg_match(p: &str, s: &str) -> bool {
     let (mut star, mut ss) = (usize::MAX, 0usize);
     while si < sb.len() {
         if pi < pb.len() && (pb[pi] == '?' || pb[pi] == sb[si]) {
-            pi += 1; si += 1;
+            pi += 1;
+            si += 1;
         } else if pi < pb.len() && pb[pi] == '*' {
-            star = pi; ss = si; pi += 1;
+            star = pi;
+            ss = si;
+            pi += 1;
         } else if star != usize::MAX {
-            pi = star + 1; ss += 1; si = ss;
+            pi = star + 1;
+            ss += 1;
+            si = ss;
         } else {
             return false;
         }
     }
-    while pi < pb.len() && pb[pi] == '*' { pi += 1; }
+    while pi < pb.len() && pb[pi] == '*' {
+        pi += 1;
+    }
     pi == pb.len()
 }

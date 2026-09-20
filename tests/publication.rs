@@ -5,9 +5,9 @@ use std::path::Path;
 use std::rc::Rc;
 
 use omd::records::commit::{Commit, CommitKind};
-use omd::records::store::{pin_state, Expected, NoProbe, Store};
-use omd::testing::PublishStage;
+use omd::records::store::{Expected, NoProbe, Store, pin_state};
 use omd::records::version::{Acquisition, SourceVersion};
+use omd::testing::PublishStage;
 use omd::testing::{FaultInjector, Sandbox};
 
 fn commit(kind: CommitKind, salt: &str) -> Commit {
@@ -39,7 +39,10 @@ fn lock_conflicts_are_rejected_not_waited() {
     a.lock().unwrap();
     // A second open on the same dir must fail fast, not block or retry.
     let mut b = open_store(&sb.meta_dir());
-    assert!(matches!(b.lock(), Err(omd::records::store::StoreError::Lock)));
+    assert!(matches!(
+        b.lock(),
+        Err(omd::records::store::StoreError::Lock)
+    ));
 }
 
 #[test]
@@ -47,7 +50,10 @@ fn expected_version_conflict_aborts() {
     let sb = Rc::new(Sandbox::new().unwrap());
     let mut s = open_store(&sb.meta_dir());
     s.lock().unwrap();
-    let exp = Expected { publication: Some(999), ..Default::default() };
+    let exp = Expected {
+        publication: Some(999),
+        ..Default::default()
+    };
     assert!(s.check_expected(&exp).is_err());
 }
 
@@ -64,7 +70,10 @@ fn staged_failure_before_rename_keeps_old_state() {
     let mut new_state = s.state().clone();
     new_state.publication += 1;
     new_state.tips.insert("file:a".into(), "deadbeef".into());
-    assert!(s.publish(&mut inj, &c, "c1", None, None, new_state).is_err());
+    assert!(
+        s.publish(&mut inj, &c, "c1", None, None, new_state)
+            .is_err()
+    );
 
     // Old state must still be readable and unchanged.
     let pinned = pin_state(&sb.meta_dir()).unwrap();
@@ -81,7 +90,8 @@ fn post_rename_publishes_full_new_state() {
     let mut new_state = s.state().clone();
     new_state.publication += 1;
     new_state.tips.insert("file:a".into(), "c1".into());
-    s.publish(&mut NoProbe, &c, "c1", None, None, new_state).unwrap();
+    s.publish(&mut NoProbe, &c, "c1", None, None, new_state)
+        .unwrap();
     let pinned = pin_state(&sb.meta_dir()).unwrap();
     assert_eq!(pinned.tips["file:a"], "c1");
 }
@@ -94,12 +104,14 @@ fn immutable_records_use_per_id_paths() {
     let c = commit(CommitKind::Init, "abcdefghijklmnop");
     let mut st = s.state().clone();
     st.publication += 1;
-    s.publish(&mut NoProbe, &c, "commit-AAA", None, None, st).unwrap();
+    s.publish(&mut NoProbe, &c, "commit-AAA", None, None, st)
+        .unwrap();
     // Second commit must land in its own file, not overwrite the first.
     let c2 = commit(CommitKind::Commit, "bcdefghijklmnopq");
     let mut st2 = s.state().clone();
     st2.publication += 1;
-    s.publish(&mut NoProbe, &c2, "commit-BBB", None, None, st2).unwrap();
+    s.publish(&mut NoProbe, &c2, "commit-BBB", None, None, st2)
+        .unwrap();
     assert!(sb.meta_dir().join("commits/commit-AAA.toml").exists());
     assert!(sb.meta_dir().join("commits/commit-BBB.toml").exists());
 }
@@ -112,14 +124,22 @@ fn version_and_content_written_per_id_and_hash() {
     let v = SourceVersion::new(
         omd::records::ids::Id128([1; 16]),
         b"body",
-        Acquisition::File { path: "f".into(), encoding: "utf-8".into() },
+        Acquisition::File {
+            path: "f".into(),
+            encoding: "utf-8".into(),
+        },
         Some("utf-8".into()),
     );
     let c = commit(CommitKind::Init, "abcdefghijklmnop");
     let mut st = s.state().clone();
     st.publication += 1;
-    s.publish(&mut NoProbe, &c, "c1", Some(&v), Some(b"body"), st).unwrap();
-    assert!(sb.meta_dir().join(format!("versions/{}.toml", v.id.to_hex())).exists());
+    s.publish(&mut NoProbe, &c, "c1", Some(&v), Some(b"body"), st)
+        .unwrap();
+    assert!(
+        sb.meta_dir()
+            .join(format!("versions/{}.toml", v.id.to_hex()))
+            .exists()
+    );
     assert!(sb.meta_dir().join(format!("content/{}", v.sha256)).exists());
 }
 

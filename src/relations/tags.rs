@@ -26,7 +26,9 @@ pub fn resolve_tags(state: &State, node: &str) -> BTreeSet<String> {
         let mut acc = String::new();
         let parts: Vec<&str> = path.split('/').collect();
         for seg in &parts[..parts.len().saturating_sub(1)] {
-            if !acc.is_empty() { acc.push('/'); }
+            if !acc.is_empty() {
+                acc.push('/');
+            }
             acc.push_str(seg);
             let dir_key = format!("file:{acc}");
             if let Some(t) = state.tags.get(&dir_key) {

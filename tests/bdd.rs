@@ -1,6 +1,6 @@
 //! Cucumber-rs runner for the OMD spec features.
 
-use cucumber::{given, then, when, World};
+use cucumber::{World, given, then, when};
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -19,7 +19,12 @@ impl OmdWorld {
     fn new() -> Self {
         let root = std::env::temp_dir().join(format!("omd-bdd-{}-{}", std::process::id(), nanos()));
         std::fs::create_dir_all(&root).unwrap();
-        Self { root, last_status: None, last_stdout: String::new(), last_stderr: String::new() }
+        Self {
+            root,
+            last_status: None,
+            last_stdout: String::new(),
+            last_stderr: String::new(),
+        }
     }
 
     fn meta(&self) -> PathBuf {
@@ -56,22 +61,35 @@ impl OmdWorld {
             let s = self.state_toml();
             let mut in_lp = false;
             for l in s.lines() {
-                if l.trim() == "[link_pending]" { in_lp = true; continue; }
-                if l.starts_with('[') && in_lp { break; }
-                if in_lp {
-                    if let Some(m) = l.find('"') {
-                        if let Some(n) = l[m + 1..].find('"') {
-                            return l[m + 1..m + 1 + n].to_string();
-                        }
-                    }
+                if l.trim() == "[link_pending]" {
+                    in_lp = true;
+                    continue;
+                }
+                if l.starts_with('[') && in_lp {
+                    break;
+                }
+                if in_lp
+                    && let Some(m) = l.find('"')
+                    && let Some(n) = l[m + 1..].find('"')
+                {
+                    return l[m + 1..m + 1 + n].to_string();
                 }
             }
         }
-        if let Some(name) = tok.strip_prefix("<range-").and_then(|s| s.strip_suffix("-tip>")) {
+        if let Some(name) = tok
+            .strip_prefix("<range-")
+            .and_then(|s| s.strip_suffix("-tip>"))
+        {
             let s = self.state_toml();
             for l in s.lines() {
                 if l.contains(&format!("range:{name}@")) && l.contains('=') {
-                    return l.split('=').nth(1).unwrap_or("").trim().trim_matches('"').to_string();
+                    return l
+                        .split('=')
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim()
+                        .trim_matches('"')
+                        .to_string();
                 }
             }
         }
@@ -79,7 +97,10 @@ impl OmdWorld {
     }
 
     fn run(&mut self, args: &str) {
-        let resolved: Vec<String> = shellish_split(args).iter().map(|t| self.resolve(t)).collect();
+        let resolved: Vec<String> = shellish_split(args)
+            .iter()
+            .map(|t| self.resolve(t))
+            .collect();
         let out = Command::new(Self::bin())
             .arg("--meta")
             .arg(self.meta())
@@ -98,11 +119,16 @@ impl OmdWorld {
 }
 
 fn nanos() -> u128 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos()
 }
 
 fn shellish_split(s: &str) -> Vec<String> {
-    s.split_whitespace().map(|x| x.trim_matches('"').to_string()).collect()
+    s.split_whitespace()
+        .map(|x| x.trim_matches('"').to_string())
+        .collect()
 }
 
 impl Drop for OmdWorld {
@@ -149,7 +175,10 @@ fn command_succeeds(w: &mut OmdWorld) {
 #[then(regex = r#""([^"]+)" has a non-empty tip"#)]
 fn has_tip(w: &mut OmdWorld, node: String) {
     let s = w.state_toml();
-    assert!(s.contains(&format!("\"{node}\"")), "node {node} not in tips:\n{s}");
+    assert!(
+        s.contains(&format!("\"{node}\"")),
+        "node {node} not in tips:\n{s}"
+    );
 }
 
 #[then(regex = r#"no range coverage is claimed for "([^"]+)""#)]
@@ -164,7 +193,10 @@ fn no_coverage_claimed(w: &mut OmdWorld, node: String) {
 fn two_ranges(w: &mut OmdWorld, path: String) {
     let s = w.state_toml();
     let count = s.matches(&format!("range:{path}")).count();
-    assert!(count >= 2, "expected 2 range chains for {path}, found {count}:\n{s}");
+    assert!(
+        count >= 2,
+        "expected 2 range chains for {path}, found {count}:\n{s}"
+    );
 }
 
 #[then(regex = r#"it has no tip"#)]
@@ -211,9 +243,9 @@ fn resolve_meta(_w: &mut OmdWorld) {}
 // Scenarios that cannot yet satisfy their Then are tagged @wip in the
 // feature files and filtered out by the runner — never stubbed green.
 
-use omd::sources::reference::{parse_source_ref, SourceRef};
-use omd::sources::discovery::{metadata_dir, DiscoveryError};
+use omd::sources::discovery::{DiscoveryError, metadata_dir};
 use omd::sources::permission;
+use omd::sources::reference::{SourceRef, parse_source_ref};
 
 // command-verification: literal argv parsing (real parser, not proxy)
 #[then(regex = r#"the executable is "([^"]+)" and args are exactly two"#)]
@@ -238,8 +270,7 @@ fn parse_fail(_w: &mut OmdWorld) {
 // command-verification: stdout/exit rules (real observe_command)
 #[then(regex = r#"the source version is empty content"#)]
 fn empty_ver(_w: &mut OmdWorld) {
-    let out = omd::sources::command::observe_command(
-        "true", &[], &std::env::temp_dir()).unwrap();
+    let out = omd::sources::command::observe_command("true", &[], &std::env::temp_dir()).unwrap();
     assert!(out.exit_ok);
     let obs = out.into_observation().unwrap();
     assert!(obs.bytes.is_empty());
@@ -248,8 +279,11 @@ fn empty_ver(_w: &mut OmdWorld) {
 #[then(regex = r#"the partial output is not a successful version"#)]
 fn not_ver(_w: &mut OmdWorld) {
     let out = omd::sources::command::observe_command(
-        "sh", &["-c".into(), "printf 'partial'; exit 1".into()],
-        &std::env::temp_dir()).unwrap();
+        "sh",
+        &["-c".into(), "printf 'partial'; exit 1".into()],
+        &std::env::temp_dir(),
+    )
+    .unwrap();
     assert!(!out.exit_ok);
     assert!(out.into_observation().is_none()); // partial stdout rejected
 }
@@ -264,7 +298,10 @@ fn not_perm(_w: &mut OmdWorld) {
 #[then(regex = r#"execution is denied for this call"#)]
 fn denied(_w: &mut OmdWorld) {
     // explicit false overrides config true.
-    assert!(!permission::may_run(&permission::RunChoice { cli: Some(false), config: Some(true) }));
+    assert!(!permission::may_run(&permission::RunChoice {
+        cli: Some(false),
+        config: Some(true)
+    }));
 }
 
 // local-project-links: source-ref parsing (real parser)
@@ -302,7 +339,11 @@ fn exe_2(_w: &mut OmdWorld, exe: String) {
 #[then(regex = r#"the error reports the explicit location, no fallback write"#)]
 fn no_fallback(_w: &mut OmdWorld) {
     let root = std::env::temp_dir();
-    let res = metadata_dir(Some(std::path::Path::new("/nonexistent-omd-meta")), None, &root);
+    let res = metadata_dir(
+        Some(std::path::Path::new("/nonexistent-omd-meta")),
+        None,
+        &root,
+    );
     assert!(matches!(res, Err(DiscoveryError::BadExplicit(_))));
 }
 
@@ -312,7 +353,12 @@ fn tracked_file(w: &mut OmdWorld, path: String, content: String) {
     let p = w.root.join(&path);
     std::fs::write(&p, content).unwrap();
     w.run(&format!("init {path}"));
-    assert_eq!(w.last_status, Some(0), "init {path} failed: {}", w.last_stdout);
+    assert_eq!(
+        w.last_status,
+        Some(0),
+        "init {path} failed: {}",
+        w.last_stdout
+    );
 }
 
 #[then(regex = r#"the link "([^"]+)" has a pending entry"#)]
@@ -320,27 +366,43 @@ fn link_has_pending(w: &mut OmdWorld, lid: String) {
     let lid = w.resolve(&lid);
     let s = w.state_toml();
     // `LID = ["commit", ...]` non-empty under [link_pending].
-    let line = s.lines().find(|l| l.starts_with(&format!("{lid} = ["))).unwrap_or("");
-    assert!(line.contains('"'), "link {lid} has no pending entries:\n{s}");
+    let line = s
+        .lines()
+        .find(|l| l.starts_with(&format!("{lid} = [")))
+        .unwrap_or("");
+    assert!(
+        line.contains('"'),
+        "link {lid} has no pending entries:\n{s}"
+    );
 }
 
 #[then(regex = r#"the link "([^"]+)" has no pending entries"#)]
 fn link_no_pending(w: &mut OmdWorld, lid: String) {
     let lid = w.resolve(&lid);
     let s = w.state_toml();
-    let line = s.lines().find(|l| l.starts_with(&format!("{lid} = ["))).unwrap_or("");
+    let line = s
+        .lines()
+        .find(|l| l.starts_with(&format!("{lid} = [")))
+        .unwrap_or("");
     // Either `LID = []` or the link key absent entirely = cleared.
-    assert!(line.is_empty() || line.contains("[]"), "link {lid} still pending:\n{s}");
+    assert!(
+        line.is_empty() || line.contains("[]"),
+        "link {lid} still pending:\n{s}"
+    );
 }
 
 #[then(regex = r#"the link is refused"#)]
 fn refused(w: &mut OmdWorld) {
     // The binary refuses file→file links: nonzero status or explicit error.
-    assert!(w.last_status != Some(0)
-        || w.last_stderr.contains("ranges")
-        || w.last_stdout.contains("error"),
+    assert!(
+        w.last_status != Some(0)
+            || w.last_stderr.contains("ranges")
+            || w.last_stdout.contains("error"),
         "expected refusal, got status {:?} stdout {} stderr {}",
-        w.last_status, w.last_stdout, w.last_stderr);
+        w.last_status,
+        w.last_stdout,
+        w.last_stderr
+    );
 }
 
 #[then(regex = r#"ambiguity is reported"#)]

@@ -3,8 +3,8 @@
 
 use std::rc::Rc;
 
-use omd::relations::{chain_to_root, restore_range_tips, Node, NodeKind};
-use omd::sources::{file, SourceError};
+use omd::relations::{Node, NodeKind, chain_to_root, restore_range_tips};
+use omd::sources::{SourceError, file};
 use omd::testing::Sandbox;
 
 #[test]
@@ -25,11 +25,17 @@ fn observe_reads_current_path_not_head() {
 fn byte_mode_never_decodes() {
     let sb = Rc::new(Sandbox::new().unwrap());
     let f = sb.source_dir().join("bin");
-    std::fs::write(&f, &[0xff, 0xfe, 0x00]).unwrap();
+    std::fs::write(&f, [0xff, 0xfe, 0x00]).unwrap();
     // Text mode rejects invalid utf-8.
-    assert!(matches!(file::observe_text(&f, None), Err(SourceError::Encoding)));
+    assert!(matches!(
+        file::observe_text(&f, None),
+        Err(SourceError::Encoding)
+    ));
     // Byte mode reads it fine.
-    assert_eq!(file::observe_bytes(&f).unwrap().bytes, vec![0xff, 0xfe, 0x00]);
+    assert_eq!(
+        file::observe_bytes(&f).unwrap().bytes,
+        vec![0xff, 0xfe, 0x00]
+    );
 }
 
 #[test]
@@ -59,21 +65,45 @@ fn file_reset_restores_recorded_range_tips() {
     snap.insert("r1".to_string(), "tip_a".to_string());
     snap.insert("r2".to_string(), "tip_b".to_string());
     let tips = restore_range_tips(&snap);
-    assert_eq!(tips, vec![("r1".into(), "tip_a".into()), ("r2".into(), "tip_b".into())]);
+    assert_eq!(
+        tips,
+        vec![("r1".into(), "tip_a".into()), ("r2".into(), "tip_b".into())]
+    );
 }
 
 #[test]
 fn node_kinds_cover_root_file_range() {
-    let root = Node { key: "root".into(), kind: NodeKind::Root, parent: "".into(), tip: "".into() };
-    let file = Node { key: "file:a".into(), kind: NodeKind::File, parent: "root".into(), tip: "c1".into() };
-    let range = Node { key: "range:a@1-40".into(), kind: NodeKind::Range, parent: "file:a".into(), tip: "c2".into() };
+    let _root = Node {
+        key: "root".into(),
+        kind: NodeKind::Root,
+        parent: "".into(),
+        tip: "".into(),
+    };
+    let file = Node {
+        key: "file:a".into(),
+        kind: NodeKind::File,
+        parent: "root".into(),
+        tip: "c1".into(),
+    };
+    let range = Node {
+        key: "range:a@1-40".into(),
+        kind: NodeKind::Range,
+        parent: "file:a".into(),
+        tip: "c2".into(),
+    };
     assert_eq!(file.parent, "root");
     assert_eq!(range.parent, "file:a");
 }
 
 #[test]
 fn non_utf8_encoding_decodes() {
-    let dir = std::env::temp_dir().join(format!("omd-enc-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+    let dir = std::env::temp_dir().join(format!(
+        "omd-enc-{}",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
     std::fs::create_dir_all(&dir).unwrap();
     let p = dir.join("f.txt");
     // 0xE9 = é in latin-1, invalid standalone UTF-8.

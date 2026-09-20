@@ -60,7 +60,12 @@ where
 
 /// File-commit `range_id -> tip` snapshot semantics: a file reset restores
 /// each range's recorded tip exactly, not by wall-clock.
-pub fn restore_range_tips(snapshot: &std::collections::BTreeMap<String, String>) -> Vec<(String, String)> {
-    snapshot.iter().map(|(r, t)| (r.clone(), t.clone())).collect()
+pub fn restore_range_tips(
+    snapshot: &std::collections::BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    snapshot
+        .iter()
+        .map(|(r, t)| (r.clone(), t.clone()))
+        .collect()
 }
 pub mod tags;

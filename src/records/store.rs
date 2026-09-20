@@ -139,7 +139,7 @@ pub struct PeerReg {
 }
 
 /// An inbound protection credential: peer persisted its identity + record id
-/// + the exact protected target before publishing its own business record.
+/// plus the exact protected target before publishing its own business record.
 /// The credential alone never proves the link — the peer's live record does.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InboundCred {
@@ -206,7 +206,16 @@ pub struct Store {
 impl Store {
     /// Open (or initialize) a store at `root` in the default layout.
     pub fn open(root: &Path) -> Result<Self, StoreError> {
-        for d in ["commits", "versions", "content", "bindings", "registrations", "notes", "inbound", "pending"] {
+        for d in [
+            "commits",
+            "versions",
+            "content",
+            "bindings",
+            "registrations",
+            "notes",
+            "inbound",
+            "pending",
+        ] {
             fs::create_dir_all(root.join(d))?;
         }
         let state_path = root.join("state.toml");
@@ -221,7 +230,10 @@ impl Store {
             toml::from_str(&s).map_err(|e| StoreError::Record(e.to_string()))?
         } else {
             let st = State::default();
-            fs::write(&state_path, toml::to_string(&st).map_err(|e| StoreError::Record(e.to_string()))?)?;
+            fs::write(
+                &state_path,
+                toml::to_string(&st).map_err(|e| StoreError::Record(e.to_string()))?,
+            )?;
             st
         };
         // A fresh store (never had a store_id) gets one + is activated.
@@ -229,7 +241,10 @@ impl Store {
         if state.store_id.is_empty() {
             state.store_id = crate::records::cross::new_store_id(&OsRng);
             state.activated = true;
-            fs::write(&state_path, toml::to_string(&state).map_err(|e| StoreError::Record(e.to_string()))?)?;
+            fs::write(
+                &state_path,
+                toml::to_string(&state).map_err(|e| StoreError::Record(e.to_string()))?,
+            )?;
         }
         // Reader integrity: every recorded tip must resolve to a real commit
         // file — a tampered tip (pointing at nothing) is a changed participant
@@ -241,7 +256,11 @@ impl Store {
                 )));
             }
         }
-        Ok(Self { root: root.to_path_buf(), lock: None, state })
+        Ok(Self {
+            root: root.to_path_buf(),
+            lock: None,
+            state,
+        })
     }
 
     /// Acquire the single-writer lock. Fails fast on contention — no waiting,
@@ -272,7 +291,10 @@ impl Store {
     }
 
     /// Read a version record by id (`versions/<id>.toml`).
-    pub fn read_version(&self, id: &str) -> Result<crate::records::version::SourceVersion, StoreError> {
+    pub fn read_version(
+        &self,
+        id: &str,
+    ) -> Result<crate::records::version::SourceVersion, StoreError> {
         let s = fs::read_to_string(self.root.join(format!("versions/{id}.toml")))?;
         toml::from_str(&s).map_err(|e| StoreError::Record(e.to_string()))
     }
@@ -302,13 +324,13 @@ impl Store {
     /// Verify caller-observed preconditions under the held lock.
     /// Any mismatch aborts the write — never silently uses the newer value.
     pub fn check_expected(&self, exp: &Expected) -> Result<(), StoreError> {
-        if let Some(p) = exp.publication {
-            if p != self.state.publication {
-                return Err(StoreError::Conflict(format!(
-                    "publication {p} != current {}",
-                    self.state.publication
-                )));
-            }
+        if let Some(p) = exp.publication
+            && p != self.state.publication
+        {
+            return Err(StoreError::Conflict(format!(
+                "publication {p} != current {}",
+                self.state.publication
+            )));
         }
         for (node, tip) in &exp.tips {
             match self.state.tips.get(node) {
@@ -339,7 +361,9 @@ impl Store {
             if rel.starts_with("content/") {
                 return Ok(());
             }
-            return Err(StoreError::Record(format!("immutable record exists: {rel}")));
+            return Err(StoreError::Record(format!(
+                "immutable record exists: {rel}"
+            )));
         }
         let mut f = File::create(&p)?;
         f.write_all(bytes)?;
@@ -360,12 +384,20 @@ impl Store {
         new_state: State,
     ) -> Result<(), StoreError> {
         if !probe.at(Stage::WriteRecords) {
-            return Err(StoreError::Io(io::Error::new(io::ErrorKind::Other, "probe abort: write records")));
+            return Err(StoreError::Io(io::Error::other(
+                "probe abort: write records",
+            )));
         }
-        let commit_bytes = toml::to_string(commit).map_err(|e| StoreError::Record(e.to_string()))?;
-        self.write_immutable(&format!("commits/{commit_id}.toml"), commit_bytes.as_bytes())?;
+        let commit_bytes =
+            toml::to_string(commit).map_err(|e| StoreError::Record(e.to_string()))?;
+        self.write_immutable(
+            &format!("commits/{commit_id}.toml"),
+            commit_bytes.as_bytes(),
+        )?;
         if !probe.at(Stage::SyncRecords) {
-            return Err(StoreError::Io(io::Error::new(io::ErrorKind::Other, "probe abort: sync records")));
+            return Err(StoreError::Io(io::Error::other(
+                "probe abort: sync records",
+            )));
         }
 
         if let Some(v) = version {
@@ -379,15 +411,20 @@ impl Store {
         // commit id ever selected into state. Rebuildable (SQLite/cache can
         // be regenerated from it); reset never removes entries.
         {
-            let mut m = fs::OpenOptions::new().append(true).open(self.root.join("published"))?;
+            let mut m = fs::OpenOptions::new()
+                .append(true)
+                .open(self.root.join("published"))?;
             m.write_all(commit_id.as_bytes())?;
             m.write_all(b"\n")?;
         }
 
         if !probe.at(Stage::WriteTempState) {
-            return Err(StoreError::Io(io::Error::new(io::ErrorKind::Other, "probe abort: write temp state")));
+            return Err(StoreError::Io(io::Error::other(
+                "probe abort: write temp state",
+            )));
         }
-        let state_bytes = toml::to_string(&new_state).map_err(|e| StoreError::Record(e.to_string()))?;
+        let state_bytes =
+            toml::to_string(&new_state).map_err(|e| StoreError::Record(e.to_string()))?;
         let tmp = self.root.join("state.toml.tmp");
         {
             let mut f = File::create(&tmp)?;
@@ -395,16 +432,20 @@ impl Store {
             f.sync_all()?;
         }
         if !probe.at(Stage::SyncTempState) {
-            return Err(StoreError::Io(io::Error::new(io::ErrorKind::Other, "probe abort: sync temp state")));
+            return Err(StoreError::Io(io::Error::other(
+                "probe abort: sync temp state",
+            )));
         }
 
         if !probe.at(Stage::RenameState) {
-            return Err(StoreError::Io(io::Error::new(io::ErrorKind::Other, "probe abort: rename state")));
+            return Err(StoreError::Io(io::Error::other(
+                "probe abort: rename state",
+            )));
         }
         fs::rename(&tmp, self.root.join("state.toml"))?;
 
         if !probe.at(Stage::SyncDir) {
-            return Err(StoreError::Io(io::Error::new(io::ErrorKind::Other, "probe abort: dir sync")));
+            return Err(StoreError::Io(io::Error::other("probe abort: dir sync")));
         }
         File::open(&self.root)?.sync_all()?;
 

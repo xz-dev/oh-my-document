@@ -30,7 +30,10 @@ pub fn new_store_id(rng: &dyn crate::testing::Rng) -> String {
 pub fn register_peer(state: &mut State, store_id: &str, locator: &str) {
     state.peers.insert(
         store_id.to_string(),
-        PeerReg { store_id: store_id.to_string(), locator: locator.to_string() },
+        PeerReg {
+            store_id: store_id.to_string(),
+            locator: locator.to_string(),
+        },
     );
 }
 

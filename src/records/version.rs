@@ -21,9 +21,16 @@ pub enum Acquisition {
     /// Read a real file from its registered path.
     File { path: String, encoding: String },
     /// Captured stdout of an authorized command.
-    Command { executable: String, args: Vec<String> },
+    Command {
+        executable: String,
+        args: Vec<String>,
+    },
     /// Reused from a precise Git object (commit + path-in-commit).
-    Git { repo: String, commit: String, path: String },
+    Git {
+        repo: String,
+        commit: String,
+        path: String,
+    },
 }
 
 /// A source version record (persisted under `versions/<id>.toml`).
@@ -55,7 +62,12 @@ impl SourceVersion {
     /// Create a version for a fresh observation. `id` must come from the
     /// caller's RNG *before* any commit is derived — this avoids a
     /// self-referential ID.
-    pub fn new(id: Id128, content: &[u8], acquisition: Acquisition, encoding: Option<String>) -> Self {
+    pub fn new(
+        id: Id128,
+        content: &[u8],
+        acquisition: Acquisition,
+        encoding: Option<String>,
+    ) -> Self {
         Self {
             id,
             len: content.len() as u64,

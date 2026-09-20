@@ -1,7 +1,7 @@
 //! Group 7 coverage + group 8 atomic/reset domain tests.
 
 use omd::records::commit::CommitKind;
-use omd::relations::atomic::{resolve_reset, AtomicStack, ResetLanding};
+use omd::relations::atomic::{AtomicStack, ResetLanding, resolve_reset};
 use omd::relations::coverage::{coverage, coverage_percent, effective_link_span};
 use omd::relations::range::{Mode, Range};
 
@@ -124,7 +124,10 @@ fn file_reset_restores_recorded_child_tips_exactly() {
     snap.insert("r0".to_string(), "tip_a".to_string());
     snap.insert("r1".to_string(), "tip_b".to_string());
     let restored = omd::records::pipeline::file_reset_children(&snap, |_| false).unwrap();
-    assert_eq!(restored, vec![("r0".into(), "tip_a".into()), ("r1".into(), "tip_b".into())]);
+    assert_eq!(
+        restored,
+        vec![("r0".into(), "tip_a".into()), ("r1".into(), "tip_b".into())]
+    );
 }
 
 #[test]

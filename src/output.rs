@@ -28,10 +28,22 @@ pub struct Envelope {
 
 impl Envelope {
     pub fn ok(result: serde_json::Value) -> Self {
-        Self { ok: true, code: 0, result: Some(result), diagnostics: vec![], partial: vec![] }
+        Self {
+            ok: true,
+            code: 0,
+            result: Some(result),
+            diagnostics: vec![],
+            partial: vec![],
+        }
     }
     pub fn err(msg: impl Into<String>, code: i32) -> Self {
-        Self { ok: false, code, result: None, diagnostics: vec![msg.into()], partial: vec![] }
+        Self {
+            ok: false,
+            code,
+            result: None,
+            diagnostics: vec![msg.into()],
+            partial: vec![],
+        }
     }
     /// Unknown current content — `incomplete`, not a fabricated 100%.
     pub fn incomplete(what: impl Into<String>) -> serde_json::Value {
@@ -46,6 +58,12 @@ impl Envelope {
     }
     /// A composite that partially succeeded — lists completed sub-ops.
     pub fn partial(completed: Vec<String>, err: impl Into<String>) -> Self {
-        Self { ok: false, code: 1, result: None, diagnostics: vec![err.into()], partial: completed }
+        Self {
+            ok: false,
+            code: 1,
+            result: None,
+            diagnostics: vec![err.into()],
+            partial: completed,
+        }
     }
 }

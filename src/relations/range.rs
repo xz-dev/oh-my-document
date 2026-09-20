@@ -52,7 +52,11 @@ impl Range {
 
     /// Whole-source range.
     pub fn whole(mode: Mode, len: u64) -> Self {
-        Self { start: 0, end: len, mode }
+        Self {
+            start: 0,
+            end: len,
+            mode,
+        }
     }
 
     /// Length in the range's own unit.

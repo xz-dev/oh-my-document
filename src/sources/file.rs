@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use super::{observe_file, Observation, SourceError};
+use super::{Observation, SourceError, observe_file};
 
 /// Observe a text file under the chosen encoding.
 pub fn observe_text(path: &Path, encoding: Option<&str>) -> Result<Observation, SourceError> {

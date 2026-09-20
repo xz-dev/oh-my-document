@@ -40,7 +40,8 @@ pub enum ReplaceError {
 
 /// Write a binding revision into `bindings/<id>.toml`.
 pub fn write_binding(root: &std::path::Path, b: &Binding) -> Result<String, std::io::Error> {
-    let txt = toml::to_string(b).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let txt =
+        toml::to_string(b).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     std::fs::write(root.join(format!("bindings/{}.toml", b.id)), txt)?;
     Ok(b.id.clone())
 }
