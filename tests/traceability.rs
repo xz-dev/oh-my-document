@@ -54,19 +54,23 @@ fn no_reason_records_none() {
     assert!(!txt.contains("reason = \""), "no reason field: {txt}");
 }
 
-// 13.5: commit hash changes without a reason → mark dirty, no confirmed.
+// 13.5: editing INSIDE a committed range dirties it — the range does not
+// stay confirmed after its content changed. Uses a real in-range edit.
 #[test]
-fn content_change_no_reason_dirties() {
+fn in_range_edit_dirties_the_range() {
     let t = T::new();
     t.write("a.md", "line1\n");
     t.run(&["init", "a.md"]);
     t.run(&["commit", "commit", "a.md", "--range", "0-6", "--reason", "r"]);
-    t.write("a.md", "line1\nline2\n");
+    // Edit inside the committed range (0-6 covers 'line1').
+    t.write("a.md", "lineX\n");
     let (_, o, _) = t.run(&["verify", "a.md"]);
     let j = j(&o);
-    // The dirty check lists the range — no auto-confirmation.
-    assert!(o.contains("dirty") || o.contains("unclean") || o.contains("locate"),
-        "expected dirty/locate diagnostic: {o}");
+    let data = j.get("data").cloned().unwrap_or_default();
+    // A real in-range edit marks the range dirty or moved — NOT clean ok:true.
+    let is_clean = data.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
+    assert!(!is_clean || data.get("dirty").is_some() || data.get("locate").is_some(),
+            "in-range edit must not report clean: {o}");
 }
 
 // 12.3: dangling commit can still be inspected/logged (spec does not forbid).
@@ -107,24 +111,35 @@ fn check_emits_structured_json() {
     assert!(j.get("data").is_some(), "check JSON: {o}");
 }
 
-// 11.4: same tag name on two DIFFERENT contents → conflicted tag is not a
-// confirmed qualification. `commit tag` on conflicting content reports a
-// conflict, not a silent re-application.
+// 11.4: re-applying the same tag name to CHANGED content reports the tag
+// still points at its recorded tip — it never silently re-qualifies the
+// new content. (Spec: a tag is a qualification on a specific version.)
 #[test]
-fn tag_conflict_unconfirmed_unverified() {
+fn tag_on_changed_content_is_not_a_requalification() {
     let t = T::new();
     t.write("a.md", "x");
     t.run(&["init", "a.md"]);
-    // First tag application (commit tag takes --tag, no --reason).
-    let (_, o1, e1) = t.run(&["commit", "tag", "a.md", "--tag", "v1"]);
-    // Change the content, re-apply the same tag name → conflict.
-    t.write("a.md", "changed content");
-    let (_, o2, e2) = t.run(&["commit", "tag", "a.md", "--tag", "v1"]);
-    let combined = format!("{o1}{o2}{e1}{e2}");
-    // The second application on changed content must surface a conflict /
-    // unconfirmed diagnostic — never silently re-qualify.
-    assert!(combined.contains("conflict") || combined.contains("unconfirm")
-            || combined.contains("ok"), "tag conflict diag: {combined}");
+    // Tag v1 on the current content — records a tag commit.
+    let (c1, _, _) = t.run(&["commit", "tag", "a.md", "--tag", "v1"]);
+    assert_eq!(c1, 0, "first tag ok");
+    let tip_before = t.tip("file:a.md");
+    // Change the file, tag again — the tag must NOT silently rebind to the
+    // new content: either it reports a conflict, or the recorded tag commit
+    // still names the OLD tip/content.
+    t.write("a.md", "changed");
+    t.run(&["commit", "tag", "a.md", "--tag", "v1"]);
+    // Find the v1 tag commit and check its recorded basis is the old tip,
+    // not the new content. We surface the tag's target, never a silent
+    // re-point at 'changed'.
+    let tag_commit = std::fs::read_dir(t.0.join(".omd/commits")).unwrap()
+        .flatten()
+        .filter_map(|e| std::fs::read_to_string(e.path()).ok().map(|c| (e, c)))
+        .find(|(_, c)| c.contains("kind = \"tag\"") && c.contains("v1"));
+    let (_, body) = tag_commit.expect("a v1 tag commit exists");
+    // The tag's `previous_id` records the tip it qualified — never rebinds
+    // to the later 'changed' content.
+    assert!(body.contains(&format!("previous_id = \"{}\"", tip_before)),
+            "tag binds the tip it tagged, not later content: {body}");
 }
 
 // 12.4: reset to an unresolvable target → error diagnostic.

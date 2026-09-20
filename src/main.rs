@@ -729,7 +729,28 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                     report.insert("problems".into(), scope.problems.clone().into());
                 }
             }
+            // A tracked file node whose source vanished reports `incomplete`
+            // — never a silent empty `files:[]` success. This is check's own
+            // honesty floor, independent of `verify`'s `missing` diagnostic.
+            let mut any_missing = false;
+            for (k, tip) in &store.state().tips {
+                if let Some(p) = k.strip_prefix("file:") {
+                    let is_tombstone = store.read_commit(tip)
+                        .map(|c| c.kind == omd::records::commit::CommitKind::Delete)
+                        .unwrap_or(false);
+                    if !is_tombstone && !proj_root.join(p).exists() {
+                        all_files.push(serde_json::json!({
+                            "file": p, "tracked": true, "in_scope": true,
+                            "status": "incomplete", "reason": "source missing",
+                        }));
+                        any_missing = true;
+                    }
+                }
+            }
             report.insert("files".into(), all_files.into());
+            if any_missing {
+                report.insert("incomplete".into(), true.into());
+            }
 
             // Tag-link rules: each declared `spec->code` (one-way) or
             // `spec<->code` (two-way) computes *position coverage* — the
