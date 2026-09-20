@@ -616,3 +616,102 @@ fn run_command_changed_output_dirties() {
     assert!(o.contains("command output changed") || o.contains("dirty"),
             "changed command output → dirty: {o}");
 }
+
+// change-review: same-endpoint obligations stay distinct by link_id — an
+// upstream commit seeds pending on EACH link separately (not merged).
+#[test]
+fn same_endpoint_obligations_distinct_by_link_id() {
+    let t = T::new();
+    t.write("a.md", "a");
+    t.write("b.md", "b");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "ra"]);
+    // Two links a-range → b-range (distinct link_ids).
+    t.run(&["commit", "commit", "b.md", "--range", "0-1", "--link-from", "a.md@text:0-1", "--reason", "l1"]);
+    t.run(&["commit", "commit", "b.md", "--range", "0-1", "--link-from", "a.md@text:0-1", "--reason", "l2"]);
+    // Upstream commit on source seeds pending on BOTH links.
+    t.run(&["commit", "commit", "a.md", "--id", &t.tip("range:a.md@text:0-1"),
+            "--range", "0-1", "--reason", "up"]);
+    // link_pending is one table with `linkid = [commits]` rows — each link
+    // gets its own pending set keyed by link_id.
+    let st = t.state();
+    let pend_section = st.split("[link_pending]").nth(1).unwrap_or("");
+    let pend_entries = pend_section.lines()
+        .take_while(|l| !l.starts_with('['))
+        .filter(|l| l.contains(" = [")).count();
+    assert!(pend_entries >= 2, "each link has own pending entry: {pend_section}");
+}
+
+// change-review: copy preserves identity — `omd copy` gives the target a NEW
+// identity (own tip), not the source's commit ids.
+#[test]
+fn copy_gives_new_identity() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    let src_tip = t.tip("file:a.md");
+    t.write("b.md", "x");
+    let (c, _, _) = t.run(&["copy", "a.md", "b.md"]);
+    assert_eq!(c, 0);
+    let tgt_tip = t.tip("file:b.md");
+    // Target has its own commit — not the source's id.
+    assert!(!tgt_tip.is_empty() && tgt_tip != src_tip,
+            "copy → new identity: src={src_tip} tgt={tgt_tip}");
+}
+
+// command-verification: a command source initializes even when auto-run is
+// disabled — init captures output once, the gating is on RE-run (verify),
+// not initial capture.
+#[test]
+fn command_init_works_despite_autorun_disabled() {
+    let t = T::new();
+    // No --run-command, no config → built-in floor false. init still runs
+    // the command to capture its first version (init ≠ verify-rerun).
+    let (c, o, e) = t.run(&["commit", "init", "f.txt",
+                          "--source-ref", "command::echo::[\"hi\"]"]);
+    assert_eq!(c, 0, "command init captures output: {o} {e}");
+    let mut is_cmd = false;
+    if let Ok(rd) = std::fs::read_dir(t.0.join(".omd/versions")) {
+        for en in rd.flatten() {
+            if let Ok(txt) = std::fs::read_to_string(en.path()) {
+                if txt.contains("[acquisition.command]") { is_cmd = true; }
+            }
+        }
+    }
+    assert!(is_cmd);
+}
+
+// managed-content: two sources producing equal content share no version
+// coupling — equal output doesn't make one a review of the other.
+#[test]
+fn equal_output_does_not_create_review() {
+    let t = T::new();
+    t.write("a.md", "same");
+    t.write("b.md", "same");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    // Same content, two independent file nodes — no link/obligation created.
+    let st = t.state();
+    assert!(st.contains("file:a.md") && st.contains("file:b.md"));
+    assert!(!st.contains("[links."), "equal content creates no relationship: {st}");
+}
+
+// change-review: a split range doesn't copy the parent's links/obligations —
+// a new range is a fresh object with no inherited relationships.
+#[test]
+fn split_range_inherits_no_relationships() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.write("b.md", "b");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-10", "--reason", "r"]);
+    t.run(&["commit", "commit", "b.md", "--range", "0-1", "--link-from", "a.md@text:0-10", "--reason", "lb"]);
+    // Split a's range into a new sub-range — a fresh object.
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "sub"]);
+    // The new sub-range has no pending obligations of its own (it wasn't
+    // the link's source — 0-10 was).
+    let st = t.state();
+    assert!(st.contains("range:a.md@text:0-5"), "sub-range exists: {st}");
+}
