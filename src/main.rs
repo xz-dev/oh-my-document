@@ -41,6 +41,20 @@ enum Cmd {
         #[arg(long)] reason: Option<String>,
         #[arg(long)] range: Option<String>,
         #[arg(long)] timestamp: Option<String>,
+        /// `commit link --source A@.. --target B@..`
+        #[arg(long)] source: Option<String>,
+        #[arg(long)] target: Option<String>,
+        /// `commit adapt --link-id L --changes c1,c2 --reason r`
+        #[arg(long)] link_id: Option<String>,
+        #[arg(long)] changes: Option<String>,
+        /// `commit adapt --stop` — source-side branch stop after handling.
+        #[arg(long)] stop: bool,
+        /// `commit clean --no-reason` — explicitly omit the stop reason.
+        #[arg(long = "no-reason")] no_reason: bool,
+        /// `commit ... --link-from R` — create R→this link in the block.
+        #[arg(long = "link-from")] link_from: Vec<String>,
+        /// `commit ... --link-to R` — create this→R link in the block.
+        #[arg(long = "link-to")] link_to: Vec<String>,
     },
     /// `omd verify` — full-store check (distinct from `commit verify <path>`).
     Verify { path: Option<String> },
@@ -155,7 +169,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             ).map_err(|e| e.to_string())?;
             Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": format!("{kind:?}") }))
         }
-        Cmd::Commit { kind, path, reason, range, timestamp } => {
+        Cmd::Commit { kind, path, reason, range, timestamp, source, target, link_id, changes, stop, no_reason, link_from, link_to } => {
             let kind = match kind.as_str() {
                 "init" => CommitKind::Init,
                 "commit" => CommitKind::Commit,
@@ -175,18 +189,92 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                 other => return Err(format!("unknown commit kind: {other}")),
             };
             let mut store = Store::open(&root).map_err(|e| e.to_string())?;
-            let node = format!("file:{path}");
+            // 8.4 pre-check: same-direction duplicate *resolved* range in
+            // one command rejects the whole command before any write — never
+            // silently dedup or create two identical links.
+            {
+                let mut seen_from = std::collections::HashSet::new();
+                for r in link_from {
+                    if !seen_from.insert(r) {
+                        return Err(format!("duplicate --link-from range in one command: {r}"));
+                    }
+                }
+                let mut seen_to = std::collections::HashSet::new();
+                for r in link_to {
+                    if !seen_to.insert(r) {
+                        return Err(format!("duplicate --link-to range in one command: {r}"));
+                    }
+                }
+            }
+            // Resolve the node: --range targets a first-class range chain
+            // mounted under the file; bare path targets the file chain.
+            let node = match range {
+                Some(r) => {
+                    let (mode, s, e) = omd::relations::node::parse_range_arg(r)
+                        .ok_or_else(|| format!("bad --range: {r}"))?;
+                    omd::relations::node::range_key(path, mode, s, e)
+                }
+                None => format!("file:{path}"),
+            };
             let mut payload = serde_json::Map::new();
             payload.insert("path".into(), path.clone().into());
             if let Some(r) = reason { payload.insert("reason".into(), r.clone().into()); }
             if let Some(r) = range { payload.insert("range".into(), r.clone().into()); }
+            if *no_reason { payload.insert("no_reason".into(), true.into()); }
             let _ = timestamp; // manual replay timestamp — wired in commit path later
             // State-only kinds observe no file; content kinds read the file.
             let state_only = matches!(kind,
                 CommitKind::Unclean | CommitKind::Clean |
                 CommitKind::AtomicBegin | CommitKind::AtomicEnd |
                 CommitKind::Reset | CommitKind::ScopeAdjust | CommitKind::Tag);
-            let cid = if state_only {
+            // --link-from/--link-to wrap the commit in an ATOMIC block: the
+            // range commit + each link creation are recorded inside one
+            // BEGIN/END on this node's chain (spec 8.4 atomic combination).
+            let combo = !link_from.is_empty() || !link_to.is_empty();
+            if combo {
+                let mut pl = serde_json::Map::new();
+                pl.insert("path".into(), path.clone().into());
+                pipeline::commit_marker(&mut store, &mut NoProbe, &OsRng, &SystemClock, &node, CommitKind::AtomicBegin, pl, &Expected::default()).map_err(|e| e.to_string())?;
+            }
+            let cid = if kind == CommitKind::Link {
+                let src = source.clone().unwrap_or_default();
+                let tgt = target.clone().unwrap_or_default();
+                let r = reason.clone().unwrap_or_default();
+                pipeline::commit_link(
+                    &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                    &node, &src, &tgt, &r, &Expected::default(),
+                ).map_err(|e| e.to_string())?
+            } else if kind == CommitKind::Adapt {
+                let lid = link_id.clone().unwrap_or_default();
+                let ch: Vec<String> = changes.clone().unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                let r = reason.clone().unwrap_or_default();
+                pipeline::commit_adapt(
+                    &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                    &node, &lid, &ch, &r, *stop, &Expected::default(),
+                ).map_err(|e| e.to_string())?
+            } else if kind == CommitKind::Reset {
+                // reset resolves the target's kind+prev from its on-disk record.
+                let target = range.clone().or(reason.clone()).unwrap_or_default();
+                let mut lk = |id: &str| -> Option<(CommitKind, String)> {
+                    let s = std::fs::read_to_string(root.join(format!("commits/{id}.toml"))).ok()?;
+                    let c: omd::records::commit::Commit = toml::from_str(&s).ok()?;
+                    Some((c.kind, c.previous_id))
+                };
+                match pipeline::reset(&node, &target, &mut lk) {
+                    Ok(out) => {
+                        let mut pl = serde_json::Map::new();
+                        pl.insert("requested".into(), out.requested.clone().into());
+                        pl.insert("actual".into(), out.actual.clone().into());
+                        pl.insert("warning".into(), out.warning.clone().into());
+                        // Record the reset as a commit on this node's chain.
+                        pipeline::commit_marker(
+                            &mut store, &mut NoProbe, &OsRng, &SystemClock,
+                            &node, CommitKind::Reset, pl, &Expected::default(),
+                        ).map_err(|e| e.to_string())?
+                    }
+                    Err(e) => return Err(e.to_string()),
+                }
+            } else if state_only {
                 pipeline::commit_marker(
                     &mut store, &mut NoProbe, &OsRng, &SystemClock,
                     &node, kind, payload, &Expected::default(),
@@ -197,6 +285,18 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                     &node, Path::new(path), kind, payload, &Expected::default(),
                 ).map_err(|e| e.to_string())?
             };
+            // Create the requested links inside the block, then close it.
+            if combo {
+                for r in link_from {
+                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, &SystemClock, &node, r, &node, "combo" , &Expected::default()).map_err(|e| e.to_string())?;
+                }
+                for r in link_to {
+                    pipeline::commit_link(&mut store, &mut NoProbe, &OsRng, &SystemClock, &node, &node, r, "combo", &Expected::default()).map_err(|e| e.to_string())?;
+                }
+                let mut pl = serde_json::Map::new();
+                pl.insert("path".into(), path.clone().into());
+                pipeline::commit_marker(&mut store, &mut NoProbe, &OsRng, &SystemClock, &node, CommitKind::AtomicEnd, pl, &Expected::default()).map_err(|e| e.to_string())?;
+            }
             Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": format!("{kind:?}") }))
         }
         Cmd::Verify { .. } => {

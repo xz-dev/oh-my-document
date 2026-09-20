@@ -112,7 +112,18 @@ pub fn commit_file(
     let version = with_content(&version);
 
     let prev = store.state().tips.get(node_key).cloned().unwrap_or_default();
-    let commit = make_commit(rng, clock, kind, &prev, &version, payload);
+    let mut commit = make_commit(rng, clock, kind, &prev, &version, payload);
+    // A file-level commit snapshots which tip each child range points to now,
+    // so a later file reset restores exact children — not wall-clock order.
+    if crate::relations::node::is_file_key(node_key) {
+        for (k, tip) in &store.state().tips {
+            if crate::relations::node::is_range_key(k)
+                && crate::relations::node::parent_of(k) == *node_key
+            {
+                commit.range_tips.insert(k.clone(), tip.clone());
+            }
+        }
+    }
     commit.validate(is_first).map_err(|e| PipelineError::Commit(e.to_string()))?;
     let cid = commit.derive_id(&obs.bytes).map_err(|e| PipelineError::Commit(e.to_string()))?.to_hex();
 
@@ -120,6 +131,27 @@ pub fn commit_file(
     new_state.publication += 1;
     new_state.tips.insert(node_key.to_string(), cid.clone());
     new_state.retained.push(cid.clone());
+    // Mount a new range node under its file the first time it appears.
+    if crate::relations::node::is_range_key(node_key) && is_first {
+        let parent = crate::relations::node::parent_of(node_key);
+        new_state.mounts.entry(parent).or_default().push(node_key.to_string());
+    }
+    // Upstream commits on a linked *source* range seed pending obligations on
+    // each link whose source is this node — adapt later clears the selected
+    // ones. The obligation key is this commit's id (one per change).
+    let link_ids: Vec<String> = new_state
+        .links
+        .iter()
+        .filter(|(_, l)| l.source == node_key)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for lid in link_ids {
+        new_state
+            .link_pending
+            .entry(lid)
+            .or_default()
+            .insert(cid.clone());
+    }
 
     // Kind-driven domain effects — persisted in state, not just computed.
     match kind {
@@ -200,6 +232,241 @@ pub fn commit_marker(
     }
     store.publish(probe, &commit, &cid, None, None, new_state)?;
     Ok(cid)
+}
+
+/// Create a link instance between two range-commits. Refuses file-level
+/// linking (source/target must name a range, not a whole file). Each link
+/// gets a fresh 128-bit id; identical endpoints+direction coexist as
+/// distinct instances. `source`/`target` are range-commit endpoints like
+/// `file:path@start-end` — presence of '@' marks a range.
+pub fn commit_link(
+    store: &mut Store,
+    probe: &mut dyn PublishProbe,
+    rng: &dyn Rng,
+    clock: &dyn Clock,
+    node_key: &str,
+    source: &str,
+    target: &str,
+    reason: &str,
+    expected: &Expected,
+) -> Result<String, PipelineError> {
+    // Endpoints must name range nodes, not whole files — a range key is a
+    // first-class object identity, not a text sniff.
+    if !crate::relations::node::is_range_key(source)
+        || !crate::relations::node::is_range_key(target)
+    {
+        return Err(PipelineError::Commit("links connect ranges, not whole files".into()));
+    }
+    store.lock()?;
+    store.check_expected(expected)?;
+
+    let mut idb = [0u8; 16];
+    rng.fill(&mut idb);
+    let link_id = crate::records::ids::Id128(idb).to_hex();
+
+    let is_first = !store.state().tips.contains_key(node_key);
+    let empty_obs = Observation { bytes: Vec::new(), text: false, encoding: None };
+    let version = make_version(rng, &empty_obs, Acquisition::File { path: "".into(), encoding: "".into() });
+    let prev = store.state().tips.get(node_key).cloned().unwrap_or_default();
+    let mut payload = serde_json::Map::new();
+    payload.insert("link_id".into(), link_id.clone().into());
+    payload.insert("source".into(), source.into());
+    payload.insert("target".into(), target.into());
+    payload.insert("reason".into(), reason.into());
+    let commit = make_commit(rng, clock, CommitKind::Link, &prev, &version, payload);
+    commit.validate(is_first).map_err(|e| PipelineError::Commit(e.to_string()))?;
+    let cid = commit.derive_id(b"").map_err(|e| PipelineError::Commit(e.to_string()))?.to_hex();
+
+    let mut new_state: State = store.state().clone();
+    new_state.publication += 1;
+    new_state.tips.insert(node_key.to_string(), cid.clone());
+    new_state.retained.push(cid.clone());
+    new_state.links.insert(link_id.clone(), crate::records::store::Link {
+        link_id: link_id.clone(),
+        source: source.to_string(),
+        target: target.to_string(),
+        created_by: cid.clone(),
+    });
+    new_state.link_pending.entry(link_id.clone()).or_default();
+    store.publish(probe, &commit, &cid, None, None, new_state)?;
+    Ok(link_id)
+}
+
+/// Adapt: handle selected changes on a link with an explicit reason.
+/// Requires link_id + changes + reason — all three, never guessed.
+pub fn commit_adapt(
+    store: &mut Store,
+    probe: &mut dyn PublishProbe,
+    rng: &dyn Rng,
+    clock: &dyn Clock,
+    node_key: &str,
+    link_id: &str,
+    changes: &[String],
+    reason: &str,
+    stop: bool,
+    expected: &Expected,
+) -> Result<String, PipelineError> {
+    if link_id.is_empty() {
+        return Err(PipelineError::Commit("adapt requires an explicit link_id".into()));
+    }
+    if reason.is_empty() {
+        return Err(PipelineError::Commit("adapt requires a reason".into()));
+    }
+    store.lock()?;
+    store.check_expected(expected)?;
+    if !store.state().links.contains_key(link_id) {
+        return Err(PipelineError::Commit(format!("unknown link_id: {link_id}")));
+    }
+
+    let is_first = !store.state().tips.contains_key(node_key);
+    let empty_obs = Observation { bytes: Vec::new(), text: false, encoding: None };
+    let version = make_version(rng, &empty_obs, Acquisition::File { path: "".into(), encoding: "".into() });
+    let prev = store.state().tips.get(node_key).cloned().unwrap_or_default();
+    let mut payload = serde_json::Map::new();
+    payload.insert("link_id".into(), link_id.into());
+    payload.insert("changes".into(), changes.join(",").into());
+    payload.insert("reason".into(), reason.into());
+    payload.insert("stop".into(), stop.into());
+    let commit = make_commit(rng, clock, CommitKind::Adapt, &prev, &version, payload);
+    commit.validate(is_first).map_err(|e| PipelineError::Commit(e.to_string()))?;
+    let cid = commit.derive_id(b"").map_err(|e| PipelineError::Commit(e.to_string()))?.to_hex();
+
+    let mut new_state: State = store.state().clone();
+    new_state.publication += 1;
+    new_state.tips.insert(node_key.to_string(), cid.clone());
+    new_state.retained.push(cid.clone());
+    // Clear selected changes; --stop additionally blocks the whole source
+    // end (clears all pending on this link — a source-side branch stop).
+    if let Some(pend) = new_state.link_pending.get_mut(link_id) {
+        if stop {
+            pend.clear();
+        } else {
+            for c in changes {
+                pend.remove(c);
+            }
+        }
+    }
+    store.publish(probe, &commit, &cid, None, None, new_state)?;
+    Ok(cid)
+}
+
+/// File reset: restore each child range's recorded tip from the target file
+/// commit's `range_tips` snapshot — never by wall-clock or current table.
+/// `child_is_interior` reports whether a child's recorded tip sits inside an
+/// ATOMIC block (a block member, not a boundary); if ANY child's restore
+/// target is interior, the WHOLE file reset refuses, siblings unchanged.
+pub fn file_reset_children<F>(
+    range_tips: &std::collections::BTreeMap<String, String>,
+    mut child_is_interior: F,
+) -> Result<Vec<(String, String)>, ResetError>
+where
+    F: FnMut(&str) -> bool,
+{
+    let mut restored = Vec::new();
+    for (range_id, tip) in range_tips {
+        if child_is_interior(tip) {
+            return Err(ResetError::UnknownTarget(format!(
+                "child {range_id} restore target {tip} is a block member"
+            )));
+        }
+        restored.push((range_id.clone(), tip.clone()));
+    }
+    Ok(restored)
+}
+
+/// Outcome of a `reset <id>`: where it landed and the machine-readable
+/// warning when the requested boundary differs from the actual landing.
+#[derive(Debug, serde::Serialize)]
+pub struct ResetOutcome {
+    pub requested: String,
+    /// "" = withdrew to nothing (empty chain / unmounted).
+    pub actual: String,
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub warning: String,
+}
+
+/// Execute `reset <id>` on `node_key`. Reads each commit's kind + previous_id
+/// from disk; marker targets land on their direct predecessor (one step only),
+/// interior ordinary members are refused, and the reset itself is recorded as
+/// a commit (tip moves; history is never deleted). `lookup` resolves a commit
+/// id to (kind, previous_id).
+pub fn reset<F>(
+    _node_key: &str,
+    target: &str,
+    mut lookup: F,
+) -> Result<ResetOutcome, ResetError>
+where
+    F: FnMut(&str) -> Option<(CommitKind, String)>,
+{
+    let (kind, prev) = lookup(target).ok_or(ResetError::UnknownTarget(target.into()))?;
+    match kind {
+        CommitKind::AtomicBegin | CommitKind::AtomicEnd => {
+            // Marker: withdraw it and its successors, land on direct
+            // predecessor — exactly one step, never skipped recursively.
+            Ok(ResetOutcome {
+                requested: target.to_string(),
+                actual: prev.clone(),
+                warning: format!(
+                    "requested boundary {target} lands on predecessor {}",
+                    if prev.is_empty() { "<empty>".into() } else { prev.clone() }
+                ),
+            })
+        }
+        _ => {
+            // An ordinary commit *inside* an ATOMIC block is never a reset
+            // target — only markers and out-of-block commits are. Detect
+            // membership by walking ancestors: if a BEGIN precedes this
+            // commit without its matching END also preceding it, the commit
+            // is a block member.
+            if is_block_member(target, &mut lookup) {
+                return Err(ResetError::Interior(target.into()));
+            }
+            // Ordinary target outside a block: kept; successors dangle.
+            Ok(ResetOutcome {
+                requested: target.to_string(),
+                actual: target.to_string(),
+                warning: String::new(),
+            })
+        }
+    }
+}
+
+/// Walk ancestors of `commit` to detect whether it sits inside an ATOMIC
+/// block: an unmatched BEGIN before it (with no matching END before it too)
+/// makes it a block member.
+fn is_block_member<F>(commit: &str, lookup: &mut F) -> bool
+where
+    F: FnMut(&str) -> Option<(CommitKind, String)>,
+{
+    let mut depth = 0i64;
+    let mut cur = commit.to_string();
+    let mut guard = 0usize;
+    while let Some((k, prev)) = lookup(&cur) {
+        match k {
+            CommitKind::AtomicEnd => depth += 1,
+            CommitKind::AtomicBegin => {
+                if depth == 0 {
+                    return true; // an unmatched BEGIN before commit
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+        if prev.is_empty() || guard > 100_000 {
+            break;
+        }
+        guard += 1;
+        cur = prev;
+    }
+    false
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ResetError {
+    #[error("unknown reset target: {0}")]
+    UnknownTarget(String),
+    #[error("reset target is an ordinary block member: {0}")]
+    Interior(String),
 }
 
 /// Result of `omd verify` over a store — the independent check distinct

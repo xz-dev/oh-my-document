@@ -214,7 +214,7 @@ impl Commit {
             Delete => &["source"],
             Tag => &["path", "tag"],
             Reset => &["requested", "actual"],
-            AtomicBegin | AtomicEnd => &["chain"],
+            AtomicBegin | AtomicEnd => &[],
             Commit | Clean | Unclean | FileVerify | ScopeAdjust => &[],
         }
     }

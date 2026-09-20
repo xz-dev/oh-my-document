@@ -62,20 +62,30 @@ pub enum ResetLanding {
     /// Reset to a marker: land on the marker's direct predecessor
     /// ("" = withdraw to nothing — the first BEGIN with no predecessor).
     MarkerPredecessor(String),
-    /// Reset to an ordinary interior member — refused.
+    /// Reset to an ordinary member *inside a block* — refused.
     RefusedInterior,
     /// Reset into a child ordinary member (file reset crossing a block
     /// member) — the whole reset rejects, siblings unchanged.
     RefusedIntoChildMember,
+    /// Reset to an ordinary commit outside a block — the target is kept and
+    /// its successors become dangling (restore-to-target).
+    RestoreTarget(String),
 }
 
 /// Resolve where a reset to `target` lands.
-/// `target_kind` is the kind of commit `target` names; `target_prev` its
-/// previous_id. `in_child_member` is true when the reset would descend into
-/// a child ordinary member inside an open/closed block.
+///
+/// * Marker (BEGIN/END) → land on the marker's direct predecessor (one step).
+/// * Ordinary member *inside an ATOMIC block* → refused (interior member).
+/// * Ordinary commit *outside* a block → the target itself is the landing.
+/// * File reset descending into a child block member → whole reset refuses.
+///
+/// `is_block_member` = target is an ordinary commit between a BEGIN and its
+/// END on this chain. `in_child_member` = a file-level reset would land on a
+/// child range's block-interior member (rejects wholesale).
 pub fn resolve_reset(
     target_kind: CommitKind,
     target_prev: &str,
+    is_block_member: bool,
     in_child_member: bool,
 ) -> ResetLanding {
     if in_child_member {
@@ -85,7 +95,8 @@ pub fn resolve_reset(
         CommitKind::AtomicBegin | CommitKind::AtomicEnd => {
             ResetLanding::MarkerPredecessor(target_prev.to_string())
         }
-        _ => ResetLanding::RefusedInterior,
+        _ if is_block_member => ResetLanding::RefusedInterior,
+        _ => ResetLanding::RestoreTarget(target_prev.to_string()),
     }
 }
 

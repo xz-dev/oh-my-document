@@ -13,7 +13,7 @@
 //! no-op; the test harness supplies a fault-injecting implementation. No
 //! library code depends on the test module.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -91,6 +91,26 @@ pub struct State {
     /// reset withdrew (dangling) vs never-published orphans.
     #[serde(default)]
     pub reset_from: BTreeMap<String, String>,
+    /// link_id → link instance (persistent identity). A link stays valid
+    /// until its creation commit is withdrawn; identical endpoints/direction
+    /// can coexist as distinct instances with distinct link_ids.
+    #[serde(default)]
+    pub links: BTreeMap<String, Link>,
+    /// link_id → set of pending obligation change-keys awaiting adapt.
+    /// Each change on a link is its own obligation; adapt selects which to
+    /// clear. Never merged by endpoint.
+    #[serde(default)]
+    pub link_pending: BTreeMap<String, BTreeSet<String>>,
+}
+
+/// A persisted link instance.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Link {
+    pub link_id: String,
+    pub source: String,
+    pub target: String,
+    /// The commit that created it (identity separate from the link itself).
+    pub created_by: String,
 }
 
 /// What a caller observed before writing — checked under the lock.
@@ -142,8 +162,13 @@ impl Store {
     }
 
     /// Acquire the single-writer lock. Fails fast on contention — no waiting,
-    /// no stale-lockfile prying, no re-read-and-retry.
+    /// no stale-lockfile prying, no re-read-and-retry. Idempotent within one
+    /// Store: a composite operation may call lock() at each step and the
+    /// already-held lock is reused, not contended with itself.
     pub fn lock(&mut self) -> Result<(), StoreError> {
+        if self.lock.is_some() {
+            return Ok(()); // already held by this store
+        }
         let path = self.root.join("write.lock");
         let mut lf = fslock::LockFile::open(&path)?;
         if !lf.try_lock()? {
@@ -192,6 +217,11 @@ impl Store {
             fs::create_dir_all(parent)?;
         }
         if p.exists() {
+            // content/<sha256> is content-addressed: identical bytes are the
+            // same file. Re-observing equal content shares it, not an error.
+            if rel.starts_with("content/") {
+                return Ok(());
+            }
             return Err(StoreError::Record(format!("immutable record exists: {rel}")));
         }
         let mut f = File::create(&p)?;

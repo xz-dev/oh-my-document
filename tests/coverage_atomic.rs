@@ -86,20 +86,28 @@ fn unclosed_block_fails_verify_even_at_full_coverage() {
 fn reset_to_marker_lands_on_direct_predecessor() {
     // Reset to a BEGIN/END marker withdraws it and successors — lands on the
     // marker's own previous_id, the "-1 step" for placeholders.
-    let land = resolve_reset(CommitKind::AtomicBegin, "prev_commit", false);
+    let land = resolve_reset(CommitKind::AtomicBegin, "prev_commit", false, false);
     assert_eq!(land, ResetLanding::MarkerPredecessor("prev_commit".into()));
 }
 
 #[test]
 fn reset_to_first_begin_with_no_predecessor_withdraws_to_nothing() {
-    let land = resolve_reset(CommitKind::AtomicBegin, "", false);
+    let land = resolve_reset(CommitKind::AtomicBegin, "", false, false);
     assert_eq!(land, ResetLanding::MarkerPredecessor("".into()));
 }
 
 #[test]
-fn reset_to_ordinary_interior_refused() {
-    let land = resolve_reset(CommitKind::Commit, "x", false);
+fn reset_to_block_interior_member_refused() {
+    // Ordinary commit *inside* a block is never a direct reset target.
+    let land = resolve_reset(CommitKind::Commit, "x", true, false);
     assert_eq!(land, ResetLanding::RefusedInterior);
+}
+
+#[test]
+fn reset_to_ordinary_commit_outside_block_restores() {
+    // Ordinary range/file target outside a block: kept, successors dangle.
+    let land = resolve_reset(CommitKind::Commit, "x", false, false);
+    assert_eq!(land, ResetLanding::RestoreTarget("x".into()));
 }
 
 #[test]
@@ -140,9 +148,31 @@ fn link_other_end_chain_not_merged_into_block() {
 }
 
 #[test]
+fn file_reset_restores_recorded_child_tips_exactly() {
+    // Spec: file reset restores each child range's recorded tip from the
+    // file commit's range_tips snapshot — not by wall-clock, not a -1 step.
+    let mut snap = std::collections::BTreeMap::new();
+    snap.insert("r0".to_string(), "tip_a".to_string());
+    snap.insert("r1".to_string(), "tip_b".to_string());
+    let restored = omd::records::pipeline::file_reset_children(&snap, |_| false).unwrap();
+    assert_eq!(restored, vec![("r0".into(), "tip_a".into()), ("r1".into(), "tip_b".into())]);
+}
+
+#[test]
+fn file_reset_rejects_when_child_is_block_member() {
+    // If ANY child's recorded tip is an interior block member, the whole
+    // file reset refuses — siblings are not partially restored.
+    let mut snap = std::collections::BTreeMap::new();
+    snap.insert("r0".to_string(), "ok_tip".to_string());
+    snap.insert("r1".to_string(), "interior_member".to_string());
+    let res = omd::records::pipeline::file_reset_children(&snap, |tip| tip == "interior_member");
+    assert!(res.is_err());
+}
+
+#[test]
 fn file_reset_into_child_member_rejects_wholesale() {
     // A file reset that would land on a child ordinary member inside a block
     // rejects the whole reset — siblings are left unchanged.
-    let land = resolve_reset(CommitKind::AtomicEnd, "end_prev", true);
+    let land = resolve_reset(CommitKind::AtomicEnd, "end_prev", false, true);
     assert_eq!(land, ResetLanding::RefusedIntoChildMember);
 }

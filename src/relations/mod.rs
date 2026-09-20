@@ -9,6 +9,7 @@ pub mod atomic;
 pub mod coverage;
 pub mod diff;
 pub mod dirty;
+pub mod node;
 pub mod range;
 
 use serde::{Deserialize, Serialize};
