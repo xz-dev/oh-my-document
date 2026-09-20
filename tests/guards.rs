@@ -2704,3 +2704,42 @@ fn peer_content_read_current_not_snapshot() {
     let dirty = j["data"]["dirty"].as_object().cloned().unwrap_or_default();
     assert!(!dirty.is_empty(), "in-range edit reported: {o}");
 }
+
+// P1-4: a parallel chain over identical coords (nonce-suffixed range key)
+// still counts into coverage — parse_span strips the `#nonce` suffix so
+// `0-5#abc` parses the same span as `0-5`.
+#[test]
+fn nonce_suffixed_range_counts_in_coverage() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.write("b.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r1"]);
+    // Second commit on same coords → nonce-suffixed parallel chain.
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r2"]);
+    // Extract the nonce'd range key (the one containing '#').
+    let nonce_key = t.state().lines()
+        .find(|l| l.contains("range:a.md@") && l.contains('#'))
+        .and_then(|l| l.split('"').nth(1).map(String::from))
+        .unwrap_or_default();
+    assert!(nonce_key.contains('#'), "nonce suffix exists: {}", t.state());
+    // Tag a's file as spec, b's as code; rule spec->code; link b's range
+    // to the nonce'd a-range — its positions must parse+count in coverage.
+    t.run(&["commit", "tag", "a.md", "--tag", "spec"]);
+    t.run(&["commit", "tag", "b.md", "--tag", "code"]);
+    t.run(&["commit", "scope_adjust", "a.md", "--rule", "spec->code", "--level", "fail"]);
+    // Link b's range FROM the nonce'd a-range explicitly — the stored
+    // link source carries the `#` suffix parse_span must strip.
+    t.run(&["commit", "commit", "b.md", "--range", "0-5",
+        "--link-from", &nonce_key, "--reason", "lb"]);
+    let (_, o, _) = t.run(&["check"]);
+    // If parse_span failed on `0-5#…` the linked positions silently dropped
+    // → covered=0. Assert the nonce'd range's positions actually counted.
+    let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
+    let covered = j["data"]["check"]["rules"].as_array()
+        .and_then(|rs| rs.first())
+        .and_then(|r| r["covered"].as_u64()).unwrap_or(0);
+    assert!(covered > 0,
+            "nonce'd range positions counted (covered={covered}): {o}");
+}

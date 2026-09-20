@@ -1681,12 +1681,11 @@ fn count_linked_positions(store: &Store, node: &str, target_tag: &str) -> u64 {
 fn parse_span(key: &str) -> Option<(char, u64, u64)> {
     let at = key.find('@')?;
     let span = &key[at + 1..];
+    // A nonce suffix (`0-5#<nonce>`) marks a parallel chain over identical
+    // coords — the span is still `s-e`; strip the nonce before parsing.
+    let span = span.split('#').next().unwrap_or(span);
     let (mode, rest) = span.split_once(':')?;
-    let (s, e) = rest
-        .split('-')
-        .next()
-        .map(|_| ())
-        .and_then(|_| rest.split_once('-'))?;
+    let (s, e) = rest.split_once('-')?;
     Some((mode.chars().next()?, s.parse().ok()?, e.parse().ok()?))
 }
 
