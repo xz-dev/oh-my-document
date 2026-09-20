@@ -246,3 +246,46 @@ per-invocation dup scoping, interior `--id` resolution, dangling inspect.
 
 Test totals after remediation: `cargo test --all-targets` = 176+ passing,
 0 failing (all suites green); BDD `cargo test --test bdd` = 18/18.
+
+---
+
+# Second Remediation Round (post re-audit)
+
+The re-audit found 3 unreproducible claims + 8 vacuous tests in my first
+remediation. This round fixed them. Status now tracked against the reviewer's
+per-file counts (change-review 18/19/18/0, command-verification 5/7/7/1,
+local-project-links 8/7/5/2, managed-content 23/8/9/0 → total 54/41/39/3).
+
+## Bugs fixed in round 2 (each with executed check)
+
+| Bug | Fix | Test |
+|---|---|---|
+| reset didn't withdraw links in removed segment | `apply_reset_to_state` walks old_tip→actual (successor direction) + withdraws created links/adapts | tests/reset.rs `reset_to_begin_withdraws_link_created_in_segment` |
+| pure-move reported CLEAN | `verify` reports `moved: needs review` for single-candidate relocate + `dirtied_by` for in-range edits | tests/guards.rs `pure_position_move_reports_moved_not_clean`, tests/traceability.rs `in_range_edit_dirties_the_range` |
+| command-source unreachable | `--source-ref 'command::exe::["args"]'` → `commit_command_source` → `Acquisition::Command` → verify `unverified` | tests/guards.rs `command_source_records_acquisition_and_unverified` |
+| check silent empty on missing source | tracked file tip with vanished source reports `incomplete` in check | src/main.rs check arm |
+
+## Vacuous tests removed/rewritten
+
+Deleted 6 struct-tautology tests (coverage_atomic ×3, domain_semantics ×2,
+ranges ×1) — their clauses covered by real checks. Rewrote 2 near-vacuous
+traceability tests (tag_conflict → `tag_on_changed_content_is_not_a_requalification`,
+content_change → `in_range_edit_dirties_the_range`) with can-fail assertions.
+
+## New executed checks this round (~29 in tests/guards.rs + traceability)
+
+adjacent-marker one-step reset, open-block interior refused, same-endpoint
+link coexist, no-git rebuild, referenced dangling retained, clean --no-reason,
+commit-id stable, --timestamp, note patch, first-BEGIN empty reset, per-store
+tags, replace refuses diff content, offline peer no-block, warn rule non-fail,
+explicit range expansion, cross-boundary dirty, byte-mode coords, ambiguous
+locate, tombstone not-missing, command-source acquisition+unverified.
+
+Test totals: `cargo test --all-targets` 190+ green, BDD 18/18.
+
+## Still DEFERRED/PLATFORM (legitimate, not faked)
+
+- remote-identity URL↔declared-mapping subsystem (spec-optional; needs config
+  registry + URL normalization semantics + SSH/HTTPS non-equivalence rules)
+- full multi-store ordered-locking choreography depth
+- external I/O fault injection (storage failure, stdin-wait) — no in-process seam
