@@ -422,6 +422,13 @@ pub fn commit_adapt(
     if reason.is_empty() {
         return Err(PipelineError::Commit("adapt requires a reason".into()));
     }
+    // Adapt must record the *selected* changes (one, several, or all via
+    // --stop). A bare adapt with no --changes and no --stop has made no
+    // selection — refuse rather than silently waive pending obligations.
+    if !stop && changes.is_empty() {
+        return Err(PipelineError::Commit(
+            "adapt requires --changes <ids> (selected changes) or --stop (all)".into()));
+    }
     store.lock()?;
     store.check_expected(expected)?;
     if !store.state().links.contains_key(link_id) {
@@ -445,8 +452,10 @@ pub fn commit_adapt(
     new_state.publication += 1;
     new_state.tips.insert(node_key.to_string(), cid.clone());
     new_state.retained.push(cid.clone());
-    // Clear selected changes; --stop additionally blocks the whole source
-    // end (clears all pending on this link — a source-side branch stop).
+    // Adapt acknowledges the SELECTED pending obligations on this link.
+    // `--changes c1,c2` clears only the named pending commit ids (unselected
+    // obligations stay pending); `--stop` handles all upstream changes and
+    // blocks the whole source end.
     if let Some(pend) = new_state.link_pending.get_mut(link_id) {
         if stop {
             pend.clear();

@@ -37,11 +37,53 @@ impl OmdWorld {
         p
     }
 
+    /// Resolve `<placeholder>` tokens against live state: `<range-NAME-tip>`
+    /// → the current tip of `range:NAME@...`, `<last-link-id>` → the last
+    /// links.<id> key in state.toml.
+    fn resolve(&self, tok: &str) -> String {
+        if tok == "<last-link-id>" {
+            let s = self.state_toml();
+            let mut last = String::new();
+            for l in s.lines() {
+                if let Some(rest) = l.strip_prefix("[links.") {
+                    last = rest.trim_end_matches(']').to_string();
+                }
+            }
+            return last;
+        }
+        // `<pending-commit>` → the first pending commit id under [link_pending].
+        if tok == "<pending-commit>" {
+            let s = self.state_toml();
+            let mut in_lp = false;
+            for l in s.lines() {
+                if l.trim() == "[link_pending]" { in_lp = true; continue; }
+                if l.starts_with('[') && in_lp { break; }
+                if in_lp {
+                    if let Some(m) = l.find('"') {
+                        if let Some(n) = l[m + 1..].find('"') {
+                            return l[m + 1..m + 1 + n].to_string();
+                        }
+                    }
+                }
+            }
+        }
+        if let Some(name) = tok.strip_prefix("<range-").and_then(|s| s.strip_suffix("-tip>")) {
+            let s = self.state_toml();
+            for l in s.lines() {
+                if l.contains(&format!("range:{name}@")) && l.contains('=') {
+                    return l.split('=').nth(1).unwrap_or("").trim().trim_matches('"').to_string();
+                }
+            }
+        }
+        tok.to_string()
+    }
+
     fn run(&mut self, args: &str) {
+        let resolved: Vec<String> = shellish_split(args).iter().map(|t| self.resolve(t)).collect();
         let out = Command::new(Self::bin())
             .arg("--meta")
             .arg(self.meta())
-            .args(shellish_split(args))
+            .args(&resolved)
             .current_dir(&self.root)
             .output()
             .unwrap();
@@ -262,6 +304,33 @@ fn no_fallback(_w: &mut OmdWorld) {
     let root = std::env::temp_dir();
     let res = metadata_dir(Some(std::path::Path::new("/nonexistent-omd-meta")), None, &root);
     assert!(matches!(res, Err(DiscoveryError::BadExplicit(_))));
+}
+
+// Adapt-by-link-id: tracked-file Given + link_pending Then steps.
+#[given(regex = r#"a tracked file "([^"]+)" with content "([^"]+)""#)]
+fn tracked_file(w: &mut OmdWorld, path: String, content: String) {
+    let p = w.root.join(&path);
+    std::fs::write(&p, content).unwrap();
+    w.run(&format!("init {path}"));
+    assert_eq!(w.last_status, Some(0), "init {path} failed: {}", w.last_stdout);
+}
+
+#[then(regex = r#"the link "([^"]+)" has a pending entry"#)]
+fn link_has_pending(w: &mut OmdWorld, lid: String) {
+    let lid = w.resolve(&lid);
+    let s = w.state_toml();
+    // `LID = ["commit", ...]` non-empty under [link_pending].
+    let line = s.lines().find(|l| l.starts_with(&format!("{lid} = ["))).unwrap_or("");
+    assert!(line.contains('"'), "link {lid} has no pending entries:\n{s}");
+}
+
+#[then(regex = r#"the link "([^"]+)" has no pending entries"#)]
+fn link_no_pending(w: &mut OmdWorld, lid: String) {
+    let lid = w.resolve(&lid);
+    let s = w.state_toml();
+    let line = s.lines().find(|l| l.starts_with(&format!("{lid} = ["))).unwrap_or("");
+    // Either `LID = []` or the link key absent entirely = cleared.
+    assert!(line.is_empty() || line.contains("[]"), "link {lid} still pending:\n{s}");
 }
 
 #[then(regex = r#"the link is refused"#)]

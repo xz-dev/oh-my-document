@@ -334,8 +334,31 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             // Resolve the node: --range targets a first-class range chain
             // mounted under the file; bare path targets the file chain.
             let node = match (range, id) {
-                // --id names an existing chain node key to append to.
-                (_, Some(node_id)) => node_id.clone(),
+                // --id names a commit in the target range chain — resolve it
+                // to the chain's node key. A tip id resolves directly; a
+                // non-tip commit id resolves by walking each tip's
+                // previous_id chain until the commit is found.
+                (_, Some(cid)) => {
+                    let direct = store.state().tips.iter()
+                        .find(|(_, tip)| *tip == cid)
+                        .map(|(n, _)| n.clone());
+                    match direct {
+                        Some(n) => n,
+                        None => {
+                            // Walk every tip's chain for the commit id.
+                            let mut found = None;
+                            for (node, tip) in &store.state().tips {
+                                let mut cur = tip.clone();
+                                while !cur.is_empty() {
+                                    if cur == *cid { found = Some(node.clone()); break; }
+                                    cur = commit_prev(&root, &cur).unwrap_or_default();
+                                }
+                                if found.is_some() { break; }
+                            }
+                            found.ok_or_else(|| format!("--id: no chain contains commit {cid}"))?
+                        }
+                    }
+                },
                 // New independent range over identical coords gets a nonce.
                 (Some(r), None) => {
                     let (mode, s, e) = omd::relations::node::parse_range_arg(r)
