@@ -586,10 +586,11 @@ fn rebuild_without_git_or_cache() {
     // reindex rebuilds from the manifest only, no Git needed.
     let (c, o, _) = t.run(&["reindex"]);
     assert_eq!(c, 0, "reindex works without cache: {o}");
-    assert!(
-        t.0.join(".omd/index.txt").exists() || o.contains("ok"),
-        "index rebuilt: {o}"
-    );
+    // The index file exists AND parses with one row per published commit.
+    let idx = std::fs::read_to_string(t.0.join(".omd/index.txt")).unwrap_or_default();
+    let rows: Vec<&str> = idx.lines().filter(|l| !l.is_empty()).collect();
+    assert_eq!(rows.len(), 1, "one indexed row for the init commit: {idx}");
+    assert!(rows[0].contains('\t'), "row is tab-separated: {idx}");
 }
 
 // change-review: a referenced dangling commit is RETAINED — only truly
@@ -1836,9 +1837,11 @@ fn adapt_changes_clears_only_named() {
         "--reason",
         "partial",
     ]);
-    assert!(
-        format!("{o}{e}").contains("ok"),
-        "named-changes adapt: {o} {e}"
+    let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
+    assert_eq!(
+        j["data"]["ok"].as_bool(),
+        Some(true),
+        "named-changes adapt ok:true: {o} {e}"
     );
     // The named pending cleared; the un-named stays.
     let st2 = t.state();
@@ -1995,24 +1998,9 @@ fn link_ranges_no_metadata_merge() {
     );
 }
 
-// local-project-links #17: gc reports the offline consumer that blocks
-// collection — the protection reason names the unreachable peer, not silent.
-#[test]
-fn gc_reports_offline_consumer_reason() {
-    let t = T::new();
-    t.write("a.md", "x");
-    t.run(&["init", "a.md"]);
-    // gc --json reports protection/protected detail — the consumer name
-    // surfaces in the report, not a bare count.
-    let (_, o, _) = t.run(&["gc", "--json"]);
-    let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
-    assert!(j["data"].is_object(), "gc reports structured detail: {o}");
-    // The report carries protection info (protected/offline reason field).
-    assert!(
-        o.contains("protected") || o.contains("gc") || o.contains("collect"),
-        "gc protection detail present: {o}"
-    );
-}
+// NOTE: the earlier `gc_reports_offline_consumer_reason` here was vacuous
+// (`contains("collect")` matched the always-present envelope key). Real
+// coverage is `gc_reports_offline_consumer_reason_named` below — deleted.
 
 // change-review #42: --timestamp is accepted on commit (manual replay) and
 // records the user-supplied time — it never overrides concurrency control
