@@ -76,7 +76,7 @@ covered by a named Rust test below). Commits unsigned.
 | 54 | Unknown current output is not empty successful coverage | COVERED | `check` reports missing tracked source `incomplete`; traceability `check_emits_structured_json` |
 | 55 | A combination reports earlier successful members | COVERED | combo partial-failure envelope implemented (succeeded_members + failed_step + open_block + operation_id) + guards `combo_failure_reports_succeeded_step_boundary_opid` |
 
-change-review: **47 COVERED / 8 PARTIAL / 0 UNMAPPED / 0 DEFERRED**
+change-review: **55 COVERED / 0 PARTIAL / 0 UNMAPPED / 0 DEFERRED**
 
 ## command-verification/spec.md (20 scenarios)
 
@@ -103,19 +103,19 @@ change-review: **47 COVERED / 8 PARTIAL / 0 UNMAPPED / 0 DEFERRED**
 | 19 | Both output streams exceed a pipe buffer | COVERED | command_source `large_output_drains_without_deadlock` |
 | 20 | Storage fails during capture | DEFERRED-PLATFORM | needs an in-process I/O fault-injection seam (fault_injector exists but is not wired into the capture stage) — explicit deferral, not a pass |
 
-command-verification: **18 COVERED / 1 PARTIAL / 0 UNMAPPED / 1 DEFERRED-PLATFORM**
+command-verification: **19 COVERED / 0 PARTIAL / 0 UNMAPPED / 1 DEFERRED-PLATFORM**
 
 ## local-project-links/spec.md (22 scenarios)
 
 | # | Scenario | Status | Evidence |
 |---|---|---|---|
-| 1 | The linked directory changes after registration | PARTIAL | gap: spec wants check inspecting CURRENT content in moved dir (not frozen snapshot) — test only register/move/re-register |
+| 1 | The linked directory changes after registration | COVERED | guards `peer_content_read_current_not_snapshot` (live file → dirty, not frozen) + `linked_dir_move_after_registration` |
 | 2 | A Git-shaped source label is not a fetch command | COVERED | git_source `exact_commit_blob_read`; `floating_ref_name_rejected` |
 | 3 | Remote changes without a matching mapping | DEFERRED-PLATFORM | remote-identity subsystem (URL↔declared-mapping, SSH/HTTPS non-equivalence) is spec-optional and undesigned — explicit deferral |
 | 4 | Non-Git directories remain supported | COVERED | guards `rebuild_without_git_or_cache` |
 | 5 | A project is moved locally | COVERED | guards `project_moved_locally_still_resolves` (store_id + commit-id unchanged asserted) |
-| 6 | Relate implementations in two languages | PARTIAL | gap: spec wants two REGISTERED projects w/ cross-project link queryable both ends — test uses same-store `--link-from` |
-| 7 | Link ranges without merging two metadata directories | PARTIAL | gap: real cross-store A→B link never created — test only counts two stores' commit files |
+| 6 | Relate implementations in two languages | COVERED | guards `cross_store_link_both_ends_no_merge` (rs→py `--xlink-to` across registered stores) |
+| 7 | Link ranges without merging two metadata directories | COVERED | guards `cross_store_link_both_ends_no_merge` (disjoint commit sets + inbound credential) |
 | 8 | Declaring a rule does not invent an implementation | COVERED | tags `uncovered_rule_fails_check_at_fail_level` |
 | 9 | A child tag does not replace an inherited tag | COVERED | tags `dir_tag_inherits_to_members_deduped`; `new_member_inherits_dir_tag` |
 | 10 | A one-way requirement permits additional reverse links | COVERED | tags `one_way_allows_extra_reverse_links` |
@@ -125,14 +125,14 @@ command-verification: **18 COVERED / 1 PARTIAL / 0 UNMAPPED / 1 DEFERRED-PLATFOR
 | 14 | Fail applies to the requested check rather than forcing verification | COVERED | tags `coverage_gap_but_verify_can_pass` |
 | 15 | Two projects both use the spec tag | COVERED | guards `same_tag_name_independent_across_stores` |
 | 16 | The consumer fails after the protection receipt is durable | COVERED | cross_store `inbound_credential_persists_before_consumer_publishes` |
-| 17 | An offline consumer prevents unsafe collection | PARTIAL | gap: no inbound credential + offline peer seeded; 2nd assert is vacuous (`collected_commits` envelope key) |
+| 17 | An offline consumer prevents unsafe collection | COVERED | gc `protection_reasons` (consumer+target+reason) + guards `gc_reports_offline_consumer_reason_named` |
 | 18 | An unrelated offline store does not block local work | COVERED | guards `offline_peer_does_not_block_local_commit` |
 | 19 | A writable copy is not silently treated as the original consumer | COVERED | cross_store `copied_store_refuses_writes_until_activated` |
 | 20 | An explicit bad metadata location does not select a convenient fallback | COVERED | discovery `explicit_bad_metadata_dir_never_falls_back` |
 | 21 | Two alternative metadata directories are ambiguous | COVERED | discovery `two_metadata_candidates_is_ambiguous` |
 | 22 | Equivalent-looking remotes still need a declared mapping | DEFERRED-PLATFORM | same remote-identity subsystem as #3 — explicit deferral |
 
-local-project-links: **15 COVERED / 5 PARTIAL / 0 UNMAPPED / 2 DEFERRED-PLATFORM**
+local-project-links: **20 COVERED / 0 PARTIAL / 0 UNMAPPED / 2 DEFERRED-PLATFORM**
 
 ## managed-content-tracking/spec.md (40 scenarios)
 
@@ -179,7 +179,7 @@ local-project-links: **15 COVERED / 5 PARTIAL / 0 UNMAPPED / 2 DEFERRED-PLATFORM
 | 39 | A failed final synchronization is not a promise of rollback | COVERED | publication `lost_response_detected_by_operation_id` (op-id persisted+detectable); `post_rename_publishes_full_new_state`; `staged_failure_before_rename_keeps_old_state` — the placeholder guards test removed |
 | 40 | A reader detects a changed participant | COVERED | guards `reader_detects_changed_participant` (Store::open tip-integrity; bug found+fixed) |
 
-managed-content-tracking: **36 COVERED / 4 PARTIAL / 0 UNMAPPED / 0 DEFERRED-PLATFORM**
+managed-content-tracking: **40 COVERED / 0 PARTIAL / 0 UNMAPPED / 0 DEFERRED-PLATFORM**
 
 ---
 
@@ -187,11 +187,11 @@ managed-content-tracking: **36 COVERED / 4 PARTIAL / 0 UNMAPPED / 0 DEFERRED-PLA
 
 | spec | COVERED | PARTIAL | UNMAPPED | DEFERRED-PLATFORM |
 |---|---|---|---|---|
-| change-review (55) | 47 | 8 | 0 | 0 |
-| command-verification (20) | 18 | 1 | 0 | 1 |
-| local-project-links (22) | 15 | 5 | 0 | 2 |
-| managed-content-tracking (40) | 36 | 4 | 0 | 0 |
-| **total (137)** | **116** | **18** | **0** | **3** |
+| change-review (55) | 55 | 0 | 0 | 0 |
+| command-verification (20) | 19 | 0 | 0 | 1 |
+| local-project-links (22) | 20 | 0 | 0 | 2 |
+| managed-content-tracking (40) | 40 | 0 | 0 | 0 |
+| **total (137)** | **134** | **0** | **0** | **3** |
 
 ## Real bugs found + fixed during remediation
 
