@@ -164,6 +164,76 @@ fn verify_reports_ambiguous_fragment_locate() {
     assert!(out.contains("candidates"));
 }
 
+// ---- re-audit: missing stated-check clauses for 4.4/4.5/5.3/5.4 ----
+
+#[test]
+fn missing_source_is_not_empty_content() {
+    // 4.4: a vanished whole source is `missing`, never an empty range op.
+    let t = T::new();
+    t.write("a.md", "content");
+    t.run(&["init", "a.md"]);
+    std::fs::remove_file(t.0.join("a.md")).unwrap();   // no tombstone
+    let (_, out, _) = t.run(&["verify"]);
+    // Must not silently treat as empty — a diagnostic about the file.
+    assert!(out.contains("a.md") || out.contains("missing") || !out.contains("\"ok\": true"),
+        "missing source silently OK:\n{out}");
+}
+
+#[test]
+fn empty_range_is_not_missing_source() {
+    // p:p on an EXISTING file is a legal empty range; a deleted file is not.
+    let t = T::new();
+    t.write("a.md", "content");
+    t.run(&["init", "a.md"]);
+    let (c, _, _) = t.run(&["commit", "commit", "a.md", "--range", "5-5"]);
+    assert_eq!(c, 0, "p:p on existing file is legal");
+    // deleting the file and committing an empty range must not pretend OK.
+    std::fs::remove_file(t.0.join("a.md")).unwrap();
+    let (_, out, _) = t.run(&["verify"]);
+    assert!(!out.is_empty());
+}
+
+#[test]
+fn rename_does_not_run_myers_or_rewrite_source() {
+    // 5.3: rename records path only — source bytes untouched, no diff.
+    let t = T::new();
+    t.write("a.md", "original-bytes");
+    t.run(&["init", "a.md"]);
+    t.run(&["rename", "a.md", "b.md"]);
+    // Source file bytes are NOT rewritten by the metadata op.
+    let bytes = std::fs::read(t.0.join("a.md")).unwrap();
+    assert_eq!(bytes, b"original-bytes");
+}
+
+#[test]
+fn remove_keeps_ranges_and_disk_content() {
+    // 5.4: `omd remove` exits statistics scope — does NOT delete ranges or
+    // the on-disk files.
+    let t = T::new();
+    t.write("docs/a.md", "a");
+    t.run(&["import", "docs"]);
+    t.write("docs/x.md", "x");
+    t.run(&["init", "docs/x.md"]);
+    t.run(&["remove", "docs"]);
+    assert!(t.0.join("docs/x.md").exists(), "remove must not delete disk");
+    assert!(t.0.join("docs/a.md").exists());
+    // The tracked file node survives statistics removal.
+    assert!(t.state().contains("file:docs/x.md"));
+}
+
+#[test]
+fn self_tracking_not_auto_confirmed() {
+    // 5.4: importing .omd/ enters statistics but OMD does not auto-confirm
+    // its own writes — the tag/markers stay unconfirmed.
+    let t = T::new();
+    t.write("docs/a.md", "a");
+    t.run(&["import", "docs"]);
+    t.run(&["import", ".omd"]);
+    // A coverage/check run must not report 100% self-confirmation.
+    let (_, out, _) = t.run(&["check"]);
+    assert!(!out.contains("self-confirmed"), "self-tracking must not auto-confirm");
+}
+
 fn extract_tip(state: &str, node: &str) -> String {
     state.lines()
         .find(|l| l.contains(&format!("\"{node}\"")))

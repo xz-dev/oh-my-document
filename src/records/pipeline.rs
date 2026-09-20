@@ -228,6 +228,27 @@ pub fn commit_marker(
         CommitKind::AtomicEnd => {
             if let Some(s) = new_state.open_blocks.get_mut(node_key) { s.pop(); }
         }
+        CommitKind::Tag => {
+            // Flat project-local tag on this node. Dir nodes' tags inherit to
+            // members at check time (additive, deduped — a set, never counted
+            // twice). The tag name is scoped to this store; no cross-project
+            // identity merge.
+            if let Some(t) = commit.payload.get("tag").and_then(|v| v.as_str()) {
+                new_state.tags.entry(node_key.to_string()).or_default().insert(t.to_string());
+            }
+        }
+        CommitKind::ScopeAdjust => {
+            // Record a named tag-link rule (`spec->code` / `spec<->code`) with
+            // severity + skip. A declared rule is a check item — never auto-
+            // invents ranges/links and never gates verify.
+            if let Some(r) = commit.payload.get("rule").and_then(|v| v.as_str()) {
+                let level = commit.payload.get("level").and_then(|v| v.as_str()).unwrap_or("fail").to_string();
+                let skip = commit.payload.get("skip").and_then(|v| v.as_bool()).unwrap_or(false);
+                new_state.tag_rules.insert(r.to_string(), crate::records::store::TagRule {
+                    rule: r.to_string(), level, skip,
+                });
+            }
+        }
         _ => {}
     }
     store.publish(probe, &commit, &cid, None, None, new_state)?;
@@ -573,6 +594,9 @@ pub struct VerifyReport {
     /// Locate problems: a range whose recorded fragment is ambiguous in the
     /// current source — reports old coords + candidates, never auto-picks.
     pub locate: std::collections::BTreeMap<String, Vec<String>>,
+    /// Tracked file paths that vanished without a tombstone — `missing`,
+    /// never auto-deleted nor silently OK.
+    pub missing: Vec<String>,
 }
 
 /// Run verify against the persisted state — reads what's on disk, never
@@ -630,6 +654,23 @@ pub fn verify(store: &Store) -> VerifyReport {
             scan(k, tip);
         }
     }
-    let ok = open_blocks.is_empty() && obligations.is_empty() && dirty.is_empty() && locate.is_empty();
-    VerifyReport { ok, open_blocks, obligations, dirty, locate }
+    // Missing-source diagnostics: a tracked file node whose registered path
+    // vanished WITHOUT a tombstone is `missing` — never auto-interpreted as
+    // an intentional delete, never silently OK. A tombstone (Delete kind tip)
+    // is intentional and is not `missing`.
+    let mut missing: Vec<String> = Vec::new();
+    for (k, tip) in &st.tips {
+        if let Some(path) = k.strip_prefix("file:") {
+            let is_tombstone = store.read_commit(tip)
+                .map(|c| c.kind == CommitKind::Delete)
+                .unwrap_or(false);
+            let proj_root = std::env::current_dir().unwrap_or_default();
+            if !is_tombstone && !proj_root.join(path).exists() {
+                missing.push(format!("{path} (no tombstone)"));
+            }
+        }
+    }
+    let ok = open_blocks.is_empty() && obligations.is_empty() && dirty.is_empty()
+        && locate.is_empty() && missing.is_empty();
+    VerifyReport { ok, open_blocks, obligations, dirty, locate, missing }
 }

@@ -101,6 +101,28 @@ pub struct State {
     /// clear. Never merged by endpoint.
     #[serde(default)]
     pub link_pending: BTreeMap<String, BTreeSet<String>>,
+    /// node key → set of flat project-local tag names. Dir tags inherit to
+    /// members (additive, deduped); same-named tags across projects never
+    /// share identity — the name is scoped to this store.
+    #[serde(default)]
+    pub tags: BTreeMap<String, BTreeSet<String>>,
+    /// Named tag-link rules: `spec->code` (one-way) or `spec<->code`
+    /// (two-way) + severity (`warn`|`fail`, default fail). A rule is a named
+    /// check item — never a new marker lifecycle nor a verify gate.
+    #[serde(default)]
+    pub tag_rules: BTreeMap<String, TagRule>,
+}
+
+/// A declared tag-link rule checked by `check`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TagRule {
+    /// e.g. "spec->code" or "spec<->code".
+    pub rule: String,
+    /// "warn" or "fail" (default fail).
+    pub level: String,
+    /// Explicitly skipped by the user? skip never confirms content.
+    #[serde(default)]
+    pub skip: bool,
 }
 
 /// A persisted link instance.

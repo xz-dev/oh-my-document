@@ -58,6 +58,15 @@ enum Cmd {
         /// `--id <commit>` — append to an existing range chain vs create a new
         /// one (same coords without --id = a new independent range object).
         #[arg(long)] id: Option<String>,
+        /// `commit tag <path> --tag <name>` — flat project-local tag.
+        #[arg(long)] tag: Option<String>,
+        /// `commit scope_adjust --rule "spec->code" --level fail` — declare a
+        /// named tag-link rule checked by `check`.
+        #[arg(long)] rule: Option<String>,
+        /// Rule severity: `warn` or `fail` (default `fail`).
+        #[arg(long)] level: Option<String>,
+        /// Explicitly skip the named rule — skip never confirms content.
+        #[arg(long)] skip: bool,
     },
     /// `omd verify` — full-store check (distinct from `commit verify <path>`).
     Verify { path: Option<String> },
@@ -202,7 +211,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             };
             Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": format!("{kind:?}") }))
         }
-        Cmd::Commit { kind, path, reason, range, timestamp, source, target, link_id, changes, stop, no_reason, link_from, link_to, id } => {
+        Cmd::Commit { kind, path, reason, range, timestamp, source, target, link_id, changes, stop, no_reason, link_from, link_to, id, tag, rule, level, skip } => {
             let kind = match kind.as_str() {
                 "init" => CommitKind::Init,
                 "commit" => CommitKind::Commit,
@@ -264,6 +273,10 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             if let Some(r) = reason { payload.insert("reason".into(), r.clone().into()); }
             if let Some(r) = range { payload.insert("range".into(), r.clone().into()); }
             if *no_reason { payload.insert("no_reason".into(), true.into()); }
+            if let Some(t) = tag { payload.insert("tag".into(), t.clone().into()); }
+            if let Some(r) = rule { payload.insert("rule".into(), r.clone().into()); }
+            if let Some(l) = level { payload.insert("level".into(), l.clone().into()); }
+            if *skip { payload.insert("skip".into(), true.into()); }
             let _ = timestamp; // manual replay timestamp — wired in commit path later
             // State-only kinds observe no file; content kinds read the file.
             let state_only = matches!(kind,
@@ -403,10 +416,57 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                 }
             }
             report.insert("files".into(), all_files.into());
+
+            // Tag-link rules: each declared `spec->code` (one-way) or
+            // `spec<->code` (two-way) computes *position coverage* — the
+            // union of confirmed linked-range positions over the source
+            // tag's member content — never object counts. A rule reports a
+            // named check item; skip never confirms; extra reverse links
+            // under a one-way rule are not violations.
+            let mut rules_out = Vec::new();
+            let mut check_failed = false;
+            for (name, rule) in &store.state().tag_rules {
+                let (src_tag, tgt_tag, two_way) = if let Some((a, b)) = name.split_once("<->") {
+                    (a.trim(), b.trim(), true)
+                } else if let Some((a, b)) = name.split_once("->") {
+                    (a.trim(), b.trim(), false)
+                } else {
+                    continue;
+                };
+                // Coverage of src_tag members by links targeting tgt_tag.
+                // Member files come from the tagged dir's live FS listing —
+                // unmarked content stays in the denominator (a tag without
+                // links is a gap, not a silent pass).
+                let cov = |s: &str, t: &str| -> (u64, u64) {
+                    let mut covered = 0u64;
+                    let mut denom = 0u64;
+                    for node in tag_member_nodes(&store, &proj_root, s) {
+                        let linked = count_linked_positions(&store, &node, t);
+                        let total = file_denom(&proj_root, &node);
+                        covered += linked.min(total);
+                        denom += total;
+                    }
+                    (covered, denom)
+                };
+                let (fc, fd) = cov(src_tag, tgt_tag);
+                let forward_ok = fd == 0 || fc >= fd;
+                let mut pass = forward_ok;
+                if two_way {
+                    let (rc, rd) = cov(tgt_tag, src_tag);
+                    pass = pass && (rd == 0 || rc >= rd);
+                }
+                let status = if rule.skip { "skipped" } else if pass { "pass" } else { "fail" };
+                if !rule.skip && !pass && rule.level == "fail" { check_failed = true; }
+                rules_out.push(serde_json::json!({
+                    "rule": name, "level": rule.level, "status": status,
+                    "coverage": if fd == 0 { serde_json::Value::Null } else { serde_json::json!(fc * 100 / fd) },
+                }));
+            }
+            report.insert("rules".into(), rules_out.into());
             if let Some(p) = path {
                 report.insert("query".into(), p.clone().into());
             }
-            Ok(serde_json::json!({ "ok": true, "check": report }))
+            Ok(serde_json::json!({ "ok": !check_failed, "check": report }))
         }
         Cmd::Rename { source, target } => {
             let mut store = Store::open(&root).map_err(|e| e.to_string())?;
@@ -449,6 +509,66 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             }
         }
     }
+}
+
+/// Member file-nodes of `tag`: every file under a dir tagged `tag` (from the
+/// live FS) plus any node tagged directly. Unmarked content stays in the
+/// denominator — a tag without links is a coverage gap, not a silent pass.
+fn tag_member_nodes(store: &Store, proj_root: &std::path::Path, tag: &str) -> Vec<String> {
+    let mut members = std::collections::BTreeSet::new();
+    // Directly-tagged nodes.
+    for (node, tags) in &store.state().tags {
+        if tags.contains(tag) {
+            if node.starts_with("file:") {
+                members.insert(node.clone());
+                // If it's a dir, walk its files (live FS → late members count).
+                let dir = proj_root.join(node.strip_prefix("file:").unwrap());
+                if dir.is_dir() {
+                    for f in omd::sources::scope::resolve(&dir, &[]).files {
+                        members.insert(format!("file:{}/{}",
+                            node.strip_prefix("file:").unwrap(), f.display()));
+                    }
+                }
+            }
+        }
+    }
+    members.into_iter().collect()
+}
+
+/// Positions in `node`'s range children that carry a link to any node
+/// tagged `target_tag`. Uses the persisted links' source ranges.
+fn count_linked_positions(store: &Store, node: &str, target_tag: &str) -> u64 {
+    let mut covered = std::collections::BTreeSet::new();
+    for (_, link) in &store.state().links {
+        // link.source is a range key under this file node
+        if omd::relations::node::parent_of(&link.source) == *node {
+            let target_tags = omd::relations::tags::resolve_tags(store.state(), &omd::relations::node::parent_of(&link.target));
+            if target_tags.contains(target_tag) {
+                if let Some((_, s, e)) = parse_span(&link.source) {
+                    for p in s..e { covered.insert(p); }
+                }
+            }
+        }
+    }
+    covered.len() as u64
+}
+
+/// `range:path@mode:s-e` → (mode, s, e).
+fn parse_span(key: &str) -> Option<(char, u64, u64)> {
+    let at = key.find('@')?;
+    let span = &key[at + 1..];
+    let (mode, rest) = span.split_once(':')?;
+    let (s, e) = rest.split('-').next().map(|_|()).and_then(|_| rest.split_once('-'))?;
+    Some((mode.chars().next()?, s.parse().ok()?, e.parse().ok()?))
+}
+
+/// Non-whitespace denominator for a file node's content (text mode).
+fn file_denom(proj_root: &std::path::Path, node: &str) -> u64 {
+    let path = node.strip_prefix("file:").unwrap_or(node);
+    let full = proj_root.join(path);
+    std::fs::read_to_string(&full)
+        .map(|c| c.chars().filter(|ch| !ch.is_whitespace()).count() as u64)
+        .unwrap_or(0)
 }
 
 fn main() -> ExitCode {
