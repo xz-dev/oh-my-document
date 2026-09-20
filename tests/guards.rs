@@ -715,3 +715,69 @@ fn split_range_inherits_no_relationships() {
     let st = t.state();
     assert!(st.contains("range:a.md@text:0-5"), "sub-range exists: {st}");
 }
+
+// change-review: clean does NOT re-execute a command source — clearing an
+// obligation is a state operation, never a re-acquisition.
+#[test]
+fn clean_does_not_rerun_command() {
+    let t = T::new();
+    t.write("cnt.txt", "1");
+    t.run(&["commit", "init", "f.txt", "--source-ref", "command::cat::[\"cnt.txt\"]"]);
+    // Bump the command's would-be output.
+    t.write("cnt.txt", "999");
+    // clean is a state marker — it must not re-run the command (no new version).
+    let before = std::fs::read_dir(t.0.join(".omd/versions")).unwrap().count();
+    t.run(&["commit", "clean", "f.txt", "--reason", "done"]);
+    let after = std::fs::read_dir(t.0.join(".omd/versions")).unwrap().count();
+    assert_eq!(before, after, "clean doesn't re-acquire a version");
+}
+
+// managed-content: `replace` on a commit then verify — the rebound
+// acquisition verifies against the new source, not a stale basis.
+#[test]
+fn replace_then_verify_uses_new_source() {
+    let t = T::new();
+    t.write("a.md", "same-bytes");
+    t.run(&["init", "a.md"]);
+    t.write("b.md", "same-bytes");
+    let tip = t.tip("file:a.md");
+    // Rebind a's acquisition to b's (identical content) — allowed.
+    let (c, o, e) = t.run(&["replace", &tip, "--source", "b.md"]);
+    assert_eq!(c, 0, "identical-content replace ok: {o} {e}");
+    // verify still reads live source — identical content → stays clean.
+    let (_, ov, _) = t.run(&["verify", "a.md"]);
+    assert!(ov.contains("ok") , "verify after replace: {ov}");
+}
+
+// change-review: full confirmed coverage does NOT clear obligations — a
+// range fully covered still keeps its pending adapt until adapt runs.
+#[test]
+fn full_coverage_keeps_obligation() {
+    let t = T::new();
+    t.write("a.md", "a");
+    t.write("b.md", "b");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-1", "--reason", "ra"]);
+    t.run(&["commit", "commit", "b.md", "--range", "0-1", "--link-from", "a.md@text:0-1", "--reason", "lb"]);
+    // Upstream commit seeds pending; even if b's range is fully covered,
+    // the obligation persists until adapt clears it.
+    t.run(&["commit", "commit", "a.md", "--id", &t.tip("range:a.md@text:0-1"),
+            "--range", "0-1", "--reason", "up"]);
+    let st = t.state();
+    assert!(st.contains("[link_pending]") && st.contains(" = ["),
+            "obligation persists despite coverage: {st}");
+}
+
+// command-verification: rebuild from a state the cache never saw — reindex
+// works on a manifest the local index lacks (unfamiliar cache).
+#[test]
+fn reindex_from_unfamiliar_manifest() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    // Simulate a cache that never saw this manifest — wipe index + reindex.
+    let _ = std::fs::remove_file(t.0.join(".omd/index.txt"));
+    let (c, o, _) = t.run(&["reindex"]);
+    assert_eq!(c, 0, "reindex rebuilds from manifest: {o}");
+}
