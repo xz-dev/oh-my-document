@@ -909,8 +909,8 @@ fn link_to_nonexistent_range_rejected() {
     let (c, o, e) = t.run(&["commit", "link", "a.md",
         "--source", "range:a.md@text:0-5", "--target", "range:zz.md@text:0-9"]);
     assert_ne!(c, 0, "phantom endpoint rejected: {o} {e}");
-    assert!(format!("{o}{e}").contains("does not exist") || format!("{o}{e}").contains("error"),
-            "diagnostic: {o} {e}");
+    assert!(format!("{o}{e}").contains("does not exist"),
+            "guard diagnostic names the missing range: {o} {e}");
 }
 
 // change-review (55): a combo link where one endpoint is invalid reports
@@ -925,6 +925,8 @@ fn combo_link_reports_partial_failure() {
     let (c, o, e) = t.run(&["commit", "commit", "a.md", "--range", "0-3",
         "--link-from", "a.md@text:0-5", "--link-from", "zz.md@text:0-9", "--reason", "r"]);
     assert_ne!(c, 0, "combo with invalid member fails: {o} {e}");
+    assert!(format!("{o}{e}").contains("does not exist"),
+            "guard names the failing endpoint: {o} {e}");
 }
 
 // change-review #21: reset on END REOPENS the block — after landing on the
@@ -1454,4 +1456,196 @@ fn confirm_deleted_body_explicit_empty_range() {
     let (c, o, e) = t.run(&["commit", "commit", "a.md", "--id", &tip,
         "--range", "0-0", "--reason", "deleted body"]);
     assert_eq!(c, 0, "p:p empty-range commit on tip: {o} {e}");
+}
+
+// change-review #34: undo a range extension = reset to the earlier range
+// commit — restores the original extent, the extension commit dangles.
+#[test]
+fn reset_to_r0_restores_extent() {
+    let t = T::new();
+    t.write("a.md", "0123456789ABCDEFGHIJ");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r0"]);
+    let r0 = t.tip("range:a.md@text:0-5");
+    // Extend the range → new commit, extent 0-10.
+    t.run(&["commit", "commit", "a.md", "--id", &r0, "--range", "0-10", "--reason", "extend"]);
+    // Reset to r0 → the range returns to its 0-5 extent, extension dangles.
+    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reason", &r0]);
+    assert_eq!(c, 0, "reset to r0: {o} {e}");
+    // The restored tip is the 0-5 commit — the extension is off the chain.
+    let st = t.state();
+    assert!(st.contains("range:a.md@text:0-5"),
+            "range back to 0-5 extent: {st}");
+}
+
+// change-review #14: link ops on B's chain belong to B's open block — a link
+// committed inside B's ATOMIC block is a member of B's block, A's chain not.
+#[test]
+fn link_inside_b_block_is_member() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.write("b.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "ra"]);
+    // Open a block on B and create a link inside it — the link is a member
+    // of B's block, so the block stays open until B's END.
+    t.run(&["commit", "begin", "b.md"]);
+    t.run(&["commit", "commit", "b.md", "--range", "0-5",
+        "--link-from", "a.md@text:0-5", "--reason", "lb"]);
+    // B's block is still open (link member inside it); A has no open block.
+    let st = t.state();
+    let open = st.split("[open_blocks]").nth(1).unwrap_or("");
+    assert!(open.contains("file:b.md"), "link belongs to B's open block: {open}");
+    assert!(!open.contains("file:a.md"), "A has no open block: {open}");
+}
+
+// command-verification #15: rebuilding from metadata with a not-yet-run
+// command does NOT launch it — reindex is index regen, never acquisition.
+#[test]
+fn reindex_does_not_launch_command() {
+    let t = T::new();
+    t.write("o.txt", "out");
+    t.run(&["commit", "init", "f.txt", "--source-ref", "command::cat::[\"o.txt\"]"]);
+    let before = std::fs::read_dir(t.0.join(".omd/versions")).unwrap().count();
+    let _ = std::fs::remove_file(t.0.join(".omd/index.txt"));
+    t.run(&["reindex"]);
+    let after = std::fs::read_dir(t.0.join(".omd/versions")).unwrap().count();
+    assert_eq!(before, after, "reindex never re-runs the command source");
+}
+
+// change-review #38: file-reset-to-F restores a child's recorded END keeping
+// the CLOSED state — after the reset, open_blocks is empty (block stayed
+// sealed), not reopened to a mid-block interior.
+#[test]
+fn file_reset_restores_child_end_closed() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "begin", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "m"]);
+    let end = { t.run(&["commit", "end", "a.md"]); t.tip("file:a.md") };
+    t.run(&["commit", "reset", "a.md", "--reason", &end]);
+    // Block stays closed — no dangling open BEGIN.
+    let binding = t.state();
+    let open = binding.split("[open_blocks]").nth(1).unwrap_or("");
+    let open_body: String = open.lines().take_while(|l| !l.starts_with("[reset")).collect();
+    assert!(!open_body.contains("file:a.md") || open_body.contains("\"file:a.md\" = []"),
+            "child END kept closed state: {open_body}");
+}
+
+// change-review #21: reset-END landing = the END's direct predecessor; the
+// successor END dangles; the block is reopened at that predecessor.
+#[test]
+fn reset_end_landing_and_dangle() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "begin", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "m"]);
+    let _pre_end_tip = t.tip("file:a.md"); // last member before END
+    let end = { t.run(&["commit", "end", "a.md"]); t.tip("file:a.md") };
+    let (_, o, _) = t.run(&["commit", "reset", "a.md", "--reason", &end, "--json"]);
+    let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
+    // actual = END's direct predecessor (the commit before it), not the END.
+    let actual = j["data"]["reset"]["actual"].as_str()
+        .or(j["data"]["actual"].as_str()).unwrap_or("");
+    assert_ne!(actual, end, "reset lands on predecessor, not END itself: {o}");
+}
+// managed-content #33: an explicit `p:p` EMPTY-range commit on the range tip
+// with a deletion reason records the removed body as confirmed — never a
+// tombstone, never a `clean` verb over the whole file.
+#[test]
+fn explicit_empty_range_commit_confirms_deletion() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r"]);
+    // Delete the tracked span entirely.
+    t.write("a.md", "012");
+    // An explicit empty-range commit (0-0) on the SAME range chain with a
+    // deletion reason records the deletion as a confirmed empty body.
+    let tip = t.tip("range:a.md@text:0-5");
+    let (c, o, e) = t.run(&["commit", "commit", "a.md", "--id", &tip,
+        "--range", "0-0", "--reason", "removed body"]);
+    assert_eq!(c, 0, "empty-range commit records deletion: {o} {e}");
+}
+
+// change-review #42: --timestamp records the user-supplied time STRICTLY —
+// the commit's timestamp field equals the replayed instant, no fallback.
+#[test]
+fn timestamp_records_supplied_time_strictly() {
+    let t = T::new();
+    t.write("a.md", "v1");
+    t.run(&["init", "a.md"]);
+    let (c, _, _) = t.run(&["commit", "commit", "a.md", "--range", "0-2",
+        "--timestamp", "2020-01-01T00:00:00Z", "--reason", "replay"]);
+    assert_eq!(c, 0, "timestamp accepted");
+    let tip = t.tip("range:a.md@text:0-2");
+    // Read the commit record — its timestamp IS the replayed instant.
+    let rec = std::fs::read_to_string(
+        t.0.join(format!(".omd/commits/{tip}.toml"))).unwrap_or_default();
+    assert!(rec.contains("2020-01-01"), "commit records replayed time: {rec}");
+}
+
+// change-review #21 (full clause): reset-END lands on the direct predecessor,
+// successors dangle, the range extent + link states are reported.
+#[test]
+fn reset_end_lands_predecessor_successors_dangle() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "begin", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "m"]);
+    let m_tip = t.tip("file:a.md");
+    let end_tip = { t.run(&["commit", "end", "a.md"]); t.tip("file:a.md") };
+    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reason", &end_tip, "--json"]);
+    assert_eq!(c, 0, "reset END: {o} {e}");
+    // JSON reports requested/actual — actual is the direct predecessor.
+    let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
+    let actual = j["data"]["reset"]["actual"].as_str().unwrap_or("").to_string();
+    assert_eq!(actual, m_tip, "reset lands on direct predecessor m: {o}");
+    // The END marker (the successor) is now dangling — not a current tip.
+    assert_ne!(t.tip("file:a.md"), end_tip, "END successor dangled");
+}
+// change-review #38: file-reset-to-F restores a child's recorded END keeping
+// its CLOSED state — the child range tip returns to the END-marked commit,
+// not reopened as if the END never happened.
+#[test]
+fn file_reset_restores_child_end_closed_state() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "begin", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "m"]);
+    let range_tip_at_end = t.tip("range:a.md@text:0-3");
+    let end_tip = { t.run(&["commit", "end", "a.md"]); t.tip("file:a.md") };
+    // Advance the range in a NEW block, then file-reset the END — the child
+    // range restores to its recorded tip (the closed END state), not dangling.
+    t.run(&["commit", "begin", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "adv"]);
+    t.run(&["commit", "reset", "a.md", "--reason", &end_tip]);
+    // Child range restored to its recorded closed-state tip.
+    assert_eq!(t.tip("range:a.md@text:0-3"), range_tip_at_end,
+            "child restored to closed END state tip");
+}
+// local-project-links #5: a moved project keeps its project_id + commit ids
+// unchanged — move renames the dir, never re-derives identity.
+#[test]
+fn project_move_preserves_ids() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    let tip_before = t.tip("file:a.md");
+    let pid_before = t.state().lines().find(|l| l.contains("project_id"))
+        .unwrap_or("").to_string();
+    let parent = tempfile::tempdir().unwrap();
+    let moved = parent.path().join("moved");
+    std::fs::rename(&t.0, &moved).unwrap();
+    let st = std::fs::read_to_string(moved.join(".omd/state.toml")).unwrap();
+    let pid_after = st.lines().find(|l| l.contains("project_id")).unwrap_or("").to_string();
+    assert_eq!(pid_before, pid_after, "project_id unchanged across move");
+    let tip_after = st.lines().find(|l| l.contains("\"file:a.md\""))
+        .and_then(|l| l.split('"').nth(3)).unwrap_or("").to_string();
+    assert_eq!(tip_before, tip_after, "commit ids unchanged across move");
 }

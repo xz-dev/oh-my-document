@@ -192,7 +192,7 @@ impl Commit {
                     .collect()
             }
             AtomicBegin | AtomicEnd => ["path", "chain"].into_iter().collect(),
-            Link => ["path", "link_id", "source", "target", "reason"].into_iter().collect(),
+            Link => ["path", "link_id", "source", "target", "reason", "peer_store_id"].into_iter().collect(),
             Adapt => ["path", "link_id", "changes", "reason", "stop"].into_iter().collect(),
             Rename => ["path", "source", "target", "reason"].into_iter().collect(),
             Delete => ["path", "source", "reason"].into_iter().collect(),

@@ -235,6 +235,22 @@ fn resolve_range_key(r: &str) -> String {
     r.to_string()
 }
 
+/// Parse a cross-store link endpoint `peer:<store_id>:<file>@<range>` into
+/// (peer_store_id, canonical range key). Returns None when unparseable.
+fn parse_peer_endpoint(r: &str) -> Option<(String, String)> {
+    let rest = r.strip_prefix("peer:")?;
+    let (sid, range_part) = rest.split_once(':')?;
+    if sid.is_empty() {
+        return None;
+    }
+    let key = resolve_range_key(range_part);
+    if omd::relations::node::is_range_key(&key) {
+        Some((sid.to_string(), key))
+    } else {
+        None
+    }
+}
+
 fn mount_tree(store: &Store, start: Option<&str>, max_depth: usize, file_only: bool) -> serde_json::Value {
     let mounts = &store.state().mounts;
     let tips = &store.state().tips;
@@ -686,7 +702,48 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                 pl.insert("path".into(), path.clone().into());
                 pipeline::commit_marker(&mut store, &mut NoProbe, &OsRng, clock, &node, CommitKind::AtomicEnd, pl, &Expected::default()).map_err(|e| e.to_string())?;
             }
+            // Cross-store links: `--xlink-to peer:<store_id>:<file>@<range>`.
+            // A records a link pointing at a range in a registered peer store
+            // B; B gets a symmetric inbound credential so the target stays
+            // queryable + gc-protected. Never a metadata merge — each store
+            // keeps its own .omd/commits/tips.
+            let mut xlink_ids: Vec<String> = Vec::new();
+            for r in xlink_to {
+                let (psid, ptarget) = parse_peer_endpoint(r)
+                    .ok_or_else(|| format!("bad --xlink-to endpoint (want peer:<store>:<file>@<range>): {r}"))?;
+                let peer_locator = store.state().peers.get(&psid)
+                    .map(|p| p.locator.clone())
+                    .ok_or_else(|| format!("peer store not registered: {psid}"))?;
+                // Persist B's inbound credential FIRST (protects the target
+                // before A's link record publishes) — conservative retention.
+                let mut lid_b = [0u8; 8];
+                omd::testing::Rng::fill(&OsRng, &mut lid_b);
+                let pending_link_id = format!("xlink-{}", hex::encode(lid_b));
+                {
+                    let peer_root = std::path::Path::new(&peer_locator);
+                    let mut peer_store = Store::open(peer_root)
+                        .map_err(|e| format!("peer store unreadable at {peer_locator}: {e}"))?;
+                    // Target range must exist in the peer's live tips.
+                    if !peer_store.state().tips.contains_key(&ptarget) {
+                        return Err(format!("peer target range does not exist: {ptarget} @ {psid}"));
+                    }
+                    let mut pst = peer_store.state().clone();
+                    omd::records::cross::persist_inbound(&mut pst, &store.state().store_id, &pending_link_id, &ptarget);
+                    peer_store.set_state(pst).map_err(|e| e.to_string())?;
+                }
+                // Now A publishes its link record.
+                let link_id = pipeline::commit_xlink(
+                    &mut store, &mut NoProbe, &OsRng, clock, &node,
+                    &node, &psid, &ptarget, reason.as_deref().unwrap_or("xlink"),
+                    &Expected::default(),
+                    |loc| Store::open(std::path::Path::new(loc)).ok().map(|s| s.state().tips.clone()),
+                ).map_err(|e| e.to_string())?;
+                xlink_ids.push(link_id);
+            }
             let mut out = serde_json::json!({ "ok": true, "commit": cid, "kind": format!("{kind:?}") });
+            if !xlink_ids.is_empty() {
+                out.as_object_mut().unwrap().insert("xlinks".into(), xlink_ids.into());
+            }
             if let Some(ro) = reset_outcome {
                 out.as_object_mut().unwrap().insert("reset".into(), ro);
             }

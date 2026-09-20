@@ -35,7 +35,7 @@ covered by a named Rust test below). Commits unsigned.
 | 13 | Check a circular set of references | COVERED | domain_semantics `cycles_terminate_without_repeat_obligations` |
 | 14 | Membership follows one range chain | PARTIAL | gap: link ops on B's chain auto-belonging to B's block (vs A's chain) not asserted — current test only refuses file endpoints |
 | 15 | Closing an inner block leaves outer open | COVERED | coverage_atomic `innermost_end_closes_nearest_begin` |
-| 16 | The current range advances before end | PARTIAL | gap: "verify fails while block open" clause not asserted |
+| 16 | The current range advances before end | COVERED | guards `range_advances_inside_block_end_closes_advanced` + `verify_fails_while_block_open` |
 | 17 | End closes an already advanced state | COVERED | guards `range_advances_inside_block_end_closes_advanced` |
 | 18 | Reset targets a commit inside a closed block | COVERED | coverage_atomic `reset_to_block_interior_member_refused`; reset `reset_interior_member_refused` |
 | 19 | An open block does not make its current interior commit resettable | COVERED | guards `reset_interior_of_open_block_refused` |
@@ -61,7 +61,7 @@ covered by a named Rust test below). Commits unsigned.
 | 39 | Indirect breakage is visible before an intermediate reset | PARTIAL | gap: 3-level transitive `unreachable_link` diagnosis c1->b1->a1 without B resetting not asserted — test has one link only |
 | 40 | Reading data does not repair its validity | COVERED | guards `reading_dangling_does_not_repair`; traceability `dangling_commit_still_inspectable` |
 | 41 | Copying a record does not change its identity | COVERED | guards `copy_gives_new_identity` |
-| 42 | A replay time does not bypass a version conflict | PARTIAL | gap: recorded-time assert has tautological OR fallback (`tip.len()==64`); conflict-bypass relies on Store-level tests only |
+| 42 | A replay time does not bypass a version conflict | COVERED | guards `timestamp_replay_records_time_not_conflict` (strict commit-file timestamp); publication `expected_version_conflict_aborts`; lock_contention `two_processes_cannot_hold_write_lock` |
 | 43 | Correct a comment without rewriting a commit | COVERED | guards `note_patch_revises_recorded_reason` |
 | 44 | Note revisions follow publication rather than wall-clock order | COVERED | guards `note_revisions_follow_publication_order` (bug found+fixed: seq now unique/monotonic) |
 | 45 | Keep evidence of a broken reference | COVERED | guards `referenced_dangling_commit_retained` |
@@ -113,7 +113,7 @@ command-verification: **18 COVERED / 1 PARTIAL / 0 UNMAPPED / 1 DEFERRED-PLATFOR
 | 2 | A Git-shaped source label is not a fetch command | COVERED | git_source `exact_commit_blob_read`; `floating_ref_name_rejected` |
 | 3 | Remote changes without a matching mapping | DEFERRED-PLATFORM | remote-identity subsystem (URL↔declared-mapping, SSH/HTTPS non-equivalence) is spec-optional and undesigned — explicit deferral |
 | 4 | Non-Git directories remain supported | COVERED | guards `rebuild_without_git_or_cache` |
-| 5 | A project is moved locally | PARTIAL | gap: project_id/old-commit-IDs unchanged across move not compared before/after |
+| 5 | A project is moved locally | COVERED | guards `project_moved_locally_still_resolves` (store_id + commit-id unchanged asserted) |
 | 6 | Relate implementations in two languages | PARTIAL | gap: spec wants two REGISTERED projects w/ cross-project link queryable both ends — test uses same-store `--link-from` |
 | 7 | Link ranges without merging two metadata directories | PARTIAL | gap: real cross-store A→B link never created — test only counts two stores' commit files |
 | 8 | Declaring a rule does not invent an implementation | COVERED | tags `uncovered_rule_fails_check_at_fail_level` |
@@ -148,7 +148,7 @@ local-project-links: **15 COVERED / 5 PARTIAL / 0 UNMAPPED / 2 DEFERRED-PLATFORM
 | 8 | A range is extended explicitly | COVERED | guards `explicit_range_expansion_distinct_object` |
 | 9 | Repeated fragments retain their original context | COVERED | guards `ambiguous_fragment_reports_locate_candidates` |
 | 10 | Rebuild without Git or cache | COVERED | guards `rebuild_without_git_or_cache`; `reindex_from_unfamiliar_manifest` |
-| 11 | Verify uncommitted changes after same-content replacement | PARTIAL | gap: core verified (JSON ok bool); commit-ID/links-unchanged clause not asserted |
+| 11 | Verify uncommitted changes after same-content replacement | COVERED | guards `replace_then_verify_uses_new_source` + `replace_preserves_commit_id_and_links` |
 | 12 | Readable Git history does not hide a missing current file | COVERED | guards `git_history_does_not_hide_missing_current` |
 | 13 | HEAD movement alone does not change the observed file | COVERED | guards `head_movement_does_not_change_observation`; git_source |
 | 14 | Git history remains readable after OMD cache loss | COVERED | git_source `exact_commit_blob_read`; guards rebuild tests |
@@ -170,7 +170,7 @@ local-project-links: **15 COVERED / 5 PARTIAL / 0 UNMAPPED / 2 DEFERRED-PLATFORM
 | 30 | Incomplete coverage does not fail verification by itself | COVERED | tags `coverage_gap_but_verify_can_pass` |
 | 31 | Full coverage does not clear an independent obligation | COVERED | guards `full_coverage_keeps_obligation` |
 | 32 | A stale writer cannot replace a newer record | COVERED | publication `expected_version_conflict_aborts`; lock_contention `two_processes_cannot_hold_write_lock` |
-| 33 | Confirm a removed body as an empty range | PARTIAL | gap: spec wants explicit `p:p` empty-range commit on the tip w/ deletion reason — test uses `commit clean` (different verb) |
+| 33 | Confirm a removed body as an empty range | COVERED | guards `confirm_deleted_body_explicit_empty_range` (`--id --range 0-0` on tip) |
 | 34 | A duplicate fragment is not chosen automatically | COVERED | guards `ambiguous_fragment_reports_locate_candidates` |
 | 35 | A split does not copy relationships | COVERED | guards `split_range_inherits_no_relationships` |
 | 36 | Shared version IDs differ from equal content hashes | PARTIAL | gap: counts version files; replace-rebind + gc-shared-content clauses rest on substring asserts elsewhere |
