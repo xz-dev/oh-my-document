@@ -49,6 +49,9 @@ enum Cmd {
         #[arg(long)] changes: Option<String>,
         /// `commit adapt --stop` — source-side branch stop after handling.
         #[arg(long)] stop: bool,
+        /// `--adapt '<JSON {link_id,changes,reason}>'` — spec's repeatable
+        /// adapt-object form (alternative to the separate flags).
+        #[arg(long)] adapt: Vec<String>,
         /// `commit clean --no-reason` — explicitly omit the stop reason.
         #[arg(long = "no-reason")] no_reason: bool,
         /// `commit ... --link-from R` — create R→this link in the block.
@@ -289,7 +292,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             };
             Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": format!("{kind:?}") }))
         }
-        Cmd::Commit { kind, path, reason, range, timestamp, source, target, link_id, changes, stop, no_reason, link_from, link_to, id, tag, rule, level, skip } => {
+        Cmd::Commit { kind, path, reason, range, timestamp, source, target, link_id, changes, stop, adapt, no_reason, link_from, link_to, id, tag, rule, level, skip } => {
             let kind = match kind.as_str() {
                 "init" => CommitKind::Init,
                 "commit" => CommitKind::Commit,
@@ -414,13 +417,36 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                     &node, &src, &tgt, &r, &Expected::default(),
                 ).map_err(|e| e.to_string())?
             } else if kind == CommitKind::Adapt {
-                let lid = link_id.clone().unwrap_or_default();
-                let ch: Vec<String> = changes.clone().unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
-                let r = reason.clone().unwrap_or_default();
-                pipeline::commit_adapt(
-                    &mut store, &mut NoProbe, &OsRng, clock,
-                    &node, &lid, &ch, &r, *stop, &Expected::default(),
-                ).map_err(|e| e.to_string())?
+                // `--adapt '<JSON {link_id,changes,reason}>'` is the spec's
+                // repeatable object form; each entry runs one adapt. The
+                // flat flags (--link-id/--changes/--reason) run a single
+                // adapt — both map to the same commit_adapt path.
+                if !adapt.is_empty() {
+                    let mut last = String::new();
+                    for entry in adapt {
+                        let v: serde_json::Value = serde_json::from_str(entry)
+                            .map_err(|_| format!("bad --adapt JSON: {entry}"))?;
+                        let lid = v.get("link_id").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        let ch: Vec<String> = v.get("changes")
+                            .and_then(|x| x.as_array())
+                            .map(|a| a.iter().filter_map(|s| s.as_str().map(String::from)).collect())
+                            .unwrap_or_default();
+                        let r = v.get("reason").and_then(|x| x.as_str()).unwrap_or("").to_string();
+                        last = pipeline::commit_adapt(
+                            &mut store, &mut NoProbe, &OsRng, clock,
+                            &node, &lid, &ch, &r, *stop, &Expected::default(),
+                        ).map_err(|e| e.to_string())?;
+                    }
+                    last
+                } else {
+                    let lid = link_id.clone().unwrap_or_default();
+                    let ch: Vec<String> = changes.clone().unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+                    let r = reason.clone().unwrap_or_default();
+                    pipeline::commit_adapt(
+                        &mut store, &mut NoProbe, &OsRng, clock,
+                        &node, &lid, &ch, &r, *stop, &Expected::default(),
+                    ).map_err(|e| e.to_string())?
+                }
             } else if kind == CommitKind::Reset {
                 // reset resolves the target's kind+prev from its on-disk record.
                 let target = range.clone().or(reason.clone()).unwrap_or_default();
