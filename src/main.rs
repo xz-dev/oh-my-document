@@ -79,6 +79,10 @@ enum Cmd {
         #[arg(long = "link-from")] link_from: Vec<String>,
         /// `commit ... --link-to R` — create this→R link in the block.
         #[arg(long = "link-to")] link_to: Vec<String>,
+        /// `commit xlink <path> --source <local-range> --target peer:<store>:<file>@<range>`
+        /// — a cross-store link: local source range → range in a registered
+        /// peer store (target resolved read-only, no metadata merge).
+        #[arg(long = "xlink-to")] xlink_to: Vec<String>,
         /// `--id <commit>` — append to an existing range chain vs create a new
         /// one (same coords without --id = a new independent range object).
         #[arg(long)] id: Option<String>,
@@ -374,7 +378,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             };
             Ok(serde_json::json!({ "ok": true, "commit": cid, "kind": format!("{kind:?}") }))
         }
-        Cmd::Commit { kind, path, reason, range, timestamp, source, target, link_id, changes, stop, adapt, no_reason, link_from, link_to, id, tag, rule, level, skip } => {
+        Cmd::Commit { kind, path, reason, range, timestamp, source, target, link_id, changes, stop, adapt, no_reason, link_from, link_to, xlink_to, id, tag, rule, level, skip } => {
             let kind = match kind.as_str() {
                 "init" => CommitKind::Init,
                 "commit" => CommitKind::Commit,

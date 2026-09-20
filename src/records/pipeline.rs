@@ -454,6 +454,87 @@ pub fn commit_link(
     Ok(link_id)
 }
 
+/// Cross-store link: A records a link whose TARGET is a range node in a
+/// registered peer store B (endpoint `peer:<store_id>:<file>@<range>`).
+/// The link record lives only in A — each store keeps its own .omd, no
+/// commit files or tips are shared/merged. B gets a symmetric *inbound*
+/// record (queryable + gc-protected) persisted against the target range,
+/// referencing A's pending link record id. Source must be a local range.
+///
+/// `peer_tips` resolves the peer's live tip set (read-only) — the caller
+/// supplies it so the store crate stays free of peer-FS access; a peer
+/// whose store can't be opened makes the link fail, never a cached guess.
+pub fn commit_xlink<F>(
+    store: &mut Store,
+    probe: &mut dyn PublishProbe,
+    rng: &dyn Rng,
+    clock: &dyn Clock,
+    node_key: &str,
+    source: &str,
+    peer_store_id: &str,
+    peer_target_key: &str,
+    reason: &str,
+    expected: &Expected,
+    peer_tips: F,
+) -> Result<String, PipelineError>
+where
+    F: FnOnce(&str) -> Option<std::collections::BTreeMap<String, String>>,
+{
+    if !crate::relations::node::is_range_key(source) {
+        return Err(PipelineError::Commit("xlink source must be a range node".into()));
+    }
+    store.lock()?;
+    store.check_expected(expected)?;
+    if !store.state().tips.contains_key(source) {
+        return Err(PipelineError::Commit(format!("link source range does not exist: {source}")));
+    }
+    // The peer must be REGISTERED and the target range must exist in its
+    // live tips — a cross-store link to a phantom peer range is refused.
+    let peer = store.state().peers.get(peer_store_id).cloned().ok_or_else(||
+        PipelineError::Commit(format!("peer store not registered: {peer_store_id}")))?;
+    let tips = peer_tips(&peer.locator)
+        .ok_or_else(|| PipelineError::Commit(format!("peer store unreadable: {}", peer.locator)))?;
+    if !tips.contains_key(peer_target_key) {
+        return Err(PipelineError::Commit(format!(
+            "peer target range does not exist: {peer_target_key} @ {peer_store_id}")));
+    }
+
+    let mut idb = [0u8; 16];
+    rng.fill(&mut idb);
+    let link_id = crate::records::ids::Id128(idb).to_hex();
+    // The target key carries its peer store identity so it never collides
+    // with a local range key of the same coordinates.
+    let target_key = format!("peer:{peer_store_id}:{peer_target_key}");
+
+    let is_first = !store.state().tips.contains_key(node_key);
+    let empty_obs = Observation { bytes: Vec::new(), text: false, encoding: None };
+    let version = make_version(rng, &empty_obs, Acquisition::File { path: "".into(), encoding: "".into() });
+    let prev = store.state().tips.get(node_key).cloned().unwrap_or_default();
+    let mut payload = serde_json::Map::new();
+    payload.insert("link_id".into(), link_id.clone().into());
+    payload.insert("source".into(), source.into());
+    payload.insert("target".into(), target_key.clone().into());
+    payload.insert("peer_store_id".into(), peer_store_id.into());
+    payload.insert("reason".into(), reason.into());
+    let commit = make_commit(rng, clock, CommitKind::Link, &prev, &version, payload);
+    commit.validate(is_first).map_err(|e| PipelineError::Commit(e.to_string()))?;
+    let cid = commit.derive_id(b"").map_err(|e| PipelineError::Commit(e.to_string()))?.to_hex();
+
+    let mut new_state: State = store.state().clone();
+    new_state.publication += 1;
+    new_state.tips.insert(node_key.to_string(), cid.clone());
+    new_state.retained.push(cid.clone());
+    new_state.links.insert(link_id.clone(), crate::records::store::Link {
+        link_id: link_id.clone(),
+        source: source.to_string(),
+        target: target_key,
+        created_by: cid.clone(),
+    });
+    new_state.link_pending.entry(link_id.clone()).or_default();
+    store.publish(probe, &commit, &cid, None, None, new_state)?;
+    Ok(link_id)
+}
+
 /// Adapt: handle selected changes on a link with an explicit reason.
 /// Requires link_id + changes + reason — all three, never guessed.
 pub fn commit_adapt(

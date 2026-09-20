@@ -995,6 +995,11 @@ fn project_moved_locally_still_resolves() {
     let t = T::new();
     t.write("a.md", "x");
     t.run(&["init", "a.md"]);
+    // Capture pre-move identities — commit id + store_id must not change.
+    let tip_before = t.tip("file:a.md");
+    let sid_before = t.state().lines()
+        .find(|l| l.trim_start().starts_with("store_id"))
+        .map(|l| l.to_string()).unwrap_or_default();
     // Move the whole project dir; .omd travels with it.
     let parent = tempfile::tempdir().unwrap();
     let moved = parent.path().join("moved");
@@ -1005,6 +1010,16 @@ fn project_moved_locally_still_resolves() {
             String::from_utf8_lossy(&o.stderr));
     let out = String::from_utf8_lossy(&o.stdout);
     assert!(out.contains("file:a.md"), "node survives move: {out}");
+    // project_id (store_id) and commit-ids are unchanged across the move —
+    // the same record identities resolve at the new location.
+    let st = std::fs::read_to_string(moved.join(".omd/state.toml")).unwrap();
+    let tip_after = st.lines().find(|l| l.contains("\"file:a.md\"") && l.contains('='))
+        .and_then(|l| l.split('=').nth(1).map(|v| v.trim().trim_matches('"').to_string()))
+        .unwrap_or_default();
+    assert_eq!(tip_after, tip_before, "commit id unchanged across move");
+    let sid_after = st.lines().find(|l| l.trim_start().starts_with("store_id"))
+        .map(|l| l.to_string()).unwrap_or_default();
+    assert_eq!(sid_after, sid_before, "store_id unchanged across move");
 }
 
 // change-review #39: an upstream breakage surfaces BEFORE the downstream
@@ -1408,4 +1423,35 @@ fn verify_fails_while_block_open() {
             "open block fails verify: {o}");
     assert!(j["data"]["open_blocks"].as_array().map(|a| !a.is_empty()).unwrap_or(false),
             "open_blocks reported: {o}");
+}
+
+// managed-content #11: `replace` rebinds acquisition but preserves the
+// commit id + links — the node tip is the SAME commit after replace.
+#[test]
+fn replace_preserves_commit_id_and_links() {
+    let t = T::new();
+    t.write("a.md", "same");
+    t.run(&["init", "a.md"]);
+    let tip = t.tip("file:a.md");
+    t.write("b.md", "same");
+    let (c, _, _) = t.run(&["replace", &tip, "--source", "b.md"]);
+    assert_eq!(c, 0, "identical replace ok");
+    // Commit id preserved — replace rebinds the version, not the record.
+    assert_eq!(t.tip("file:a.md"), tip, "commit id unchanged after replace");
+}
+
+// managed-content #33: confirm a removed body as an EXPLICIT empty range —
+// a `p:p` (0-0) commit on the tip records the deletion, not `clean`.
+#[test]
+fn confirm_deleted_body_explicit_empty_range() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r"]);
+    t.write("a.md", "012"); // delete the tracked span
+    let tip = t.tip("range:a.md@text:0-5");
+    // An explicit empty-range commit on the tip — the p:p confirmation.
+    let (c, o, e) = t.run(&["commit", "commit", "a.md", "--id", &tip,
+        "--range", "0-0", "--reason", "deleted body"]);
+    assert_eq!(c, 0, "p:p empty-range commit on tip: {o} {e}");
 }
