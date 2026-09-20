@@ -854,9 +854,13 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
         }
         Cmd::Note { action, commit_id, target, text } => {
             let store = Store::open(&root).map_err(|e| e.to_string())?;
-            let seq = store.state().publication + 1;
             match action.as_str() {
                 "add" | "patch" | "delete" => {
+                    // Publication order is monotonic, never the clock — the
+                    // next seq is the max already-published seq + 1 (the
+                    // store publication counter counts commits, not notes).
+                    let seq = omd::records::notes::list_for(&root, commit_id)
+                        .iter().map(|n| n.seq).max().unwrap_or(0) + 1;
                     let mut idb = [0u8; 16];
                     omd::testing::Rng::fill(&OsRng, &mut idb);
                     let note = omd::records::notes::Note {

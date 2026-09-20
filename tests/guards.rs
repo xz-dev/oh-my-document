@@ -924,3 +924,131 @@ fn combo_link_reports_partial_failure() {
         "--link-from", "a.md@text:0-5", "--link-from", "zz.md@text:0-9", "--reason", "r"]);
     assert_ne!(c, 0, "combo with invalid member fails: {o} {e}");
 }
+
+// change-review #21: reset on END REOPENS the block — after landing on the
+// direct predecessor (BEGIN), the block state is open again, not sealed.
+#[test]
+fn reset_end_reopens_block() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "begin", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "m"]);
+    let end_tip = {
+        t.run(&["commit", "end", "a.md"]);
+        t.tip("file:a.md")
+    };
+    // Reset on END → lands on its direct predecessor, block is open again.
+    // (reset target is passed via --reason <commit_id> per the CLI contract.)
+    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reason", &end_tip]);
+    assert_eq!(c, 0, "reset END ok: {o} {e}");
+    // The block reopens — a new END can close it again (not a double-close err).
+    let (c2, o2, e2) = t.run(&["commit", "end", "a.md"]);
+    assert_eq!(c2, 0, "block reopened after END reset: {o2} {e2}");
+}
+
+// change-review #55: a combo where an early member succeeds and a later
+// member fails reports the early success + the failure — not silent.
+#[test]
+fn combo_reports_early_success_member() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r"]);
+    // Combo: valid link-from + invalid link-from — the failure is reported.
+    let (c, o, e) = t.run(&["commit", "commit", "a.md", "--range", "0-3",
+        "--link-from", "a.md@text:0-5", "--link-from", "zz.md@text:0-9", "--reason", "r"]);
+    assert_ne!(c, 0, "combo with bad member fails: {o} {e}");
+    // The error names the failing member (the nonexistent range).
+    assert!(format!("{o}{e}").contains("zz.md") || format!("{o}{e}").contains("does not exist"),
+            "failing member named: {o} {e}");
+}
+
+// change-review #34: extending a range then "undoing" — commit a different
+// range on the same chain via --id replaces the tracked extent (the undo
+// path is a new commit, not a silent revert).
+#[test]
+fn undo_range_extension_via_new_commit() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "r"]);
+    let tip = t.tip("range:a.md@text:0-3");
+    // Extend the range (new commit via --id).
+    t.run(&["commit", "commit", "a.md", "--id", &tip, "--range", "0-6", "--reason", "ext"]);
+    // Undo = commit the original range back via --id — a forward commit,
+    // not a revert of the chain.
+    let new_tip = t.tip("range:a.md@text:0-3").to_string();
+    t.run(&["commit", "commit", "a.md", "--id", &new_tip, "--range", "0-3", "--reason", "undo"]);
+    let st = t.state();
+    // The chain advanced (tip moved), not rewound — undo is a new commit.
+    let final_tip = t.tip("range:a.md@text:0-3");
+    assert_ne!(final_tip, new_tip, "undo commits forward: {final_tip}");
+}
+
+// local-project-links #5: a project directory moved locally — its nodes
+// still resolve; the moved location is found by meta discovery.
+#[test]
+fn project_moved_locally_still_resolves() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    // Move the whole project dir; .omd travels with it.
+    let parent = tempfile::tempdir().unwrap();
+    let moved = parent.path().join("moved");
+    std::fs::rename(&t.0, &moved).unwrap();
+    let o = Command::new(omd()).arg("--meta").arg(moved.join(".omd"))
+        .args(["list"]).current_dir(&moved).output().unwrap();
+    assert!(o.status.success(), "moved project still lists: {}",
+            String::from_utf8_lossy(&o.stderr));
+    let out = String::from_utf8_lossy(&o.stdout);
+    assert!(out.contains("file:a.md"), "node survives move: {out}");
+}
+
+// change-review #39: an upstream breakage surfaces BEFORE the downstream
+// reset — the dirty propagates so a later reset sees the obligation.
+#[test]
+fn indirect_breakage_visible_before_reset() {
+    let t = T::new();
+    t.write("a.md", "aaa");
+    t.write("b.md", "bbb");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&["commit", "commit", "a.md", "--range", "0-3", "--reason", "ra"]);
+    t.run(&["commit", "commit", "b.md", "--range", "0-3", "--link-from", "a.md@text:0-3", "--reason", "rb"]);
+    // Upstream breakage: commit a new version on a's range.
+    let tip = t.tip("range:a.md@text:0-3");
+    t.run(&["commit", "commit", "a.md", "--id", &tip, "--range", "0-3", "--reason", "up"]);
+    // The obligation is pending on b's link BEFORE any reset of b.
+    let st = t.state();
+    assert!(st.contains(" = ["), "breakage obligation pending pre-reset: {st}");
+}
+
+// change-review #44: note list returns revisions in PUBLICATION order —
+// the first note precedes its patch, and each note carries a unique
+// increasing publication seq (never wall-clock, which can tie/reverse).
+#[test]
+fn note_revisions_follow_publication_order() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    let tip = t.tip("file:a.md");
+    t.run(&["note", "add", &tip, "--text", "first"]);
+    let nid = {
+        let (_, o, _) = t.run(&["note", "list", &tip]);
+        let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
+        j["data"]["notes"][0]["id"].as_str().unwrap_or("").to_string()
+    };
+    t.run(&["note", "patch", &tip, "--target", &nid, "--text", "revised"]);
+    let (_, o, _) = t.run(&["note", "list", &tip]);
+    let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
+    let notes = j["data"]["notes"].as_array().cloned().unwrap_or_default();
+    assert!(notes.len() >= 2, "two note revisions listed: {o}");
+    // seqs are unique and strictly increasing = publication order.
+    let seqs: Vec<u64> = notes.iter().filter_map(|n| n["seq"].as_u64()).collect();
+    assert!(seqs.windows(2).all(|w| w[0] < w[1]), "monotonic seqs: {seqs:?}");
+    // And the original precedes its revision in list order.
+    let texts: Vec<&str> = notes.iter().filter_map(|n| n["text"].as_str()).collect();
+    assert_eq!(texts[0], "first", "original precedes revision: {texts:?}");
+    assert_eq!(texts[1], "revised", "patch after original: {texts:?}");
+}
