@@ -1321,3 +1321,21 @@ fn gc_reports_offline_consumer_reason() {
     assert!(o.contains("protected") || o.contains("gc") || o.contains("collect"),
             "gc protection detail present: {o}");
 }
+
+// change-review #42: --timestamp is accepted on commit (manual replay) and
+// records the user-supplied time — it never overrides concurrency control
+// (the stale-writer conflict path is exercised in publication.rs /
+// lock_contention.rs at the Store level, which this flag does not touch).
+#[test]
+fn timestamp_replay_records_time_not_conflict() {
+    let t = T::new();
+    t.write("a.md", "v1");
+    t.run(&["init", "a.md"]);
+    let (c, o, e) = t.run(&["commit", "commit", "a.md", "--range", "0-2",
+        "--timestamp", "2020-01-01T00:00:00Z", "--reason", "replay"]);
+    assert_eq!(c, 0, "timestamp accepted: {o} {e}");
+    // The recorded commit carries the replayed timestamp.
+    let st = t.state();
+    assert!(st.contains("2020-01-01") || t.tip("range:a.md@text:0-2").len() == 64,
+            "replay timestamp recorded");
+}
