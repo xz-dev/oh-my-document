@@ -2705,6 +2705,54 @@ fn peer_content_read_current_not_snapshot() {
     assert!(!dirty.is_empty(), "in-range edit reported: {o}");
 }
 
+// P1-5: a range commit created inside its parent FILE's ATOMIC block
+// carries an `in_block` stamp — resetting it (open or closed block)
+// is refused as an ordinary block member.
+#[test]
+fn reset_range_commit_inside_file_block_refused() {
+    let t = T::new();
+    t.write("c.md", "0123456789");
+    t.run(&["init", "c.md"]);
+    t.run(&["commit", "begin", "c.md"]);
+    t.run(&[
+        "commit", "commit", "c.md", "--range", "0-3", "--reason", "m",
+    ]);
+    // The member commit id = tip of the (first, un-suffixed) range chain.
+    // Match the [tips] row exactly: `"range:…" = "<64-hex>"`.
+    let member = t
+        .state()
+        .lines()
+        .find(|l| l.trim_start().starts_with("\"range:c.md@text:0-3\" ="))
+        .and_then(|l| l.split('"').nth(3).map(String::from))
+        .unwrap_or_default();
+    assert_eq!(member.len(), 64, "range tip id: {member}");
+    // OPEN block shape — refused (interior-member error → non-zero exit).
+    let (c1, o1, e1) = t.run(&["commit", "reset", "c.md", "--reason", &member]);
+    assert_ne!(c1, 0, "open-block member reset refused: {o1}{e1}");
+    assert!(
+        o1.contains("ordinary block member") || e1.contains("ordinary block member"),
+        "o1={o1} e1={e1}"
+    );
+    // CLOSED block shape — same membership persists after END.
+    t.run(&["commit", "end", "c.md"]);
+    let (c2, o2, e2) = t.run(&["commit", "reset", "c.md", "--reason", &member]);
+    assert_ne!(c2, 0, "closed-block member reset refused: {o2}{e2}");
+    assert!(
+        o2.contains("ordinary block member") || e2.contains("ordinary block member"),
+        "o2={o2} e2={e2}"
+    );
+    // A file-level commit OUTSIDE the block still resets.
+    t.run(&["commit", "commit", "c.md", "--reason", "fc"]);
+    let ftip = t
+        .state()
+        .lines()
+        .find(|l| l.trim_start().starts_with("\"file:c.md\" ="))
+        .and_then(|l| l.split('"').nth(3).map(String::from))
+        .unwrap_or_default();
+    let (c3, o3, _) = t.run(&["commit", "reset", "c.md", "--reason", &ftip]);
+    assert_eq!(c3, 0, "out-of-block reset passes: {o3}");
+}
+
 // P1-4: a parallel chain over identical coords (nonce-suffixed range key)
 // still counts into coverage — parse_span strips the `#nonce` suffix so
 // `0-5#abc` parses the same span as `0-5`.
@@ -2715,31 +2763,62 @@ fn nonce_suffixed_range_counts_in_coverage() {
     t.write("b.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
-    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r1"]);
+    t.run(&[
+        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r1",
+    ]);
     // Second commit on same coords → nonce-suffixed parallel chain.
-    t.run(&["commit", "commit", "a.md", "--range", "0-5", "--reason", "r2"]);
+    t.run(&[
+        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r2",
+    ]);
     // Extract the nonce'd range key (the one containing '#').
-    let nonce_key = t.state().lines()
+    let nonce_key = t
+        .state()
+        .lines()
         .find(|l| l.contains("range:a.md@") && l.contains('#'))
         .and_then(|l| l.split('"').nth(1).map(String::from))
         .unwrap_or_default();
-    assert!(nonce_key.contains('#'), "nonce suffix exists: {}", t.state());
+    assert!(
+        nonce_key.contains('#'),
+        "nonce suffix exists: {}",
+        t.state()
+    );
     // Tag a's file as spec, b's as code; rule spec->code; link b's range
     // to the nonce'd a-range — its positions must parse+count in coverage.
     t.run(&["commit", "tag", "a.md", "--tag", "spec"]);
     t.run(&["commit", "tag", "b.md", "--tag", "code"]);
-    t.run(&["commit", "scope_adjust", "a.md", "--rule", "spec->code", "--level", "fail"]);
+    t.run(&[
+        "commit",
+        "scope_adjust",
+        "a.md",
+        "--rule",
+        "spec->code",
+        "--level",
+        "fail",
+    ]);
     // Link b's range FROM the nonce'd a-range explicitly — the stored
     // link source carries the `#` suffix parse_span must strip.
-    t.run(&["commit", "commit", "b.md", "--range", "0-5",
-        "--link-from", &nonce_key, "--reason", "lb"]);
+    t.run(&[
+        "commit",
+        "commit",
+        "b.md",
+        "--range",
+        "0-5",
+        "--link-from",
+        &nonce_key,
+        "--reason",
+        "lb",
+    ]);
     let (_, o, _) = t.run(&["check"]);
     // If parse_span failed on `0-5#…` the linked positions silently dropped
     // → covered=0. Assert the nonce'd range's positions actually counted.
     let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
-    let covered = j["data"]["check"]["rules"].as_array()
+    let covered = j["data"]["check"]["rules"]
+        .as_array()
         .and_then(|rs| rs.first())
-        .and_then(|r| r["covered"].as_u64()).unwrap_or(0);
-    assert!(covered > 0,
-            "nonce'd range positions counted (covered={covered}): {o}");
+        .and_then(|r| r["covered"].as_u64())
+        .unwrap_or(0);
+    assert!(
+        covered > 0,
+        "nonce'd range positions counted (covered={covered}): {o}"
+    );
 }

@@ -195,6 +195,10 @@ impl Commit {
                 "link_id",
                 "changes",
                 "stop",
+                // Stamped when this range commit was created inside its
+                // parent file's open ATOMIC block — records cross-chain
+                // block membership the range's own chain cannot see.
+                "in_block",
             ]
             .into_iter()
             .collect(),

@@ -787,6 +787,27 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                     }
                     found
                 };
+                // Cross-chain interior check: a range commit created while
+                // its parent FILE's block was open carries an `in_block`
+                // payload stamp (commit_file records the open BEGIN id) —
+                // the file chain's BEGIN is invisible from the range's own
+                // ancestor walk, so membership is read from the stamp.
+                if omd::relations::node::is_range_key(&reset_node) {
+                    let stamped =
+                        std::fs::read_to_string(root.join(format!("commits/{target}.toml")))
+                            .ok()
+                            .and_then(|s| toml::from_str::<omd::records::commit::Commit>(&s).ok())
+                            .and_then(|c| {
+                                c.payload
+                                    .get("in_block")
+                                    .and_then(|v| v.as_str().map(String::from))
+                            });
+                    if stamped.is_some() {
+                        return Err(format!(
+                            "reset target is an ordinary block member: {target}"
+                        ));
+                    }
+                }
                 let mut lk = |id: &str| -> Option<(CommitKind, String)> {
                     let s =
                         std::fs::read_to_string(root.join(format!("commits/{id}.toml"))).ok()?;

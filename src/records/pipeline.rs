@@ -185,6 +185,23 @@ pub fn commit_file(
         .cloned()
         .unwrap_or_default();
     let mut commit = make_commit(rng, clock, kind, &prev, &version, payload);
+    // A range commit created while its parent FILE's ATOMIC block is open
+    // is a block member — stamp the open BEGIN id on the payload so a later
+    // reset target check sees the cross-chain membership (the file chain's
+    // BEGIN is invisible from the range's own ancestor walk).
+    if crate::relations::node::is_range_key(node_key) {
+        let parent = crate::relations::node::parent_of(node_key);
+        if let Some(begin_id) = store
+            .state()
+            .open_blocks
+            .get(&parent)
+            .and_then(|b| b.last())
+        {
+            commit
+                .payload
+                .insert("in_block".into(), begin_id.clone().into());
+        }
+    }
     // A file-level commit snapshots which tip each child range points to now,
     // so a later file reset restores exact children — not wall-clock order.
     if crate::relations::node::is_file_key(node_key) {
@@ -1093,7 +1110,12 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
                 .to_string();
             let ver = match store.read_version(&commit.content_ref) {
                 Ok(v) => v,
-                Err(_) => return fail(unverified, format!("version record missing ({})", commit.content_ref)),
+                Err(_) => {
+                    return fail(
+                        unverified,
+                        format!("version record missing ({})", commit.content_ref),
+                    );
+                }
             };
             let old_bytes = match store.read_content(&ver.sha256) {
                 Ok(b) => b,
@@ -1112,14 +1134,23 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
             };
             let cur = match crate::sources::decode(&cur_bytes, &recorded_enc) {
                 Ok(s) => s,
-                Err(_) => return fail(unverified, format!("cannot decode {path} as {recorded_enc}")),
+                Err(_) => {
+                    return fail(
+                        unverified,
+                        format!("cannot decode {path} as {recorded_enc}"),
+                    );
+                }
             };
             let old = match crate::sources::decode(&old_bytes, &recorded_enc) {
                 Ok(s) => s,
-                Err(_) => return fail(unverified, format!("recorded content undecodable as {recorded_enc}")),
+                Err(_) => {
+                    return fail(
+                        unverified,
+                        format!("recorded content undecodable as {recorded_enc}"),
+                    );
+                }
             };
-            if let Some((_, s, e)) = crate::relations::node::parse_range_arg(&range_arg)
-            {
+            if let Some((_, s, e)) = crate::relations::node::parse_range_arg(&range_arg) {
                 let frag: String = old
                     .chars()
                     .skip(s as usize)
@@ -1228,9 +1259,8 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
                                         .push(format!("command output changed ({})", tip));
                                 }
                             }
-                            Err(_) => unverified.push(format!(
-                                "{k} (recorded content blob missing {})", v.sha256
-                            )),
+                            Err(_) => unverified
+                                .push(format!("{k} (recorded content blob missing {})", v.sha256)),
                         }
                     }
                     _ => {
