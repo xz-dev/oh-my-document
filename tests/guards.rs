@@ -2199,8 +2199,8 @@ fn reset_to_r0_restores_extent() {
     // The tip is a reset MARKER whose previous_id is r0 — the chain landed
     // on r0, and the extension commit is OFF the chain (dangled).
     let tip = t.tip("range:a.md@text:0-5");
-    let tip_toml = std::fs::read_to_string(
-        t.0.join(format!(".omd/commits/{tip}.toml"))).unwrap_or_default();
+    let tip_toml =
+        std::fs::read_to_string(t.0.join(format!(".omd/commits/{tip}.toml"))).unwrap_or_default();
     assert!(
         tip_toml.contains(&format!("previous_id = \"{r0}\"")),
         "reset marker chains onto r0 (extension dangled): {tip_toml}"
@@ -2208,10 +2208,7 @@ fn reset_to_r0_restores_extent() {
     // The extension commit is not the tip's ancestor — walking the chain
     // from tip hits r0 then stops (no 0-10 extension in between).
     let (_, log, _) = t.run(&["log", &tip]);
-    assert!(
-        log.contains(&r0),
-        "r0 in the restored chain: {log}"
-    );
+    assert!(log.contains(&r0), "r0 in the restored chain: {log}");
 }
 
 // change-review #14: link ops on B's chain belong to B's open block — a link
