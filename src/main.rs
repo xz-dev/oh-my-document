@@ -104,6 +104,29 @@ enum Cmd {
         /// `file:<path>` | `git::<JSON>` | `command::<exe>::<args>`.
         #[arg(long)] source: String,
     },
+    /// `omd register <peer-store-id> <locator>` — register a peer store.
+    Register { store_id: String, locator: String },
+    /// `omd protect <target> --peer <peer-store-id> --record <id>` — persist
+    /// an inbound protection credential before the peer's record publishes.
+    Protect {
+        target: String,
+        #[arg(long)] peer: String,
+        #[arg(long)] record: String,
+    },
+    /// `omd activate` — activate a copied store: new store_id + completed
+    /// external-reference registration. Unactivated copies are read-only.
+    Activate,
+    /// `omd gc [--content]` — free contents no longer protected. Without
+    /// --content only metadata is collected; --content releases local content
+    /// copies with no retention record, rechecking Git-replacement basis.
+    Gc {
+        /// Also release local content copies.
+        #[arg(long)] content: bool,
+    },
+    /// `omd reindex` — rebuild the rebuildable query index from the
+    /// authoritative `published` manifest. Never re-fetches source content
+    /// or Git objects — the index is a derived cache, not a second authority.
+    Reindex,
     /// `omd log <id>` — walk a node's commit chain.
     Log { id: String },
     /// `omd tree [id]` — mount-tree view from root or a node.
@@ -120,10 +143,12 @@ fn commit_prev(root: &Path, id: &str) -> Option<String> {
 }
 
 /// Walk a node chain tip→root via previous_id links (tip-first order).
-fn log_chain(store: &Store, root: &Path, node: &str) -> Vec<String> {
-    let tip = store.state().tips.get(node).cloned().unwrap_or_default();
+fn log_chain(store: &Store, root: &Path, node_or_commit: &str) -> Vec<String> {
+    // Accept a node key (walk its tip) OR a commit id (walk that commit).
+    let start = store.state().tips.get(node_or_commit).cloned()
+        .unwrap_or_else(|| node_or_commit.to_string());
     let mut out = Vec::new();
-    let mut cur = tip;
+    let mut cur = start;
     while !cur.is_empty() {
         out.push(cur.clone());
         cur = commit_prev(root, &cur).unwrap_or_default();
@@ -132,20 +157,44 @@ fn log_chain(store: &Store, root: &Path, node: &str) -> Vec<String> {
 }
 
 /// Render the mount tree as nested JSON from `start` (or the implicit root).
+/// Tree shows mount hierarchy: root → file nodes → range children. Only
+/// mounted nodes expand — never unpublished material as history.
 fn mount_tree(store: &Store, start: Option<&str>) -> serde_json::Value {
     let mounts = &store.state().mounts;
-    fn build(node: &str, mounts: &std::collections::BTreeMap<String, Vec<String>>, depth: usize) -> serde_json::Value {
+    let tips = &store.state().tips;
+    // Build node→children from mounts; also synthesize root→file mounts for
+    // tips not already mounted under another parent.
+    fn build(node: &str, mounts: &std::collections::BTreeMap<String, Vec<String>>, tips: &std::collections::BTreeMap<String, String>, depth: usize) -> serde_json::Value {
         if depth > 32 {
             return serde_json::json!({ "node": node, "truncated": true });
         }
-        let children: Vec<serde_json::Value> = mounts
+        let mut children: Vec<serde_json::Value> = mounts
             .get(node)
-            .map(|c| c.iter().map(|ch| build(ch, mounts, depth + 1)).collect())
+            .map(|c| c.iter().map(|ch| build(ch, mounts, tips, depth + 1)).collect())
             .unwrap_or_default();
+        // Range children of this node (range:<node>@... keys).
+        let prefix = format!("range:{}", node.strip_prefix("file:").unwrap_or(node));
+        for k in tips.keys() {
+            if k.starts_with(&prefix) || k.starts_with(&format!("range:{}@", node)) {
+                children.push(serde_json::json!({ "node": k, "children": [] }));
+            }
+        }
         serde_json::json!({ "node": node, "children": children })
     }
+    // Root: every file: tip not already a mount child.
+    let mounted: std::collections::BTreeSet<String> = mounts.values().flatten().cloned().collect();
+    let mut root_children: Vec<serde_json::Value> = Vec::new();
+    for node in tips.keys() {
+        if node.starts_with("file:") && !mounted.contains(node) {
+            root_children.push(build(node, mounts, tips, 1));
+        }
+    }
     let root = start.unwrap_or("root");
-    serde_json::json!({ "ok": true, "tree": build(root, mounts, 0) })
+    if root == "root" {
+        serde_json::json!({ "ok": true, "tree": { "node": "root", "children": root_children } })
+    } else {
+        serde_json::json!({ "ok": true, "tree": build(root, mounts, tips, 0) })
+    }
 }
 
 /// Commits that are dangling: recorded in `retained` but no longer a tip and
@@ -260,6 +309,11 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                 other => return Err(format!("unknown commit kind: {other}")),
             };
             let mut store = Store::open(&root).map_err(|e| e.to_string())?;
+            // An unactivated copy (store dir copied, not re-registered) must
+            // not publish business writes — history/diagnostic reads only.
+            if !omd::records::cross::activated(store.state()) {
+                return Err("store is an unregistered copy: business writes refused until `omd activate` registers a new store_id".into());
+            }
             // 8.4 pre-check: same-direction duplicate *resolved* range in
             // one command rejects the whole command before any write — never
             // silently dedup or create two identical links.
@@ -428,16 +482,25 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             let mut report = serde_json::Map::new();
             let mut all_files = Vec::new();
             let proj_root = std::env::current_dir().unwrap_or_default();
+            // A dir-import enters members into the statistics SCOPE (the
+            // denominator) — it does NOT confer confirmed content coverage.
+            // `tracked` = the file has its own confirmed tracked node; scope
+            // membership only brings it into the check's denominator.
             for (dir, pats) in &scopes {
                 let base = if dir.is_empty() { proj_root.clone() } else { proj_root.join(dir) };
                 let scope = omd::sources::scope::resolve(&base, pats);
                 for f in &scope.files {
-                    let node = format!("file:{}/{}", dir, f.display());
-                    let covered = store.state().tips.contains_key(&node);
+                    let by_name = format!("file:{}", f.display());
+                    let by_scope = format!("file:{}/{}", dir, f.display());
+                    // Confirmed coverage needs a *tracked node with confirmed
+                    // content* — an unconfirmed member is a coverage gap.
+                    let tracked = store.state().tips.contains_key(&by_name)
+                        || store.state().tips.contains_key(&by_scope);
                     all_files.push(serde_json::json!({
                         "file": f.display().to_string(),
                         "scope": dir,
-                        "tracked": covered,
+                        "tracked": tracked,
+                        "in_scope": true,
                     }));
                 }
                 if !scope.problems.is_empty() {
@@ -607,6 +670,100 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             // metadata revision, not a business commit.
             store.set_state(st).map_err(|e| e.to_string())?;
             Ok(serde_json::json!({ "ok": true, "binding": binding.id, "version": commit.content_ref, "affected": affected }))
+        }
+        Cmd::Register { store_id, locator } => {
+            let mut store = Store::open(&root).map_err(|e| e.to_string())?;
+            let mut st = store.state().clone();
+            omd::records::cross::register_peer(&mut st, store_id, locator);
+            store.set_state(st).map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "ok": true, "registered": store_id }))
+        }
+        Cmd::Protect { target, peer, record } => {
+            let mut store = Store::open(&root).map_err(|e| e.to_string())?;
+            let mut st = store.state().clone();
+            let cred = omd::records::cross::persist_inbound(&mut st, peer, record, target);
+            store.set_state(st).map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "ok": true, "credential": cred, "target": target }))
+        }
+        Cmd::Activate => {
+            let mut store = Store::open(&root).map_err(|e| e.to_string())?;
+            let mut st = store.state().clone();
+            let id = omd::records::cross::activate(&mut st, &OsRng);
+            store.set_state(st).map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "ok": true, "store_id": id }))
+        }
+        Cmd::Gc { content } => {
+            let store = Store::open(&root).map_err(|e| e.to_string())?;
+            if !omd::records::cross::activated(store.state()) {
+                return Err("store is an unregistered copy: gc refused until `omd activate`".into());
+            }
+            // Content gc: a local content copy is collectible only if no
+            // version still references it AND no binding still points a
+            // version at it. Conservative: unreadable peers + inbound
+            // credentials retain their targets.
+            let mut released = Vec::new();
+            if *content {
+                let mut protected = std::collections::HashSet::new();
+                // Every version's sha256 is potentially needed.
+                if let Ok(rd) = std::fs::read_dir(root.join("versions")) {
+                    for e in rd.flatten() {
+                        if let Ok(txt) = std::fs::read_to_string(e.path()) {
+                            if let Ok(v) = toml::from_str::<omd::records::version::SourceVersion>(&txt) {
+                                protected.insert(v.sha256.clone());
+                            }
+                        }
+                    }
+                }
+                // Inbound credentials protect their targets' content — and
+                // the TRANSITIVE closure: a protected target's own
+                // previous_id / content / link basis must be retained so the
+                // target remains recoverable, never just the direct object.
+                for cred in store.state().inbound.values() {
+                    protected.insert(cred.target.clone());
+                    // Walk the protected commit's chain basis.
+                    if let Ok(c) = store.read_commit(&cred.target) {
+                        if let Ok(v) = store.read_version(&c.content_ref) {
+                            protected.insert(v.sha256.clone());
+                        }
+                        let mut prev = c.previous_id.clone();
+                        while !prev.is_empty() {
+                            if let Ok(pc) = store.read_commit(&prev) {
+                                if let Ok(v) = store.read_version(&pc.content_ref) {
+                                    protected.insert(v.sha256.clone());
+                                }
+                                prev = pc.previous_id.clone();
+                            } else { break; }
+                        }
+                    }
+                }
+                if let Ok(rd) = std::fs::read_dir(root.join("content")) {
+                    for e in rd.flatten() {
+                        let name = e.file_name().to_string_lossy().to_string();
+                        if !protected.contains(&name) {
+                            let _ = std::fs::remove_file(e.path());
+                            released.push(name);
+                        }
+                    }
+                }
+            }
+            Ok(serde_json::json!({ "ok": true, "released": released, "protected_count": store.state().inbound.len() }))
+        }
+        Cmd::Reindex => {
+            // Rebuild the query index from the published manifest — a derived
+            // cache, never a second authority. We regenerate `index.txt`
+            // (a stand-in for the SQLite index: sorted commit-id → node map)
+            // purely from the durable manifest + commit records. Never runs
+            // a source program or reads Git objects to fill gaps.
+            let manifest = std::fs::read_to_string(root.join("published")).unwrap_or_default();
+            let mut rows = Vec::new();
+            for id in manifest.lines().filter(|l| !l.is_empty()) {
+                if let Ok(c) = Store::open(&root).and_then(|s| s.read_commit(id)) {
+                    rows.push(format!("{}\t{}\t{}", id, omd::records::commit::kind_name(c.kind), c.content_ref));
+                }
+            }
+            rows.sort();
+            std::fs::write(root.join("index.txt"), rows.join("\n")).map_err(|e| e.to_string())?;
+            Ok(serde_json::json!({ "ok": true, "indexed": rows.len() }))
         }
         Cmd::Log { id } => {
             let store = Store::open(&root).map_err(|e| e.to_string())?;

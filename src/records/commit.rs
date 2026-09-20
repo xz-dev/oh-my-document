@@ -220,7 +220,7 @@ impl Commit {
     }
 }
 
-fn kind_name(k: CommitKind) -> &'static str {
+pub fn kind_name(k: CommitKind) -> &'static str {
     use CommitKind::*;
     match k {
         Init => "init",

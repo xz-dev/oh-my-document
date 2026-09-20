@@ -14,4 +14,5 @@ pub mod version;
 #[cfg(test)]
 mod tests;
 pub mod binding;
+pub mod cross;
 pub mod notes;

@@ -21,6 +21,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::records::commit::Commit;
+use crate::records::time::OsRng;
 use crate::records::version::SourceVersion;
 use crate::relations::dirty::DirtyState;
 
@@ -111,6 +112,43 @@ pub struct State {
     /// check item — never a new marker lifecycle nor a verify gate.
     #[serde(default)]
     pub tag_rules: BTreeMap<String, TagRule>,
+    /// Independent 128-bit store identity — distinct from project_id and
+    /// business commit ids. A copied dir must register a NEW store_id (and
+    /// complete external-reference registration) before it may publish or gc;
+    /// an unregistered copy reads history for diagnostics only.
+    #[serde(default)]
+    pub store_id: String,
+    /// Whether this store copy completed external-reference registration.
+    /// false = history/diagnostic reads only; business writes + gc refuse.
+    #[serde(default)]
+    pub activated: bool,
+    /// peer store_id → registration (alias → locator), for cross-store links.
+    #[serde(default)]
+    pub peers: BTreeMap<String, PeerReg>,
+    /// Inbound protection credentials a peer persisted against our targets
+    /// before ITS record published: credential_id → InboundCred.
+    #[serde(default)]
+    pub inbound: BTreeMap<String, InboundCred>,
+}
+
+/// A registered peer store (alias → locator).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PeerReg {
+    pub store_id: String,
+    pub locator: String,
+}
+
+/// An inbound protection credential: peer persisted its identity + record id
+/// + the exact protected target before publishing its own business record.
+/// The credential alone never proves the link — the peer's live record does.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InboundCred {
+    /// Peer store_id that owns the protecting record.
+    pub peer_store_id: String,
+    /// The peer's pending business record id.
+    pub record_id: String,
+    /// Our exact protected target (commit/version id).
+    pub target: String,
 }
 
 /// A declared tag-link rule checked by `check`.
@@ -172,6 +210,12 @@ impl Store {
             fs::create_dir_all(root.join(d))?;
         }
         let state_path = root.join("state.toml");
+        // Ensure the published-record manifest exists (rebuildable: it
+        // lists every commit id the state retains — reset never deletes it).
+        let manifest_path = root.join("published");
+        if !manifest_path.exists() {
+            fs::write(&manifest_path, "")?;
+        }
         let state = if state_path.exists() {
             let s = fs::read_to_string(&state_path)?;
             toml::from_str(&s).map_err(|e| StoreError::Record(e.to_string()))?
@@ -180,6 +224,13 @@ impl Store {
             fs::write(&state_path, toml::to_string(&st).map_err(|e| StoreError::Record(e.to_string()))?)?;
             st
         };
+        // A fresh store (never had a store_id) gets one + is activated.
+        let mut state = state;
+        if state.store_id.is_empty() {
+            state.store_id = crate::records::cross::new_store_id(&OsRng);
+            state.activated = true;
+            fs::write(&state_path, toml::to_string(&state).map_err(|e| StoreError::Record(e.to_string()))?)?;
+        }
         Ok(Self { root: root.to_path_buf(), lock: None, state })
     }
 
@@ -313,6 +364,14 @@ impl Store {
         }
         if let Some(c) = content {
             self.write_immutable(&format!("content/{}", SourceVersion::content_sha256(c)), c)?;
+        }
+        // Append to the published-record manifest — the durable list of every
+        // commit id ever selected into state. Rebuildable (SQLite/cache can
+        // be regenerated from it); reset never removes entries.
+        {
+            let mut m = fs::OpenOptions::new().append(true).open(self.root.join("published"))?;
+            m.write_all(commit_id.as_bytes())?;
+            m.write_all(b"\n")?;
         }
 
         if !probe.at(Stage::WriteTempState) {
