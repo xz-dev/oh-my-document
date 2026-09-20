@@ -57,6 +57,30 @@ pub fn parse_rfc3339(s: &str) -> Option<Timestamp> {
             it.next()?.parse().ok()?,
         )
     };
+    // Strict validation — never normalize an invalid date into a real one.
+    // --timestamp is a manual replay tool: the recorded id derives from the
+    // recorded value, so silent re-interpretation breaks replay determinism.
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let dim = match mo {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => return None, // month 0 or 13+
+    };
+    if !(1..=9999).contains(&y)
+        || !(1..=dim).contains(&d)
+        || !(0..=23).contains(&h)
+        || !(0..=59).contains(&mi)
+        || !(0..=59).contains(&se)
+    {
+        return None;
+    }
     // Days since epoch (civil) — Howard Hinnant algorithm.
     let y = if mo <= 2 { y - 1 } else { y };
     let era = if y >= 0 { y } else { y - 399 } / 400;
