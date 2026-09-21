@@ -1,109 +1,136 @@
-# oh-my-document（omd）
+# oh-my-document
 
-面向人类与 AI 的、可配置的文档—代码关联跟踪工作流。Rust 核心 + CLI。
+**代码改了，文档别掉队。**
 
-> **状态：核心已实现，可用于试用。** 248 个单元/集成测试 + 18 个 BDD 场景绿；`cargo fmt` / `cargo clippy -D warnings` 干净。137 个规格场景全部映射到已执行测试或显式平台记录（见 [spec-traceability.md](spec-traceability.md)）。
+[设计思想](#为什么面向-agent) · [用途](#它能帮你做什么) · [安装](#安装) · [动手试试](#试一下把一条需求连到实现) · [文档](#继续了解) · [反馈](https://github.com/xz-dev/oh-my-document/issues)
 
-## 安装与试用
+需求里写着“最多重试 3 次”，后来改成了 5 次。负责重试的代码呢？谁还记得它在哪儿，又有没有一起改？
 
-```bash
-cargo install --path .   # 或 cargo build --release 后使用 target/release/omd
-```
+**OMD（`omd`）面向 Agent 编码工作流，让人更容易理解和调整 Agent 写出的代码。** 它把需求、设计与实现中的具体片段关联起来，跟踪内容变化，并保存处理变化的理由，为编码过程增加一层可核对的记录。
 
-无 Git 仓库要求；每个项目在自己的 `./.omd/` 元数据目录下工作（也可 `--meta <dir>` 或 `OMD_META` 指定）。
+目前的使用入口是 Rust 编写的 CLI，人和 Agent 都可以调用。Markdown、图表源码和程序源码可以留在原来的位置，跟踪记录放在 `.omd/` 中。
 
-### 30 秒上手
+## 为什么面向 Agent
 
-```bash
-cd your-project
+Agent 写完一版代码后，人仍然需要知道：它依据哪条需求？实现有没有偏离设计？这次改动还有哪些地方需要一起检查？如果这些信息只留在对话里，接手的人就得重新问一遍，或者重新读一遍代码。
 
-# 1. 登记来源（文件或命令输出）
-omd init docs/spec.md
-omd init src/main.rs
+OMD 的设计目标，是把这些依据和关系留在项目里。人可以先明确需求、流程与组件关系，让 Agent 继续细化到函数和实现；当方向需要调整时，也能从相应的设计和关联片段入手，指出哪里需要重新处理。
 
-# 2. 提交要跟踪的内容范围并建立关联
-omd commit commit docs/spec.md --range 8-25 --reason "algorithm A described"
-omd commit commit src/main.rs --range 0-3 \
-    --link-from "docs/spec.md@text:8-25" \
-    --reason "implementation of algorithm A"
+**这里的“可预见性”，是让人更有依据地判断一次改动，而不是预测 Agent 下一行会写什么：**
 
-# 3. 声明规则：spec 变更必须被 code 覆盖
-omd commit tag docs/spec.md --tag spec
-omd commit tag src/main.rs --tag code
-omd commit scope_adjust src/main.rs --rule "spec->code" --level warn
+- **看得懂依据：** 这段实现对应哪条需求、哪段设计，为什么这样改？
+- **知道要核对哪里：** 沿着已经建立的关联，检查哪些内容变了、哪些还没有处理。
+- **找得到调整入口：** 修改需求或设计后，明确要求 Agent 核对哪些实现，并留下处理理由。
 
-# 4. 检查关联覆盖率 / 校验内容是否漂移
-omd check     # 规则覆盖率报告（如 spec->code: 80%）
-omd verify    # 内容变化检测：范围被编辑 → dirty，需人工确认
-```
+这些关联需要人或 Agent 明确建立，OMD 不会自动猜出所有依赖。它希望减少的是“只能相信 Agent 说已经完成”的情况，让人能对照具体内容和记录判断工作进展。
 
-文档改了一个词之后：
+因此，OMD 被设计为 **Agent 编写代码的第二层保障**：Agent 负责执行修改，工具负责可重复的内容与规则检查，人负责判断和调整方向。它补充测试与代码审查；有关联、检查通过，都不等于实现已经符合需求或不存在缺陷。
 
-```bash
-$ omd verify docs/spec.md
-ok: false | dirty: ["range:docs/spec.md@text:8-25"]   # 变化被确定性定位
-```
+OMD 不接管编码过程，也不绑定某个 Agent。人和 Agent 使用同一套规则，不因自动化而放宽检查。
 
-处理变化要么修改代码并重新提交，要么 `omd commit commit <path> --id <旧提交> --range <新范围> --reason "<为什么>"` 显式更新关联。
+## 它能帮你做什么
 
-## 核心概念
-
-- **跟踪单位是 range（内容范围），不是文件。** 文本按解码后 Unicode 字符序号（`file.md@text:8-25`），字节模式按原始偏移（`file.bin@byte:0-128`）。
-- **link 连接 range ↔ range**，按 `link_id` 识别；同一对端点可以有多条独立 link（各带理由）。上游变化在下游产生待处理义务（`adapt` 按 link_id + 理由 + 选定变更逐条处理）。
-- **三态标记：** 空 / 脏 / 已确认。只有未过期的已确认算覆盖；跳过（`--skip`）永远不等于已确认。
-- **变化检测 = 内容 hash + Myers diff**，不依赖 Git。commit id 由 `SHA256(salt ‖ frame(prev) ‖ frame(timestamp) ‖ frame(content) ‖ frame(JCS payload))` 派生，TOML 字段顺序不影响 id。
-- **ATOMIC 块：** `commit begin` / `commit end` 之间的一组提交作为一个单元；reset 只能落在 BEGIN/END 边界（占位标记回退一步到直接前驱），不能 reset 块内成员。
-- **check ≠ verify：** check 报告关联覆盖率（规则驱动），verify 报告内容是否与记录一致。两者独立失败，互不代替。
-
-## 主要命令
-
-| 命令 | 用途 |
-|---|---|
-| `omd init <path>` | 登记来源（不可叠加：已跟踪路径再 init 报错；`--source-ref 'command::<exe>::<JSON argv>'` 跟踪命令 stdout；`--encoding` 指定文本编码） |
-| `omd commit commit <path> --range S-E --reason R` | 提交范围（`--id` 追加到已有链 = 修改范围；无 `--id` = 同坐标新独立对象） |
-| `omd commit begin/end <path>` | ATOMIC 块边界 |
-| `omd commit reset <path> --reset-target <commit-id>` | 重置到指定提交（边界标记回退一步；被移除段内的 link 一并撤回） |
-| `omd commit adapt <path> --link-id L --changes c1 --reason R` | 处理 link 上的待处理变更（`--stop` 清全部） |
-| `omd commit tag/rule/skip` | 规则工作流：标签、`A->B` 覆盖规则（`--level warn/fail`）、显式跳过 |
-| `omd verify [path]` / `omd check` | 内容校验 / 覆盖率检查（`--run-command=true` 允许 verify 重跑命令源并比对 stdout） |
-| `omd log/tree/list` | 链历史、层级树（`--level file`）、状态查询（`--dangling`） |
-| `omd note add/patch/list <commit-id>` | 提交上的 append-only 注记（修订按发布序，不按时钟） |
-| `omd replace <commit-id> --source <ref>` | 仅在字节完全一致时把获取来源重绑到新路径（id/links/notes 不变） |
-| `omd register` / `commit ... --xlink-to peer:<store>:<file>@<range>` | 跨仓库关联（各自元数据独立，绝不合并；inbound 凭据先于对方发布持久化） |
-| `omd gc` / `omd reindex` | 收集悬空记录（保护闭包内保留）/ 重建派生索引 |
-| `omd import/remove/delete/rename/copy` | 统计范围与生命周期（均为 commit 的别名族） |
-
-所有命令支持 `--json`（stdout JSON 信封，stderr 独立诊断），退出码：0 成功 / 1 一般错误 / 2 用法 / 3 版本冲突 / 4 锁冲突 / 5 执行失败。
-
-## 并发与安全
-
-单写者锁（`write.lock`）；并发更新直接拒绝，不合并、不覆盖。`state.toml` 经 tmp→fsync→rename→dirsync 原子发布。读取方在打开时校验 tip 完整性——被篡改的元数据报错而非静默解析。命令源默认不执行：只有显式 `--run-command`（或配置）才重跑命令，一次调用的许可不带入下一次。
-
-## git:: 来源（可选）
-
-`--source-ref 'git::<40-hex-commit>:<path>'` 通过只读 Git plumbing（`cat-file`）读取历史 blob：精确 40-hex、原始内容、有界符号链接解析，永不回退到工作区当前内容。工作区文件跟踪与 Git 仓库状态完全无关。
-
-## 未实现 / 明确延后
-
-- 远程身份子系统（URL↔声明映射、SSH/HTTPS 等价性）— 规格可选项，未设计
-- 命令捕获期间的存储故障注入测试（无进程内故障接缝）
-- 跨平台持久化验证（当前仅 Linux 单机验证；`fsync`/`rename` 语义在其他平台未测）
-- 可选 programming-thinking（Lean）产品 skill — 契约已确认，另行授权后实现
-
-## 文档导航
-
-| 文档 | 用途 |
+| 你在维护什么 | 可以怎样关联 |
 | --- | --- |
-| [AGENTS.md](AGENTS.md) | AI 工具的阅读顺序与协作约定 |
-| [spec-traceability.md](spec-traceability.md) | 137 规格场景 ↔ 已执行测试的逐行台账 |
-| [需求基线](docs/requirements.md) | 用户确认的决定；R 编号用于追溯 |
-| [来源与坐标](docs/source-model.md) | 引用形式、编码、command 契约 |
-| [存储与路径](docs/storage.md) | 路径规则与布局 |
-| [候选架构](docs/architecture.md) | 模块职责 |
-| [待决事项](docs/open-questions.md) | Q 编号；不得由实现悄悄拍板 |
-| [验收场景](docs/acceptance.md) | 测试场景 |
-| [handoff](docs/handoff.md) | 交接说明 |
+| 一条需求和它的实现 | 把需求中的那段话连到对应代码，修改后有明确的核对对象 |
+| 一张状态图和业务逻辑 | 把图表源码中的状态、分支连到处理它们的函数 |
+| 同一个算法的两种实现 | 把对应片段关联起来，留下每次适配的记录 |
+
+你选择需要跟踪的片段，不必把整份文档或整个文件当成一个整体。OMD 的文件跟踪不依赖 Git 仓库，也不要求更换编辑器、文档格式或绘图工具。
+
+## 安装
+
+先安装 [Rust 与 Cargo](https://rustup.rs/)，然后从源码安装：
+
+```bash
+git clone https://github.com/xz-dev/oh-my-document.git
+cd oh-my-document
+cargo install --path . --locked
+```
+
+安装后运行 `omd --help` 即可查看命令。目前主要在 Linux 上开发和验证。
+
+## 试一下：把一条需求连到实现
+
+下面用两个很小的文件演示。命令使用 Bash；不需要创建 Git 仓库。
+
+### 1. 写下需求和实现
+
+```bash
+mkdir omd-demo
+cd omd-demo
+
+printf '最多重试 3 次。\n' > spec.md
+printf 'MAX_RETRIES = 3\n' > retry.py
+```
+
+| `spec.md` | `retry.py` |
+| --- | --- |
+| 最多重试 **3** 次。 | `MAX_RETRIES = 3` |
+
+### 2. 告诉 OMD，这两段内容有关联
+
+```bash
+omd init spec.md
+omd init retry.py
+
+omd commit commit spec.md --range 0-9 \
+  --reason "约定最多重试 3 次"
+
+omd commit commit retry.py --range 0-15 \
+  --link-from "spec.md@text:0-9" \
+  --reason "用 MAX_RETRIES 实现重试上限"
+```
+
+这里的范围是**从 0 开始的字符位置，包含起点、不包含终点**，不是行号。`0-9` 对应“最多重试 3 次。”，`0-15` 对应 `MAX_RETRIES = 3`；两者都不含末尾换行。
+
+`init` 登记文件，`--range` 选择片段，`--link-from` 建立关联，`--reason` 留下理由。OMD 的 `commit` 记录保存在 `.omd/`，与 Git 提交无关。
+
+### 3. 改一下需求，再检查
+
+```bash
+printf '最多重试 5 次。\n' > spec.md
+omd verify
+```
+
+检查结果以 JSON 返回：`data.ok` 为 `false`，`data.dirty` 中列出 `range:spec.md@text:0-9`。这段需求已经变了，需要重新核对；此时 `retry.py` 中仍然是 `3`。
+
+接下来，你可以检查实现是否也要调整，并在 OMD 中记录处理结果和理由。它不会替你把代码里的数字改成 `5`。
+
+**本例的已知问题：** 当前版本在建立上述关联后，`verify` 还会为 `retry.py` 的关联范围报告 `version record missing`，未编辑文件时也会出现。文档修改能够被检出，但这条关联验证流程尚未完整跑通；这里保留实际结果，不把它当作校验成功。
+
+## 放进自己的工作流
+
+从一条经常一起修改的需求和实现开始，逐步增加关联即可。在 Agent 工作流中，可以把建立关联、检查变化和记录处理理由约定为任务的一部分；人也能用同一套命令复查。
+
+- **想知道哪些内容变了？** 运行 `omd verify`，查看需要复核的跟踪范围。
+- **想知道哪些内容还没关联？** 配置标签与关联规则后运行 `omd check`，查看覆盖情况；规则可选择提醒或使检查失败。
+- **想回看记录？** 用 `omd list` 查看当前提交 ID，再用 `omd log <commit-id>` 查看这条链的历史。
+- **想接入脚本？** 用 `--json` 读取结构化结果，保留你现有的开发流程。
+
+默认在当前项目的 `.omd/` 保存记录，也可以用 `--meta <目录>` 指定位置。更多选项从 `omd --help` 和 `omd commit --help` 查看。
+
+## 继续了解
+
+README 只带你认识工具和走一遍例子。设计背景与更细的约定在这里：
+
+- [需求与设计目标](docs/requirements.md) — 为什么要跟踪内容范围、关联和处理理由。
+- [来源与坐标](docs/source-model.md) — 文件、命令输出、字符范围与字节范围的设计约定。
+- [存储与路径](docs/storage.md) — 元数据和索引各自保存什么。
+- [规格与实现追溯](spec-traceability.md) — 需要查验实现细节时再看。
+
+这些文档包含设计阶段的约定，具体命令参数以当前 CLI 帮助为准。远程 URL 身份映射与可选 Lean 产品 skill 尚未提供。
+
+## 交流与参与
+
+用它关联一小段真实的说明和实现，看看修改后能否找到你关心的范围。遇到不符合预期的结果，欢迎在 [Issues](https://github.com/xz-dev/oh-my-document/issues) 留下命令、相关文件片段，以及你希望看到的行为。
+
+想修改代码，可以从仓库运行：
+
+```bash
+cargo test --all-targets
+```
 
 ## 许可证
 
-尚未选择。仓库公开不等于已授予任何开源许可。
+许可证待定，目前尚未提供开源许可。
