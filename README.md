@@ -1,46 +1,58 @@
 # oh-my-document
 
-**代码改了，文档别掉队。**
+**English** | [简体中文](README.zh-CN.md)
 
-[设计思想](#为什么面向-agent) · [用途](#它能帮你做什么) · [安装](#安装) · [动手试试](#试一下把一条需求连到实现) · [文档](#继续了解) · [反馈](https://github.com/xz-dev/oh-my-document/issues)
+**When code changes, don't leave the docs behind.**
 
-需求里写着“最多重试 3 次”，后来改成了 5 次。负责重试的代码呢？谁还记得它在哪儿，又有没有一起改？
+[Why agents?](#why-build-for-agents) · [Explore a project](#understand-a-project-step-by-step) · [Use cases](#what-can-you-link) · [Install](#install) · [Try it](#try-it-link-a-requirement-to-code) · [Docs](#read-more) · [Feedback](https://github.com/xz-dev/oh-my-document/issues)
 
-**OMD（`omd`）面向 Agent 编码工作流，让人更容易理解和调整 Agent 写出的代码。** 它把需求、设计与实现中的具体片段关联起来，跟踪内容变化，并保存处理变化的理由，为编码过程增加一层可核对的记录。
+A requirement says “retry at most 3 times.” Later, someone changes it to 5. Where is the retry code—and did anyone update it too?
 
-目前的使用入口是 Rust 编写的 CLI，人和 Agent 都可以调用。Markdown、图表源码和程序源码可以留在原来的位置，跟踪记录放在 `.omd/` 中。
+**OMD (`omd`) maps code, documentation, and UML diagrams to help people explore projects with an agent, understand agent-written code, and guide changes.** It links specific passages in requirements and designs to implementation ranges, tracks content changes, and records why those changes were handled a certain way.
 
-## 为什么面向 Agent
+The current entry point is a Rust CLI that both people and agents can use. Markdown, diagram source, and code stay where they are; tracking records live in `.omd/`.
 
-Agent 写完一版代码后，人仍然需要知道：它依据哪条需求？实现有没有偏离设计？这次改动还有哪些地方需要一起检查？如果这些信息只留在对话里，接手的人就得重新问一遍，或者重新读一遍代码。
+## Why build for agents?
 
-OMD 的设计目标，是把这些依据和关系留在项目里。人可以先明确需求、流程与组件关系，让 Agent 继续细化到函数和实现；当方向需要调整时，也能从相应的设计和关联片段入手，指出哪里需要重新处理。
+After an agent writes some code, you still need to know: Which requirement led to this implementation? Does it follow the design? What else needs checking after this change? If those answers exist only in a chat, the next person has to ask again—or read the code from scratch.
 
-**这里的“可预见性”，是让人更有依据地判断一次改动，而不是预测 Agent 下一行会写什么：**
+OMD is designed to keep those connections in the project. You can define requirements, flows, and component relationships, then let an agent work down to functions and implementation details. When the direction needs to change, the linked design and code give you concrete places to intervene.
 
-- **看得懂依据：** 这段实现对应哪条需求、哪段设计，为什么这样改？
-- **知道要核对哪里：** 沿着已经建立的关联，检查哪些内容变了、哪些还没有处理。
-- **找得到调整入口：** 修改需求或设计后，明确要求 Agent 核对哪些实现，并留下处理理由。
+**Predictability here means having grounds to judge a change, not predicting the agent's next line of code:**
 
-这些关联需要人或 Agent 明确建立，OMD 不会自动猜出所有依赖。它希望减少的是“只能相信 Agent 说已经完成”的情况，让人能对照具体内容和记录判断工作进展。
+- **Understand the reasoning.** Which requirement or design does this code correspond to, and why was it changed?
+- **Know what to review.** Follow recorded links to check what changed and what still needs attention.
+- **Guide the next edit.** Change a requirement or design, identify the implementations an agent should review, and keep a record of the outcome and reasoning.
 
-因此，OMD 被设计为 **Agent 编写代码的第二层保障**：Agent 负责执行修改，工具负责可重复的内容与规则检查，人负责判断和调整方向。它补充测试与代码审查；有关联、检查通过，都不等于实现已经符合需求或不存在缺陷。
+People or agents must create these links explicitly; OMD does not infer every dependency. The goal is to give you something to check beyond an agent's claim that the work is done.
 
-OMD 不接管编码过程，也不绑定某个 Agent。人和 Agent 使用同一套规则，不因自动化而放宽检查。
+OMD is designed as **a second layer of assurance for agent-written code**: the agent makes edits, the tool performs repeatable content and rule checks, and people judge the result and adjust direction. It complements tests and code review. A link—or a passing check—does not prove that an implementation meets its requirements or is free of defects.
 
-## 它能帮你做什么
+OMD does not take over coding or require a particular agent. People and agents follow the same rules; automation gets no relaxed checks.
 
-| 你在维护什么 | 可以怎样关联 |
+## Understand a project step by step
+
+When joining an unfamiliar project, you can ask an agent to explain the existing code through documentation and UML diagrams, then use OMD to link those explanations to actual source ranges. Start with the question in front of you and go deeper as needed; you do not have to read the entire repository first.
+
+1. **Start with the big picture.** Ask the agent to describe the project's purpose, main components, and relationships through documentation and UML diagrams.
+2. **Follow a question deeper.** Pick a flow you want to understand. Have the agent explain its modules, states, and branches, linking the explanation and diagram source to the relevant code.
+3. **Check against the implementation.** Follow those mappings back to the code, ask about unclear parts, and correct or expand the explanation. The links stay in the project for later exploration and change checks.
+
+This works in both directions: when building, work from requirements and UML toward implementation; when learning, start with existing code, build explanations and diagrams, then explore the details. People or agents write the explanations and diagrams. OMD maintains explicit links so you can check their basis—it does not certify an explanation as fact.
+
+## What can you link?
+
+| What you're working with | How to connect it |
 | --- | --- |
-| 一条需求和它的实现 | 把需求中的那段话连到对应代码，修改后有明确的核对对象 |
-| 一张状态图和业务逻辑 | 把图表源码中的状态、分支连到处理它们的函数 |
-| 同一个算法的两种实现 | 把对应片段关联起来，留下每次适配的记录 |
+| A requirement and its implementation | Link the relevant passage to the code so you have specific content to review after a change |
+| A state diagram and business logic | Link states and branches in the diagram source to the functions that handle them |
+| Two implementations of the same algorithm | Link corresponding ranges and record how each change was handled |
 
-你选择需要跟踪的片段，不必把整份文档或整个文件当成一个整体。OMD 的文件跟踪不依赖 Git 仓库，也不要求更换编辑器、文档格式或绘图工具。
+Choose the ranges you care about; you do not have to treat a whole document or file as one unit. File tracking does not depend on a Git repository, and you can keep your editor, document formats, and diagramming tools.
 
-## 安装
+## Install
 
-先安装 [Rust 与 Cargo](https://rustup.rs/)，然后从源码安装：
+Install [Rust and Cargo](https://rustup.rs/), then build from source:
 
 ```bash
 git clone https://github.com/xz-dev/oh-my-document.git
@@ -48,89 +60,89 @@ cd oh-my-document
 cargo install --path . --locked
 ```
 
-安装后运行 `omd --help` 即可查看命令。目前主要在 Linux 上开发和验证。
+Run `omd --help` to explore the commands. Development and verification currently focus on Linux.
 
-## 试一下：把一条需求连到实现
+## Try it: link a requirement to code
 
-下面用两个很小的文件演示。命令使用 Bash；不需要创建 Git 仓库。
+This example uses two small files and Bash. No Git repository required.
 
-### 1. 写下需求和实现
+### 1. Write a requirement and its implementation
 
 ```bash
 mkdir omd-demo
 cd omd-demo
 
-printf '最多重试 3 次。\n' > spec.md
+printf 'Retry at most 3 times.\n' > spec.md
 printf 'MAX_RETRIES = 3\n' > retry.py
 ```
 
 | `spec.md` | `retry.py` |
 | --- | --- |
-| 最多重试 **3** 次。 | `MAX_RETRIES = 3` |
+| Retry at most **3** times. | `MAX_RETRIES = 3` |
 
-### 2. 告诉 OMD，这两段内容有关联
+### 2. Tell OMD that these ranges are related
 
 ```bash
 omd init spec.md
 omd init retry.py
 
-omd commit commit spec.md --range 0-9 \
-  --reason "约定最多重试 3 次"
+omd commit commit spec.md --range 0-22 \
+  --reason "Require at most 3 retries"
 
 omd commit commit retry.py --range 0-15 \
-  --link-from "spec.md@text:0-9" \
-  --reason "用 MAX_RETRIES 实现重试上限"
+  --link-from "spec.md@text:0-22" \
+  --reason "Implement the retry limit with MAX_RETRIES"
 ```
 
-这里的范围是**从 0 开始的字符位置，包含起点、不包含终点**，不是行号。`0-9` 对应“最多重试 3 次。”，`0-15` 对应 `MAX_RETRIES = 3`；两者都不含末尾换行。
+Ranges use **zero-based character positions, with an inclusive start and an exclusive end**, not line numbers. `0-22` selects `Retry at most 3 times.`; `0-15` selects `MAX_RETRIES = 3`. Neither includes the trailing newline.
 
-`init` 登记文件，`--range` 选择片段，`--link-from` 建立关联，`--reason` 留下理由。OMD 的 `commit` 记录保存在 `.omd/`，与 Git 提交无关。
+`init` registers a file, `--range` selects a passage, `--link-from` creates a link, and `--reason` records the reasoning. OMD stores its `commit` records in `.omd/`; these are separate from Git commits.
 
-### 3. 改一下需求，再检查
+### 3. Change the requirement and check
 
 ```bash
-printf '最多重试 5 次。\n' > spec.md
+printf 'Retry at most 5 times.\n' > spec.md
 omd verify
 ```
 
-检查结果以 JSON 返回：`data.ok` 为 `false`，`data.dirty` 中列出 `range:spec.md@text:0-9`。这段需求已经变了，需要重新核对；此时 `retry.py` 中仍然是 `3`。
+The check returns JSON with `data.ok` set to `false` and `range:spec.md@text:0-22` listed in `data.dirty`. That requirement has changed and needs review; `retry.py` still says `3`.
 
-接下来，你可以检查实现是否也要调整，并在 OMD 中记录处理结果和理由。它不会替你把代码里的数字改成 `5`。
+You can now decide whether the implementation needs updating and record the outcome and reasoning in OMD. It will not change the code to `5` for you.
 
-**本例的已知问题：** 当前版本在建立上述关联后，`verify` 还会为 `retry.py` 的关联范围报告 `version record missing`，未编辑文件时也会出现。文档修改能够被检出，但这条关联验证流程尚未完整跑通；这里保留实际结果，不把它当作校验成功。
+**Known issue in this example:** after creating the link above, the current version also reports `version record missing` for the linked range in `retry.py`, even before either file is edited. The changed requirement is detected, but this linked verification flow is not yet working end to end. The result above reflects that limitation, not a successful validation.
 
-## 放进自己的工作流
+## Fit it into your workflow
 
-从一条经常一起修改的需求和实现开始，逐步增加关联即可。在 Agent 工作流中，可以把建立关联、检查变化和记录处理理由约定为任务的一部分；人也能用同一套命令复查。
+Start with one requirement and implementation that often change together, then add links as needed. When working with an agent, you can make linking, checking changes, and recording the reasoning part of the task. People can review the result with the same commands.
 
-- **想知道哪些内容变了？** 运行 `omd verify`，查看需要复核的跟踪范围。
-- **想知道哪些内容还没关联？** 配置标签与关联规则后运行 `omd check`，查看覆盖情况；规则可选择提醒或使检查失败。
-- **想回看记录？** 用 `omd list` 查看当前提交 ID，再用 `omd log <commit-id>` 查看这条链的历史。
-- **想接入脚本？** 用 `--json` 读取结构化结果，保留你现有的开发流程。
+- **What changed?** Run `omd verify` to find tracked ranges that need review.
+- **What's missing a link?** Configure tags and link rules, then run `omd check` to inspect coverage. Rules can warn or fail the check.
+- **What happened before?** Use `omd list` to find current commit IDs, then `omd log <commit-id>` to read a chain's history.
+- **Want to script it?** Use `--json` for structured output without replacing your existing development workflow.
 
-默认在当前项目的 `.omd/` 保存记录，也可以用 `--meta <目录>` 指定位置。更多选项从 `omd --help` 和 `omd commit --help` 查看。
+Records live in the project's `.omd/` directory by default. Use `--meta <directory>` to choose another location. See `omd --help` and `omd commit --help` for more options.
 
-## 继续了解
+## Read more
 
-README 只带你认识工具和走一遍例子。设计背景与更细的约定在这里：
+The README introduces the tool and walks through an example. For design background and detailed contracts, see these documents, currently in Chinese:
 
-- [需求与设计目标](docs/requirements.md) — 为什么要跟踪内容范围、关联和处理理由。
-- [来源与坐标](docs/source-model.md) — 文件、命令输出、字符范围与字节范围的设计约定。
-- [存储与路径](docs/storage.md) — 元数据和索引各自保存什么。
-- [规格与实现追溯](spec-traceability.md) — 需要查验实现细节时再看。
+- [Requirements and design goals](docs/requirements.md) — why OMD tracks content ranges, links, and reasoning.
+- [Sources and coordinates](docs/source-model.md) — contracts for files, command output, character ranges, and byte ranges.
+- [Storage and paths](docs/storage.md) — what metadata and indexes store.
+- [Spec-to-implementation traceability](spec-traceability.md) — implementation evidence and remaining gaps.
 
-这些文档包含设计阶段的约定，具体命令参数以当前 CLI 帮助为准。远程 URL 身份映射与可选 Lean 产品 skill 尚未提供。
+These documents include design-stage contracts; consult the current CLI help for command syntax. Remote URL identity mapping and the optional Lean product skill are not yet available.
 
-## 交流与参与
+## Feedback and contributing
 
-用它关联一小段真实的说明和实现，看看修改后能否找到你关心的范围。遇到不符合预期的结果，欢迎在 [Issues](https://github.com/xz-dev/oh-my-document/issues) 留下命令、相关文件片段，以及你希望看到的行为。
+Try linking a small, real piece of documentation to its implementation, then check what happens when it changes. If the result is unexpected, open an [issue](https://github.com/xz-dev/oh-my-document/issues) with the commands, relevant file excerpts, and the behavior you expected.
 
-想修改代码，可以从仓库运行：
+To work on the code, run the tests from the repository:
 
 ```bash
 cargo test --all-targets
 ```
 
-## 许可证
+## License
 
-许可证待定，目前尚未提供开源许可。
+A license has not been chosen. No open-source license is currently granted.
