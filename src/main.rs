@@ -66,6 +66,9 @@ enum Cmd {
         range: Option<String>,
         #[arg(long)]
         timestamp: Option<String>,
+        /// `commit reset <path> --target <commit-id>` — the commit to reset to.
+        #[arg(long)]
+        reset_target: Option<String>,
         /// `commit link --source A@.. --target B@..`
         #[arg(long)]
         source: Option<String>,
@@ -431,6 +434,14 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             let mut store = Store::open(&root).map_err(|e| e.to_string())?;
             let p = Path::new(path);
             let node = format!("file:{path}");
+            // init is not stackable: a second init on an already-tracked
+            // path is a usage error, never an appended record (the init
+            // records first identity, nothing to chain onto).
+            if matches!(&cli.cmd, Cmd::Init { .. }) && store.state().tips.contains_key(&node) {
+                return Err(format!(
+                    "init refused: {node} is already tracked (init is not stackable)"
+                ));
+            }
             let mut payload = serde_json::Map::new();
             payload.insert("path".into(), path.clone().into());
             if let Cmd::Import {
@@ -490,6 +501,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
             reason,
             range,
             timestamp,
+            reset_target,
             source,
             target,
             link_id,
@@ -764,7 +776,14 @@ fn run(cli: &Cli) -> Result<serde_json::Value, String> {
                 }
             } else if kind == CommitKind::Reset {
                 // reset resolves the target's kind+prev from its on-disk record.
-                let target = range.clone().or(reason.clone()).unwrap_or_default();
+                // The target is an explicit --target <commit-id> — never a
+                // reason overload. `--reason` on reset is a usage error.
+                if reason.is_some() {
+                    return Err("reset takes --reset-target <commit-id>, not --reason".into());
+                }
+                let target = reset_target
+                    .clone()
+                    .unwrap_or_else(|| range.clone().unwrap_or_default());
                 // The reset operates on the node whose chain CONTAINS the
                 // target commit — resolve it by walking each tip's
                 // previous_id chain, not the file node.

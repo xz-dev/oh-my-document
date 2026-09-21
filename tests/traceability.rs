@@ -118,7 +118,7 @@ fn dangling_commit_still_inspectable() {
     t.run(&[
         "commit", "commit", "a.md", "--id", &c1, "--range", "0-1", "--reason", "r2",
     ]);
-    t.run(&["commit", "reset", "a.md", "--reason", &c1]);
+    t.run(&["commit", "reset", "a.md", "--reset-target", &c1]);
     // c2's file is gone after reset? No — reset moves tip, c2 is dangling.
     // log/inspect on the dangling tip commit id must not error.
     let (c, o, e) = t.run(&["log", &c1]);
@@ -197,13 +197,14 @@ fn tag_on_changed_content_is_not_a_requalification() {
     );
 }
 
-// 12.4: reset to an unresolvable target → error diagnostic.
+// 12.4: reset to an unresolvable target → error diagnostic. Also: --reason
+// on reset is a usage error (target comes via --target, never an overload).
 #[test]
 fn reset_unreachable_source_errors() {
     let t = T::new();
     t.write("a.md", "x");
     t.run(&["init", "a.md"]);
-    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reason", "bogus"]);
+    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reset-target", "bogus"]);
     assert_ne!(c, 0, "reset to unknown target must fail");
     let all = format!("{o}{e}");
     assert!(

@@ -97,7 +97,7 @@ fn reset_moves_tip_to_landing_and_dangles_removed() {
     let c2 = t.tip("range:a.md@text:0-1");
     assert_ne!(c1, c2);
     // Reset to c1.
-    t.run(&["commit", "reset", "a.md", "--reason", &c1]);
+    t.run(&["commit", "reset", "a.md", "--reset-target", &c1]);
     // The new tip is the reset marker; its previous is c1 — c2 is unreachable.
     let tip = t.tip("range:a.md@text:0-1");
     assert_eq!(t.prev(&tip), c1, "reset marker must chain onto landing c1");
@@ -110,7 +110,7 @@ fn reset_moves_tip_to_landing_and_dangles_removed() {
 fn reset_reports_requested_actual_in_json() {
     let t = T::new();
     let c1 = mk_range(&t);
-    let (_, out, _) = t.run(&["commit", "reset", "a.md", "--reason", &c1, "--json"]);
+    let (_, out, _) = t.run(&["commit", "reset", "a.md", "--reset-target", &c1, "--json"]);
     assert!(
         out.contains("\"requested\""),
         "must report requested: {out}"
@@ -130,7 +130,7 @@ fn reset_boundary_warns_and_lands_on_predecessor() {
     t.run(&["commit", "atomic_end", "a.md"]);
     let end = t.tip("file:a.md");
     assert_ne!(begin, end);
-    let (_, out, _) = t.run(&["commit", "reset", "a.md", "--reason", &end, "--json"]);
+    let (_, out, _) = t.run(&["commit", "reset", "a.md", "--reset-target", &end, "--json"]);
     // Boundary reset carries a warning naming the landing.
     assert!(out.contains("warning"), "boundary reset must warn: {out}");
 }
@@ -144,7 +144,7 @@ fn reset_interior_member_refused() {
     t.run(&["commit", "commit", "a.md", "--reason", "inside"]);
     let inside = t.tip("file:a.md");
     // An ordinary commit inside an open block is not a reset target.
-    let (c, out, e) = t.run(&["commit", "reset", "a.md", "--reason", &inside]);
+    let (c, out, e) = t.run(&["commit", "reset", "a.md", "--reset-target", &inside]);
     assert!(
         c != 0 || e.contains("member") || e.contains("Interior") || out.contains("block member"),
         "interior member must refuse: {out} {e}"
@@ -158,7 +158,7 @@ fn new_commit_after_reset_continues_chain() {
     t.run(&[
         "commit", "commit", "a.md", "--id", &c1, "--range", "0-1", "--reason", "c2",
     ]);
-    t.run(&["commit", "reset", "a.md", "--reason", &c1]);
+    t.run(&["commit", "reset", "a.md", "--reset-target", &c1]);
     // A new commit after reset continues from the reset tip.
     let (c, _, _) = t.run(&[
         "commit", "commit", "a.md", "--range", "0-1", "--reason", "fresh",
@@ -207,7 +207,7 @@ fn reset_to_begin_withdraws_link_created_in_segment() {
         })
         .expect("a BEGIN commit exists");
     // Reset b's range to the block BEGIN — removed segment = commit+link+end.
-    let (c, o, e) = t.run(&["commit", "reset", "b.md", "--reason", &begin]);
+    let (c, o, e) = t.run(&["commit", "reset", "b.md", "--reset-target", &begin]);
     assert_eq!(c, 0, "{o} {e}");
     let st2 = t.state();
     // The link created in the removed segment is withdrawn.

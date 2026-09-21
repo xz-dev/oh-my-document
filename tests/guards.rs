@@ -483,7 +483,7 @@ fn adjacent_markers_reset_lands_one_step() {
     // Reset to the END of the block — lands on END's direct predecessor
     // (the last interior/link), one step back, not recursively skipped.
     let end = t.tip("range:a.md@text:0-1");
-    let (c, o, _) = t.run(&["commit", "reset", "a.md", "--reason", &end]);
+    let (c, o, _) = t.run(&["commit", "reset", "a.md", "--reset-target", &end]);
     assert_eq!(c, 0, "{o}");
     // The reset reports requested→actual with the predecessor landing.
     assert!(
@@ -530,7 +530,7 @@ fn reset_interior_of_open_block_refused() {
         })
         .expect("a link commit");
     // Reset to the interior link member → refused (interior not a target).
-    let (c, o, _) = t.run(&["commit", "reset", "b.md", "--reason", &link_commit]);
+    let (c, o, _) = t.run(&["commit", "reset", "b.md", "--reset-target", &link_commit]);
     assert_ne!(c, 0, "interior member reset must fail: {o}");
 }
 
@@ -609,7 +609,7 @@ fn referenced_dangling_commit_retained() {
     let c2 = t.tip("range:a.md@text:0-1");
     // Add a note referencing c2 — it becomes a referenced dangling.
     t.run(&["note", "add", &c2, "--text", "evidence"]);
-    t.run(&["commit", "reset", "a.md", "--reason", &c1]);
+    t.run(&["commit", "reset", "a.md", "--reset-target", &c1]);
     // c2 is dangling but referenced by a note → gc must NOT collect it.
     t.run(&["gc"]);
     assert!(
@@ -754,7 +754,7 @@ fn reset_first_begin_lands_empty() {
             }
         })
         .expect("BEGIN exists");
-    let (c, o, _) = t.run(&["commit", "reset", "b.md", "--reason", &begin]);
+    let (c, o, _) = t.run(&["commit", "reset", "b.md", "--reset-target", &begin]);
     assert_eq!(c, 0, "{o}");
     // actual is empty — landing is the null/empty chain.
     let st = t.state();
@@ -1478,7 +1478,7 @@ fn reset_end_reopens_block() {
     };
     // Reset on END → lands on its direct predecessor, block is open again.
     // (reset target is passed via --reason <commit_id> per the CLI contract.)
-    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reason", &end_tip]);
+    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reset-target", &end_tip]);
     assert_eq!(c, 0, "reset END ok: {o} {e}");
     // The block reopens — a new END can close it again (not a double-close err).
     let (c2, o2, e2) = t.run(&["commit", "end", "a.md"]);
@@ -1688,7 +1688,7 @@ fn file_reset_restores_child_range_tips_e2e() {
     };
     // Advance the range inside a NEW block, then file-reset the END — the
     // child range tip must return to its recorded snapshot, not dangle.
-    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reason", &end_tip]);
+    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reset-target", &end_tip]);
     assert_eq!(c, 0, "file reset ok: {o} {e}");
     // The range tip recorded inside the block is restored to pre-reset tip.
     let range_tip_after = t.tip("range:a.md@text:0-3");
@@ -1714,7 +1714,7 @@ fn reading_dangling_does_not_repair() {
         t.run(&["commit", "end", "a.md"]);
         t.tip("file:a.md")
     };
-    t.run(&["commit", "reset", "a.md", "--reason", &end_tip]);
+    t.run(&["commit", "reset", "a.md", "--reset-target", &end_tip]);
     // m_tip is now dangling. Inspecting it does not re-reach it.
     t.run(&["log", &m_tip]);
     t.run(&["tree"]);
@@ -1768,7 +1768,7 @@ fn file_snapshot_preserves_child_end() {
     };
     // Reset the END → the file snapshot restores the recorded state where
     // the child END still existed — a subsequent END close works again.
-    t.run(&["commit", "reset", "a.md", "--reason", &end_tip]);
+    t.run(&["commit", "reset", "a.md", "--reset-target", &end_tip]);
     let (c, o, e) = t.run(&["commit", "end", "a.md"]);
     assert_eq!(c, 0, "block still closeable after END reset: {o} {e}");
 }
@@ -2181,7 +2181,7 @@ fn reset_to_r0_restores_extent() {
         "commit", "commit", "a.md", "--id", &r0, "--range", "0-10", "--reason", "extend",
     ]);
     // Reset to r0 → the range returns to its 0-5 extent, extension dangles.
-    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reason", &r0]);
+    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reset-target", &r0]);
     assert_eq!(c, 0, "reset to r0: {o} {e}");
     // The tip is a reset MARKER whose previous_id is r0 — the chain landed
     // on r0, and the extension commit is OFF the chain (dangled).
@@ -2274,7 +2274,7 @@ fn file_reset_restores_child_end_closed() {
         t.run(&["commit", "end", "a.md"]);
         t.tip("file:a.md")
     };
-    t.run(&["commit", "reset", "a.md", "--reason", &end]);
+    t.run(&["commit", "reset", "a.md", "--reset-target", &end]);
     // Block stays closed — no dangling open BEGIN.
     let binding = t.state();
     let open = binding.split("[open_blocks]").nth(1).unwrap_or("");
@@ -2304,7 +2304,7 @@ fn reset_end_landing_and_dangle() {
         t.run(&["commit", "end", "a.md"]);
         t.tip("file:a.md")
     };
-    let (_, o, _) = t.run(&["commit", "reset", "a.md", "--reason", &end, "--json"]);
+    let (_, o, _) = t.run(&["commit", "reset", "a.md", "--reset-target", &end, "--json"]);
     let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
     // actual = END's direct predecessor (the commit before it), not the END.
     let actual = j["data"]["reset"]["actual"]
@@ -2391,7 +2391,14 @@ fn reset_end_lands_predecessor_successors_dangle() {
         t.run(&["commit", "end", "a.md"]);
         t.tip("file:a.md")
     };
-    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reason", &end_tip, "--json"]);
+    let (c, o, e) = t.run(&[
+        "commit",
+        "reset",
+        "a.md",
+        "--reset-target",
+        &end_tip,
+        "--json",
+    ]);
     assert_eq!(c, 0, "reset END: {o} {e}");
     // JSON reports requested/actual — actual is the direct predecessor.
     let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
@@ -2426,7 +2433,7 @@ fn file_reset_restores_child_end_closed_state() {
     t.run(&[
         "commit", "commit", "a.md", "--range", "0-5", "--reason", "adv",
     ]);
-    t.run(&["commit", "reset", "a.md", "--reason", &end_tip]);
+    t.run(&["commit", "reset", "a.md", "--reset-target", &end_tip]);
     // Child range restored to its recorded closed-state tip.
     assert_eq!(
         t.tip("range:a.md@text:0-3"),
@@ -2726,7 +2733,7 @@ fn reset_range_commit_inside_file_block_refused() {
         .unwrap_or_default();
     assert_eq!(member.len(), 64, "range tip id: {member}");
     // OPEN block shape — refused (interior-member error → non-zero exit).
-    let (c1, o1, e1) = t.run(&["commit", "reset", "c.md", "--reason", &member]);
+    let (c1, o1, e1) = t.run(&["commit", "reset", "c.md", "--reset-target", &member]);
     assert_ne!(c1, 0, "open-block member reset refused: {o1}{e1}");
     assert!(
         o1.contains("ordinary block member") || e1.contains("ordinary block member"),
@@ -2734,7 +2741,7 @@ fn reset_range_commit_inside_file_block_refused() {
     );
     // CLOSED block shape — same membership persists after END.
     t.run(&["commit", "end", "c.md"]);
-    let (c2, o2, e2) = t.run(&["commit", "reset", "c.md", "--reason", &member]);
+    let (c2, o2, e2) = t.run(&["commit", "reset", "c.md", "--reset-target", &member]);
     assert_ne!(c2, 0, "closed-block member reset refused: {o2}{e2}");
     assert!(
         o2.contains("ordinary block member") || e2.contains("ordinary block member"),
@@ -2748,7 +2755,7 @@ fn reset_range_commit_inside_file_block_refused() {
         .find(|l| l.trim_start().starts_with("\"file:c.md\" ="))
         .and_then(|l| l.split('"').nth(3).map(String::from))
         .unwrap_or_default();
-    let (c3, o3, _) = t.run(&["commit", "reset", "c.md", "--reason", &ftip]);
+    let (c3, o3, _) = t.run(&["commit", "reset", "c.md", "--reset-target", &ftip]);
     assert_eq!(c3, 0, "out-of-block reset passes: {o3}");
 }
 
@@ -2820,4 +2827,35 @@ fn nonce_suffixed_range_counts_in_coverage() {
         covered > 0,
         "nonce'd range positions counted (covered={covered}): {o}"
     );
+}
+
+// reset takes --target, never a --reason overload (semantic separation).
+#[test]
+fn reset_reason_overload_rejected() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reason", "anything"]);
+    assert_ne!(c, 0, "--reason on reset refused: {o} {e}");
+    assert!(
+        format!("{o}{e}").contains("--reset-target"),
+        "points at --reset-target: {o} {e}"
+    );
+}
+
+// init is not stackable: a second init on a tracked path is refused.
+#[test]
+fn second_init_refused() {
+    let t = T::new();
+    t.write("a.md", "first");
+    t.run(&["init", "a.md"]);
+    let first_tip = t.tip("file:a.md");
+    let (c, o, e) = t.run(&["init", "a.md"]);
+    assert_ne!(c, 0, "second init refused: {o} {e}");
+    assert!(
+        format!("{o}{e}").contains("already tracked"),
+        "diagnostic: {o} {e}"
+    );
+    // No new commit — the tip is unchanged.
+    assert_eq!(t.tip("file:a.md"), first_tip, "no appended init record");
 }

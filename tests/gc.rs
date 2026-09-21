@@ -77,7 +77,7 @@ fn gc_collects_unreferenced_dangling_commit() {
         "commit", "commit", "a.md", "--id", &c1, "--range", "0-1", "--reason", "r2",
     ]);
     let c2 = t.tip("range:a.md@text:0-1");
-    t.run(&["commit", "reset", "a.md", "--reason", &c1]);
+    t.run(&["commit", "reset", "a.md", "--reset-target", &c1]);
     // c2 is dangling (unreferenced). gc collects it.
     assert!(t.commit_exists(&c2), "c2 on disk before gc");
     let (c, out, _) = t.run(&["gc"]);

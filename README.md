@@ -1,80 +1,109 @@
 # oh-my-document（omd）
 
-面向人类与 AI 的、可配置的文档—代码关联跟踪工作流。
+面向人类与 AI 的、可配置的文档—代码关联跟踪工作流。Rust 核心 + CLI。
 
-> **当前状态：设计交接，尚未实现。** 本仓库只包含调研与设计文档，没有可运行的 CLI、Rust crate、已安装的 skills 或已通过的产品测试。核心方向已确认，部分边界行为待规格化。
+> **状态：核心已实现，可用于试用。** 248 个单元/集成测试 + 18 个 BDD 场景绿；`cargo fmt` / `cargo clippy -D warnings` 干净。137 个规格场景全部映射到已执行测试或显式平台记录（见 [spec-traceability.md](spec-traceability.md)）。
 
-## 要解决什么
+## 安装与试用
 
-项目从目标、spec、系统组件图逐步细化到函数实现时，设计依据和实现之间经常失去联系。OMD 用外置标记把内容范围关联起来，并用可执行的规则要求使用者处理变化、说明理由，而不是只在聊天里约定“记得更新文档”。
-
-典型规则包括：
-
-- spec 上连 UML/设计图，下连实现代码。
-- 同一算法在不同目录或项目中的不同语言实现相互关联。
-- 选择 programming-thinking 进行 Lean 程序性证明时，证明范围必须直接关联 UML 源码与实际实现，并按经证明的预构建严格一一对应地翻译代码。
-- 某类文件的受管内容必须被未过期的已确认标记覆盖。
-- 缺少关联可以先提醒，也可以使某个工作流检查失败；使用者可显式跳过或关闭检查用例。
-
-OMD 核心不理解或证明代码与文档的语义等价。人或 AI 负责判断、修改与说明，工具负责确定性跟踪和规则检查。可选 Lean skill 负责明确模型内的证明，不把 link 检查当作语义证明。
-
-## 已确定的基础
-
-- **实现与接口：** Rust 核心、CLI，以及指导 AI 使用工具的 skills；不绑定编辑器或编码 agent。
-- **变化检测：** 内容 hash + Rust 内 Myers 对比；不调用 `git diff`，不依赖 Git 仓库。Git hook 是可选集成。
-- **标记状态：** 空、脏、已确认；只有未过期的已确认标记算覆盖。
-- **来源：** 文本文件、显式原始字节文件、固定命令成功执行后的 stdout。
-- **坐标：** 文本按解码后的 Unicode 字符序号；字节模式按原始字节偏移。
-- **存储：** 权威元数据使用文本；默认项目根 `./.omd/` 或指定外部目录。SQLite 只做用户缓存目录中的可重建索引。
-- **路径：** `OMD_CONFIG_PATH`、`OMD_CACHE_PATH` 优先于 XDG/平台默认值。
-- **管理边界：** 显式 import 才纳管；follow 符号链接；不禁止使用者主动 import `.omd/`。
-- **写入：** 单写者；旧版本 hash 不匹配即报错，不覆盖、不自动合并。
-
-用户已有 spec/绘图工具时沿用。尚未选型时推荐 OpenSpec 与 Mermaid；它们不是 OMD 核心依赖。
-
-## 可选的 programming-thinking skill（已确认契约，尚未实现）
-
-用 Lean 分析已有 UML 细节中的顺序状态机、逻辑链和分支遗漏，形成接近伪代码的预构建与程序性证明，再严格一一对应地翻译为实现。必须同时建立 Lean↔UML 源码、Lean↔实际实现的直接范围 link；缺失任一侧不能称为闭环交付。
-
-本 skill 不用于并发、多线程任务，不把文档转写或可运行示例当成证明，不将 Lean 设为全项目唯一事实源或核心依赖。完整适用条件、证明义务和防止误用的规则见 [programming-thinking 契约](docs/programming-thinking.md)；本次只写入设计文档，不机械复制现有通用 skill。
-
-## 来源引用
-
-以下是已确认的引用形式，不是已经可执行的 OMD 命令：
-
-```text
-proj:A:file_path
-proj:root:file_path
-proj:A:byte::file_path
-command::<executable>::<JSON args 数组>
+```bash
+cargo install --path .   # 或 cargo build --release 后使用 target/release/omd
 ```
 
-`root` 指当前项目，其他名称由当前元数据目录中的 alias 定义。command 参数是固定 JSON 字符串数组，只跟踪 stdout，命令必须正常退出且 exit code 为 0。
+无 Git 仓库要求；每个项目在自己的 `./.omd/` 元数据目录下工作（也可 `--meta <dir>` 或 `OMD_META` 指定）。
+
+### 30 秒上手
+
+```bash
+cd your-project
+
+# 1. 登记来源（文件或命令输出）
+omd init docs/spec.md
+omd init src/main.rs
+
+# 2. 提交要跟踪的内容范围并建立关联
+omd commit commit docs/spec.md --range 8-25 --reason "algorithm A described"
+omd commit commit src/main.rs --range 0-3 \
+    --link-from "docs/spec.md@text:8-25" \
+    --reason "implementation of algorithm A"
+
+# 3. 声明规则：spec 变更必须被 code 覆盖
+omd commit tag docs/spec.md --tag spec
+omd commit tag src/main.rs --tag code
+omd commit scope_adjust src/main.rs --rule "spec->code" --level warn
+
+# 4. 检查关联覆盖率 / 校验内容是否漂移
+omd check     # 规则覆盖率报告（如 spec->code: 80%）
+omd verify    # 内容变化检测：范围被编辑 → dirty，需人工确认
+```
+
+文档改了一个词之后：
+
+```bash
+$ omd verify docs/spec.md
+ok: false | dirty: ["range:docs/spec.md@text:8-25"]   # 变化被确定性定位
+```
+
+处理变化要么修改代码并重新提交，要么 `omd commit commit <path> --id <旧提交> --range <新范围> --reason "<为什么>"` 显式更新关联。
+
+## 核心概念
+
+- **跟踪单位是 range（内容范围），不是文件。** 文本按解码后 Unicode 字符序号（`file.md@text:8-25`），字节模式按原始偏移（`file.bin@byte:0-128`）。
+- **link 连接 range ↔ range**，按 `link_id` 识别；同一对端点可以有多条独立 link（各带理由）。上游变化在下游产生待处理义务（`adapt` 按 link_id + 理由 + 选定变更逐条处理）。
+- **三态标记：** 空 / 脏 / 已确认。只有未过期的已确认算覆盖；跳过（`--skip`）永远不等于已确认。
+- **变化检测 = 内容 hash + Myers diff**，不依赖 Git。commit id 由 `SHA256(salt ‖ frame(prev) ‖ frame(timestamp) ‖ frame(content) ‖ frame(JCS payload))` 派生，TOML 字段顺序不影响 id。
+- **ATOMIC 块：** `commit begin` / `commit end` 之间的一组提交作为一个单元；reset 只能落在 BEGIN/END 边界（占位标记回退一步到直接前驱），不能 reset 块内成员。
+- **check ≠ verify：** check 报告关联覆盖率（规则驱动），verify 报告内容是否与记录一致。两者独立失败，互不代替。
+
+## 主要命令
+
+| 命令 | 用途 |
+|---|---|
+| `omd init <path>` | 登记来源（不可叠加：已跟踪路径再 init 报错；`--source-ref 'command::<exe>::<JSON argv>'` 跟踪命令 stdout；`--encoding` 指定文本编码） |
+| `omd commit commit <path> --range S-E --reason R` | 提交范围（`--id` 追加到已有链 = 修改范围；无 `--id` = 同坐标新独立对象） |
+| `omd commit begin/end <path>` | ATOMIC 块边界 |
+| `omd commit reset <path> --reset-target <commit-id>` | 重置到指定提交（边界标记回退一步；被移除段内的 link 一并撤回） |
+| `omd commit adapt <path> --link-id L --changes c1 --reason R` | 处理 link 上的待处理变更（`--stop` 清全部） |
+| `omd commit tag/rule/skip` | 规则工作流：标签、`A->B` 覆盖规则（`--level warn/fail`）、显式跳过 |
+| `omd verify [path]` / `omd check` | 内容校验 / 覆盖率检查（`--run-command=true` 允许 verify 重跑命令源并比对 stdout） |
+| `omd log/tree/list` | 链历史、层级树（`--level file`）、状态查询（`--dangling`） |
+| `omd note add/patch/list <commit-id>` | 提交上的 append-only 注记（修订按发布序，不按时钟） |
+| `omd replace <commit-id> --source <ref>` | 仅在字节完全一致时把获取来源重绑到新路径（id/links/notes 不变） |
+| `omd register` / `commit ... --xlink-to peer:<store>:<file>@<range>` | 跨仓库关联（各自元数据独立，绝不合并；inbound 凭据先于对方发布持久化） |
+| `omd gc` / `omd reindex` | 收集悬空记录（保护闭包内保留）/ 重建派生索引 |
+| `omd import/remove/delete/rename/copy` | 统计范围与生命周期（均为 commit 的别名族） |
+
+所有命令支持 `--json`（stdout JSON 信封，stderr 独立诊断），退出码：0 成功 / 1 一般错误 / 2 用法 / 3 版本冲突 / 4 锁冲突 / 5 执行失败。
+
+## 并发与安全
+
+单写者锁（`write.lock`）；并发更新直接拒绝，不合并、不覆盖。`state.toml` 经 tmp→fsync→rename→dirsync 原子发布。读取方在打开时校验 tip 完整性——被篡改的元数据报错而非静默解析。命令源默认不执行：只有显式 `--run-command`（或配置）才重跑命令，一次调用的许可不带入下一次。
+
+## git:: 来源（可选）
+
+`--source-ref 'git::<40-hex-commit>:<path>'` 通过只读 Git plumbing（`cat-file`）读取历史 blob：精确 40-hex、原始内容、有界符号链接解析，永不回退到工作区当前内容。工作区文件跟踪与 Git 仓库状态完全无关。
+
+## 未实现 / 明确延后
+
+- 远程身份子系统（URL↔声明映射、SSH/HTTPS 等价性）— 规格可选项，未设计
+- 命令捕获期间的存储故障注入测试（无进程内故障接缝）
+- 跨平台持久化验证（当前仅 Linux 单机验证；`fsync`/`rename` 语义在其他平台未测）
+- 可选 programming-thinking（Lean）产品 skill — 契约已确认，另行授权后实现
 
 ## 文档导航
 
-| 文档 | 用途与状态 |
+| 文档 | 用途 |
 | --- | --- |
-| [交接说明](docs/handoff.md) | 新工具接手入口、已完成与未完成工作 |
-| [AGENTS.md](AGENTS.md) | AI 工具的阅读顺序与协作约定，不是产品 skill |
+| [AGENTS.md](AGENTS.md) | AI 工具的阅读顺序与协作约定 |
+| [spec-traceability.md](spec-traceability.md) | 137 规格场景 ↔ 已执行测试的逐行台账 |
 | [需求基线](docs/requirements.md) | 用户确认的决定；R 编号用于追溯 |
-| [programming-thinking 契约](docs/programming-thinking.md) | 可选 Lean skill 的适用范围、证明义务、严格翻译与双侧 link；尚未实现 |
-| [来源与坐标](docs/source-model.md) | 已确认引用形式、编码、command 契约及解析边界 |
-| [存储与路径](docs/storage.md) | 已确认路径规则与明确标注的候选布局 |
-| [候选架构](docs/architecture.md) | 模块职责与流程建议，不是冻结实现 |
+| [来源与坐标](docs/source-model.md) | 引用形式、编码、command 契约 |
+| [存储与路径](docs/storage.md) | 路径规则与布局 |
+| [候选架构](docs/architecture.md) | 模块职责 |
 | [待决事项](docs/open-questions.md) | Q 编号；不得由实现悄悄拍板 |
-| [验收场景](docs/acceptance.md) | 从需求导出的测试场景草案，尚未执行 |
-| [调研依据](docs/research.md) | 外部资料、能力边界与引用索引 |
-
-## 阅读约定
-
-- **已确认：** 用户明确确定的产品要求。
-- **建议/候选：** 调研阶段的工程建议，尚未授权为最终规格。
-- **待决：** 影响实现行为，必须在相关实现前形成明确决定。
-- **验收草案：** 预期行为示例，不代表测试已编写或通过。
-
-无需重新讨论已确认的 Rust、Git 独立性、三态或参数静态化。下一步是补齐边界规格，而不是继续扩大功能。
+| [验收场景](docs/acceptance.md) | 测试场景 |
+| [handoff](docs/handoff.md) | 交接说明 |
 
 ## 许可证
 
-许可证尚未由项目所有者选择。本次交接没有擅自添加许可证，也不因仓库公开而宣称已授予某种开源许可。
+尚未选择。仓库公开不等于已授予任何开源许可。
