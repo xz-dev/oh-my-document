@@ -1,6 +1,7 @@
 //! 13.x traceability sweep — real per-clause checks over existing behavior.
 //! Each test names its spec scenario in a comment.
 
+mod common;
 use std::process::Command;
 static TDIR_UNIQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -17,6 +18,34 @@ fn omd() -> std::path::PathBuf {
 
 struct T(std::path::PathBuf);
 impl T {
+    fn state(&self) -> String {
+        std::fs::read_to_string(self.0.join(".omd/state.toml")).unwrap_or_default()
+    }
+    fn file_node(&self, path: &str) -> String {
+        let value: toml::Value = toml::from_str(&self.state()).unwrap();
+        value["locations"]
+            .as_table()
+            .and_then(|locations| {
+                locations.iter().find_map(|(node, current)| {
+                    (current.as_str() == Some(path)).then(|| node.clone())
+                })
+            })
+            .unwrap_or_default()
+    }
+    /// The N-th range node key mounted under the file object at `file`.
+    fn range_node(&self, file: &str, n: usize) -> String {
+        let s = self.state();
+        let file_node = self.file_node(file);
+        s.lines()
+            .find(|l| l.contains(&format!("\"{file_node}\"")) && l.contains('['))
+            .and_then(|l| {
+                l.match_indices("range:").nth(n).and_then(|(i, _)| {
+                    let r = &l[i..];
+                    r.find('"').map(|e| r[..e].to_string())
+                })
+            })
+            .unwrap_or_default()
+    }
     fn new() -> Self {
         let r = std::env::temp_dir().join(format!(
             "omd-tr-{}-{}",
@@ -30,8 +59,19 @@ impl T {
         let o = Command::new(omd())
             .arg("--meta")
             .arg(self.0.join(".omd"))
-            .args(args)
+            .args(common::with_expected(
+                &omd(),
+                &self.0,
+                args,
+                Some(&self.0.join(".omd")),
+                Some(&self.0.join("home")),
+                Some(&self.0.join("config")),
+                Some(&self.0.join("cache")),
+            ))
             .current_dir(&self.0)
+            .env("HOME", self.0.join("home"))
+            .env("OMD_CONFIG_PATH", self.0.join("config"))
+            .env("OMD_CACHE_PATH", self.0.join("cache"))
             .output()
             .unwrap();
         (
@@ -44,9 +84,70 @@ impl T {
         std::fs::write(self.0.join(p), c).unwrap();
     }
     fn tip(&self, node: &str) -> String {
-        std::fs::read_to_string(self.0.join(".omd/state.toml"))
-            .unwrap_or_default()
-            .lines()
+        let s = self.state();
+        // `range:<file>@<span>` (test spelling) → the mounted range node
+        // under `file:<file>` whose tip commit payload records the span.
+        // Identity is the chain root — the span only selects *which* chain.
+        if let Some(rest) = node.strip_prefix("range:") {
+            if let Some(at) = rest.find('@') {
+                let path = &rest[..at];
+                let want = rest[at + 1..]
+                    .strip_prefix("text:")
+                    .unwrap_or(&rest[at + 1..]);
+                let file_node = self.file_node(path);
+                let mut children: Vec<String> = Vec::new();
+                for l in s.lines() {
+                    if l.contains(&format!("\"{file_node}\"")) && l.contains('[') {
+                        for m in l.match_indices("range:") {
+                            let r = &l[m.0..];
+                            if let Some(e) = r.find('"') {
+                                children.push(r[..e].to_string());
+                            }
+                        }
+                    }
+                }
+                for c in &children {
+                    let tip_id = s
+                        .lines()
+                        .find(|x| x.starts_with(&format!("\"{c}\"")) && x.contains('='))
+                        .and_then(|x| x.split('=').nth(1))
+                        .map(|v| v.trim().trim_matches('"').to_string())
+                        .unwrap_or_default();
+                    if tip_id.is_empty() {
+                        continue;
+                    }
+                    let cm =
+                        std::fs::read_to_string(self.0.join(format!(".omd/commits/{tip_id}.toml")))
+                            .unwrap_or_default();
+                    let span = cm
+                        .lines()
+                        .find(|x| x.contains("range"))
+                        .and_then(|x| x.split('"').nth(1))
+                        .unwrap_or("")
+                        .to_string();
+                    let span_norm = span.strip_prefix("text:").unwrap_or(&span).to_string();
+                    if span_norm == want {
+                        return tip_id;
+                    }
+                }
+                // No span match — the chain's extent moved; take the first.
+                if let Some(c) = children.first() {
+                    return s
+                        .lines()
+                        .find(|x| x.starts_with(&format!("\"{c}\"")) && x.contains('='))
+                        .and_then(|x| x.split('=').nth(1))
+                        .map(|v| v.trim().trim_matches('"').to_string())
+                        .unwrap_or_default();
+                }
+                return String::new();
+            }
+        }
+        let node = node
+            .strip_prefix("file:")
+            .map(|path| self.file_node(path))
+            .filter(|node| !node.is_empty())
+            .unwrap_or_else(|| node.to_string());
+        s.lines()
             .find(|l| l.contains(&format!("\"{node}\"")) && l.contains('='))
             .and_then(|l| {
                 l.split('=')
@@ -72,7 +173,15 @@ fn no_reason_records_none() {
     let t = T::new();
     t.write("a.md", "x");
     t.run(&["init", "a.md"]);
-    let (c, o, e) = t.run(&["commit", "commit", "a.md", "--range", "0-1", "--no-reason"]);
+    let (c, o, e) = t.run(&[
+        "commit",
+        "commit",
+        "a.md",
+        "--range",
+        "0",
+        "1",
+        "--no--reason",
+    ]);
     assert_eq!(c, 0, "{o} {e}");
     let tip = t.tip("range:a.md@text:0-1");
     let txt = std::fs::read_to_string(t.0.join(format!(".omd/commits/{tip}.toml"))).unwrap();
@@ -90,7 +199,7 @@ fn in_range_edit_dirties_the_range() {
     t.write("a.md", "line1\n");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-6", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "6", "--reason", "r",
     ]);
     // Edit inside the committed range (0-6 covers 'line1').
     t.write("a.md", "lineX\n");
@@ -112,11 +221,11 @@ fn dangling_commit_still_inspectable() {
     t.write("a.md", "a");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "r1",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "r1",
     ]);
     let c1 = t.tip("range:a.md@text:0-1");
     t.run(&[
-        "commit", "commit", "a.md", "--id", &c1, "--range", "0-1", "--reason", "r2",
+        "commit", "commit", "a.md", "--id", &c1, "--range", "0", "1", "--reason", "r2",
     ]);
     t.run(&["commit", "reset", "a.md", "--reset-target", &c1]);
     // c2's file is gone after reset? No — reset moves tip, c2 is dangling.
@@ -225,7 +334,7 @@ fn no_reason_does_not_clear_link_pending() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "ra",
     ]);
     // link b's range from a's range.
     let la = t.tip("range:a.md@text:0-1");
@@ -236,7 +345,7 @@ fn no_reason_does_not_clear_link_pending() {
         "commit",
         "b.md",
         "--link-from",
-        "a.md@text:0-1",
+        &t.range_node("a.md", 0),
         "--reason",
         "lb",
     ]);
@@ -251,8 +360,9 @@ fn no_reason_does_not_clear_link_pending() {
         "--id",
         &t.tip("range:a.md@text:0-1"),
         "--range",
-        "0-1",
-        "--no-reason",
+        "0",
+        "1",
+        "--no--reason",
     ]);
     let st = std::fs::read_to_string(t.0.join(".omd/state.toml")).unwrap();
     // Pending obligations remain seeded (link_pending non-empty somewhere).
@@ -288,43 +398,50 @@ fn tree_level_file_hides_ranges() {
     t.write("a.md", "x");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "r",
     ]);
     let (_, o, _) = t.run(&["tree", "--level", "file"]);
-    // No range: children under file node.
-    assert!(!o.contains("range:a.md"), "file-level hides ranges: {o}");
+    // No range children at file level — range nodes are `range:<root-id>`.
+    assert!(!o.contains("range:"), "file-level hides ranges: {o}");
     let (_, ofull, _) = t.run(&["tree"]);
-    assert!(
-        ofull.contains("range:a.md"),
-        "full tree shows ranges: {ofull}"
-    );
+    assert!(ofull.contains("range:"), "full tree shows ranges: {ofull}");
 }
 
-// 13.5/9.2: `--id` names a commit in an existing range chain and resolves
-// to that chain — a non-tip member id resolves by walking the chain to its
-// node, then appends at the tip (commit to the chain, not a fork).
+// 13.5/9.2 + structured-tracking-references: `--id` names a commit in an
+// existing range chain AND asserts it is the current tip — an interior
+// (stale) commit id is a version conflict (exit 3), never a silent rebase
+// onto the tip. Passing the current tip commits to the chain, not a fork.
 #[test]
 fn id_to_interior_range_commit_resolves_to_chain() {
     let t = T::new();
     t.write("a.md", "a");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "r1",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "r1",
     ]);
     let c1 = t.tip("range:a.md@text:0-1");
     t.run(&[
-        "commit", "commit", "a.md", "--id", &c1, "--range", "0-1", "--reason", "r2",
+        "commit", "commit", "a.md", "--id", &c1, "--range", "0", "1", "--reason", "r2",
     ]);
-    // c1 is non-tip. --id c1 resolves to the same chain — the new commit
-    // lands on the tip, not a detached fork.
+    let tip1 = t.tip("range:a.md@text:0-1");
+    // c1 is now interior/stale — rejected as a version conflict, no write.
     let (c, o, _) = t.run(&[
-        "commit", "commit", "a.md", "--id", &c1, "--range", "0-1", "--reason", "r3",
+        "commit", "commit", "a.md", "--id", &c1, "--range", "0", "1", "--reason", "r3",
     ]);
-    assert_eq!(c, 0, "--id resolves to chain: {o}");
+    assert_eq!(c, 3, "stale --id is a version conflict, not a rebase: {o}");
+    assert_eq!(t.tip("range:a.md@text:0-1"), tip1, "tip unchanged");
+    // The CURRENT tip still advances the same chain — commit to the chain,
+    // not a detached fork.
+    let (c, o, _) = t.run(&[
+        "commit", "commit", "a.md", "--id", &tip1, "--range", "0", "1", "--reason", "r3",
+    ]);
+    assert_eq!(c, 0, "--id current tip commits to the chain: {o}");
     let tip_after = t.tip("range:a.md@text:0-1");
-    // The chain advanced — the new tip's previous_id is the old tip.
     let txt = std::fs::read_to_string(t.0.join(format!(".omd/commits/{tip_after}.toml"))).unwrap();
-    assert!(!tip_after.is_empty(), "tip resolved: {txt}");
+    assert!(
+        !tip_after.is_empty() && tip_after != tip1,
+        "tip advanced: {txt}"
+    );
 }
 
 // 13.2: a second `commit tag` on the same name reports the tag's CURRENT
@@ -361,11 +478,12 @@ fn meta_discovery_from_subdirectory() {
         .output()
         .unwrap();
     let s = String::from_utf8_lossy(&o.stdout);
-    assert!(s.contains("file:a.md"), "ancestor .omd discovered: {s}");
+    let file_node = t.file_node("a.md");
+    assert!(s.contains(&file_node), "ancestor .omd discovered: {s}");
 }
 
 #[test]
-fn omd_meta_env_overrides() {
+fn omd_meta_env_overrides_without_implicit_creation() {
     let t = T::new();
     let store = t.0.join("custom-store");
     let o = Command::new(omd())
@@ -374,7 +492,42 @@ fn omd_meta_env_overrides() {
         .current_dir(&t.0)
         .output()
         .unwrap();
-    // A fresh OMD_META dir gets initialized and reports ok.
-    let s = String::from_utf8_lossy(&o.stdout);
-    assert!(s.contains("ok") || store.exists(), "OMD_META honored: {s}");
+    assert_eq!(o.status.code(), Some(2));
+    assert!(!store.exists(), "non-init command must not create OMD_META");
+}
+
+// 5.1: a path containing characters that collide with the OLD coordinate
+// key grammar (`@`, `#`, `%`, space) must round-trip — the identity is the
+// chain root, so a path that would break `file@span` parsing is now safe.
+#[test]
+fn special_char_path_roundtrip() {
+    let t = T::new();
+    let f = "we@ird #1%.md";
+    t.write(f, "0123456789");
+    t.write("b.md", "bbb");
+    t.run(&["init", f]);
+    t.run(&["init", "b.md"]);
+    let (c, o, e) = t.run(&["commit", "commit", f, "--range", "0", "3", "--reason", "r"]);
+    assert_eq!(c, 0, "range on special-char path: {o} {e}");
+    let rn = t.range_node(f, 0);
+    assert!(rn.starts_with("range:"), "range node created: {rn}");
+    // Link to it from b's range — endpoints name objects, not coordinates.
+    t.run(&[
+        "commit", "commit", "b.md", "--range", "0", "3", "--reason", "rb",
+    ]);
+    let rnb = t.range_node("b.md", 0);
+    let (c, o, e) = t.run(&[
+        "commit", "link", "b.md", "--source", &rnb, "--target", &rn, "--reason", "L",
+    ]);
+    assert_eq!(c, 0, "link to special-char range: {o} {e}");
+    // Rename keeps identity: same range id remounts under the new file key.
+    let (c, _o, e) = t.run(&["rename", f, "renamed.md"]);
+    assert_eq!(c, 0, "rename: {e}");
+    let s = std::fs::read_to_string(t.0.join(".omd/state.toml")).unwrap_or_default();
+    assert!(s.contains(&rn), "range id survives rename: {s}");
+    let renamed = t.file_node("renamed.md");
+    assert!(
+        !renamed.is_empty() && s.contains(&renamed),
+        "file remounted: {s}"
+    );
 }

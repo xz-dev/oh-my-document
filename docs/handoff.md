@@ -1,64 +1,98 @@
-# 设计调研交接
+# 实施交接
 
-> **状态更新（2026-09-18）：** 设计审阅已完成。所有实现级决定（D-01 至 D-21）与工程默认（ED-01 至 ED-19）已记录在 [openspec/changes/define-tracking-contracts](../openspec/changes/define-tracking-contracts/)（proposal.md + design.md）。端到端生命周期已按最终模型纸面走查无矛盾。docs/ 原始文档保留为基线与历史参考，实施时以 change 目录两份文件为准。
+## 当前状态
 
-## 本次交付是什么
+仓库已从设计交接进入 Rust 实现阶段：存在 `omd` CLI、权威文本存储、可重建缓存、file/command/git 来源、对象/link/跨 store 生命周期，以及 Rust/CLI/BDD 测试。
 
-本次以项目经理/调研角色收拢 oh-my-document 的交互设计，发布文档到本仓库。项目所有者将切换到自己电脑上的工具继续工作。
+当前活动 change 是 [`separate-range-identity-and-location`](../openspec/changes/separate-range-identity-and-location/)。其规划已完成，独立审查及父侧核对后任务文件为 **23/24**，仅 5.1 保持未勾选。当前实现未发现需继续修复的缺陷；但 5.1 要求的原始失败证据已丢失，**整个 change 的完整验收为 BLOCK（历史证据缺口）**，不宣称 24/24。产品 Rust 代码自 S6 文档收尾起未变。
 
-核心定位与主要契约已经收敛；交付是设计基线，不是可运行产品或完整冻结的技术规格。
+尚未交付：
 
-## 阅读入口
+- 可安装的 OMD 产品 skills；
+- Lean 工程、证明或真实 UML↔Lean↔实现范围 link；
+- 发布版本、hooks、许可证；
+- Windows/macOS 全平台验证；
+- 自动同步/合并多份可写 store。
 
-1. [README](../README.md)：产品概览和文档索引。
-2. [需求基线](requirements.md)：明确确认的 R 条目及被撤回的方向。
-3. [来源与坐标](source-model.md)、[存储与路径](storage.md)：来源语法与持久化分工。
-4. [待决事项](open-questions.md)：相关实现前仍需写清的 Q 条目。
-5. [候选架构](architecture.md)：可改进的工程拆分，不取代用户决定。
-6. [验收场景](acceptance.md)：从确认要求导出的场景草案。
-7. [调研依据](research.md)：外部工具/规范的证据和适用边界。
-8. [programming-thinking 契约](programming-thinking.md)：可选 Lean skill 的适用范围、程序性证明、严格实现翻译与双侧范围 link。
+## 当前接口摘要
 
-AI 工具也可从仓库根的 [AGENTS.md](../AGENTS.md) 开始；该文件整理阅读顺序与已有设计约束，不是 OMD 产品 skill。
+- 范围身份是所选 store 中对象链的首个 commit ID；路径、位置、tip、有效范围版本和来源版本分别表达。
+- 范围输入：独立 `<path>`、`--range <start> <end>`、`--mode text|byte`；续改使用当前 range tip 的 `--id`。
+- 来源输入：`--source-type file|command|git` 与各自具名字段；旧复合来源、URI、`--source-ref`、`--source-json` 和路径拼坐标端点已被取代并拒绝。
+- 本机 alias 映射保存在配置根 `projects.toml`；共享历史不保存个人绝对路径。
+- 写入已有 store/object 前，调用方从 `verify --json` 取得 `data.expected` 并通过 `--expected` 提交。旧依据不自动刷新或重试。
+- JSON schema version 2 分开报告对象、版本、位置、link、诊断和部分发布结果。
 
-## 已完成
+使用入口见双语 README；详细契约见 [来源与坐标](source-model.md)、[存储与路径](storage.md) 和 [任务证据表](../spec-traceability.md)。
 
-- 整理核心工作流、三态、来源、跨项目 alias、存储和配置路径要求。
-- 保留最后一轮决定：command args 为 JSON 字符串数组，内容是 stdout，命令必须 exit 0。
-- 分开用户决定、候选实现与未决边界，保留可追溯编号。
-- 调研 OpenSpec、Mermaid、Git diff/hook、SQLite、文本选择器和跨平台目录资料；只引用与设计有关的能力边界。
-- 编写用于后续实现的验收场景；这些不是已运行测试。
-- 按项目所有者后续明确要求补建仓库 `AGENTS.md`，提供 AI 协作说明，不改变已确认的设计范围。
-- 按后续要求先行记录 programming-thinking 契约（R-24～R-28、S-28～S-37）：限定 UML 细节的顺序状态机/逻辑链证明，排除并发、多线程分析，要求严格对应实现及 Lean↔UML/实际实现的直接 link。没有机械复制通用 skill。
+## 已完成的组件收口
 
-## 未执行
+`PLAN/separate-range-repair.md` 保留 S1–S6 的修复历史。S1–S5 的具名固定检查已由父会话关闭，但这些组件检查不自动等于整个 task/change 通过：
 
-- 未写 Rust 产品代码、CLI、产品 skills 或 hook。
-- 未初始化 OpenSpec，未生成运行配置或真实 `.omd/` 图。
-- 未运行产品测试、构建、性能试验或 CI；没有可据此宣称的通过结果。
-- 未选择具体 Rust 依赖、最终 schema、完整引用文法或发布方式。
-- 未选择许可证。
-- 未交付可安装的 programming-thinking 产品 skill，未创建或运行 Lean 模型/证明，未生成真实双侧 link；本次交付是使用契约和验收草案。
+- S1：链身份、类型/挂载/位置投影、reset/tombstone/GC。
+- S2：本机项目/实例映射、调用方观察凭据、remote identity。
+- S3：peer/inbound 定位、先保护后发布、只读副本与 activate。
+- S4：封闭来源字段、command/Git/file 采集、编码与 replace binding。
+- S5a：结构化多端点、规范化重复预检、有序保护和真实部分发布。
+- S5b：JSON v2、上下文诊断、text/byte 分单位覆盖和未知分母。
+- S6 bootstrap：真正新项目仅含默认 `.omd/omd.toml` 时的配置先行 init。
 
+最新 bootstrap 父门禁位于 `/home/xz/.cache/omd-parent-bootstrap-review-76limdcp/`：focused 6、full 383/29 groups、fmt/build/OpenSpec/diff-check 均 exit 0。它还独立证明 windows-1252、原始 `80 0d 0a`、完整 hash/长度、配置字节不变与 verify 成功。绿色总数本身不算任务证明；具体任务映射见 traceability 表。
 
-## 交付中的状态标签
+S5b 固定结果位于 `/home/xz/.cache/omd-parent-s5b-fix-review-hy0oehr4/`，S5a 位于 `/home/xz/.cache/omd-parent-s5a-fix-review-uyomafgs/`。真实晚期 I/O 的精确成功 commit/link/protection 集合、失败 link 未发布、开放边界和 operation ID 已分别核对。
 
-“已确认”来自项目所有者明确选择；“建议/候选”是调研阶段设计意见；“待决”是尚缺行为定义的事项。验收场景是设计预期，不应作为实现完成证明。
+## S6 文档与 README 回放
 
-少数条目是确认契约的直接推论，例如命令 exit 0 但无 stdout 可以形成空内容；此类解释没有拓展成新的成功退出码或动态命令能力。
+双语 README 各自包含一段可执行的独立流程：
 
-## 接续工作的建议边界
+1. 初始化两个文件；
+2. 每次写入前获取新的 caller evidence；
+3. 从 JSON 读取真实 range ID；
+4. 用该 ID 建 link；
+5. 记录 rename 并移动工作文件；
+6. 查询当前对象/link；
+7. 修改需求并验证 dirty；
+8. 执行 check。
 
-后续工作的最短路径是把 Q 条目与对应接口/测试一起规格化，而非重新发散产品。尤其是范围迁移、关联脏传播、目录 import 的持续性与 command 执行时机，不能让实现偶然决定用户可见行为。
+S6 回放必须在不同的 HOME/`OMD_CONFIG_PATH`/`OMD_CACHE_PATH` fixture 中运行，并保存命令、退出码、返回 ID 和断言。README 只使用实际返回 ID，不把示例占位符当成提交参数。
 
-本次没有授权本调研工具继续实现。选择实现顺序、初始化工程和落地测试属于项目所有者在本机的新工作阶段。
+## 证据边界
 
-## 本次文档核对
+### stale 负例与 fresh 正例分开
 
-已完成本地文档核对：相对链接存在、R/Q 编号引用一致、确认需求均有验收场景引用、示例 JSON argv 可解析、引用索引可验证，以及公开仓库内容的凭据/机器路径模式检查。Git 提交前另检查 whitespace diff。
+- 永久测试 `observation_context::observed_existing_update_succeeds_and_stale_publication_fails_without_mutation` 先用 fresh evidence 成功发布，再用同一旧 evidence 得到 exit 3，并断言 metadata 字节不变。
+- 来源在观察后改变的负例由 `file_change_after_observation_refuses_write_and_keeps_history`、`missing_source_observation_is_version_conflict` 等测试证明。
+- 新鲜观察到的新内容成功发布由 `successful_changed_command_observation_commits_exact_bytes_without_rerun`、`changed_file_observation_reuses_exact_acquired_version_despite_unrelated_failure` 等测试证明。
 
-这些检查只验证交接材料的结构与一致性，不代表产品场景执行通过，也不替代后续语义评审或安全测试。
+历史 handoff 曾提到 `abcd -> abXYcd` 探针，但旧 `/tmp` 脚本/基线已丢失，无法确定其精确脚本与行号。该历史负例保留为未恢复的 provenance 限制，不计入通过证据，也不被新的 fresh 正例重命名或替代。
 
-## 公开仓库卫生
+### `version record missing` 的正负证据分开
 
-没有上传原始聊天、个人配置、私有工作信息、访问凭据、机器绝对路径或浏览器缓存。调研来源索引保留公开 URL 和检索记录；不把上游全文或图片复制为本项目原创资料。
+- 正例：`guards::effective_range_body_survives_link_end_and_two_renames` 证明 link/END/两次 rename 后仍用有效范围正文和来源版本，check/verify 成功。
+- 负例：`guards::missing_effective_source_version_stays_negative` 实际删除必要 version 记录，verify exit 1 且仍报告 `version record missing`。
+
+因此修复的是“结构 marker/link 不应伪造缺版本”；真正缺版本仍失败。OMD link 不证明语义等价。
+
+### 部分发布事实
+
+- 预检失败、stale、错误类型和锁冲突等路径分别断言零发布。
+- late I/O 发生在部分成员已公开之后时，不承诺整体回滚。`exact-partial.json` 记录三个成功 commit、一个 link、一个 protection、精确开放边界和 operation ID。
+- 失败 creator 的物理文件可能存在但未被 retained/published 选择；这不是发布成功，也不要求本次文档任务增加物理清理策略。
+- 共享登记与本机配置不是跨文件系统分布式事务；报告必须区分共享权威和本机映射各自的实际发布结果。
+
+## 剩余限制
+
+- 旧 `/tmp` 修复前快照和若干原探针来源不可恢复；当前稳定树可用于精确 S6 差异，但不能声称恢复旧字节基线。
+- 特殊字符行为有当前黑盒回归；原始 pre-fix `we@ird` 失败 artifact 不再可读，不能作为红绿 provenance。
+- Windows 路径、argv 和持久化细节，以及 macOS 平台行为未由当前 Linux 门禁证明。
+- 真正进程死亡/断电的全平台恢复没有端到端故障注入证明；现有 staged/post-rename/late-I/O 测试覆盖明确可注入边界。
+- 产品 skills 与 Lean 证明未交付；README/文档不能宣称它们完成。
+- 未进行 Git commit、push、release 或 OpenSpec archive。
+
+## 最终审查与停止原因
+
+本轮修复周期已消耗两轮审查：Codex 实际检查后因额度耗尽未出报告；Kimi K3 完成第 2 轮（workflow `8fb62d4e-c3da-413c-bdfc-72259d660b9f`）。其建议实现 OK、证据/合并 OK with notes，未发现新的必要修复。父侧接受当前行为结论，但不豁免 5.1 的历史 RED 要求，因此完整交付仍 BLOCK。
+
+父侧复核并纠正报告口径：383 项 Rust 测试（29 result groups），另有 18 个 BDD scenarios / 79 steps，不能加成 480 项独立测试；README 所引 ID 在 S6 的两份 `evidence-summary.json` 中仍可核实，父侧另一次回放 ID 不同不构成证据丢失。
+
+停止原因：只剩不能靠当前代码重跑补回的历史证据，以及已说明的可选/平台限制。不开第 3 轮、不制造新修复、不归档或发布。详见 [24 项任务证据表](../spec-traceability.md)。

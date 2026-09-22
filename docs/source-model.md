@@ -1,94 +1,121 @@
-# 来源引用、内容和坐标
+# 来源、内容与坐标
 
-本文件细化 [需求基线](requirements.md) R-08 至 R-15。引用形式和内容契约已确认；没有冻结完整解析文法、CLI 子命令或配置 schema。
+本文件记录 `separate-range-identity-and-location` 后的当前接口。`proj:...`、`command::...`、`git::...`、`--source-ref`、`--source-json` 和 `path@span` 是已被取代或明确拒绝的历史形式，不是使用说明。
 
-## 1. 引用形式
+## 1. 对象、位置和版本分开
 
-| 形式 | 内容来源 | 范围坐标 |
-| --- | --- | --- |
-| `proj:A:file_path` | alias A 下的文件 | 解码后的文本字符 |
-| `proj:root:file_path` | 当前项目文件 | 解码后的文本字符 |
-| `proj:A:byte::file_path` | alias A 下的原始文件字节 | 字节偏移 |
-| `command::<executable>::<JSON args 数组>` | 成功命令的 stdout | 输出模式的表达方式待 Q-05 确定 |
+| 概念 | 当前表达 |
+| --- | --- |
+| 对象身份 | 所选 store 中同对象链的首个 commit ID |
+| 当前状态 | 当前 tip commit ID |
+| 有效范围正文 | effective range commit ID |
+| 完整来源依据 | source version ID |
+| 位置 | 所属文件、项目相对路径、`mode`、`start`、`end` |
+| 关系实例 | 独立 link ID；端点对象与选定版本另存 |
 
-文件引用与起止范围是两个概念；本次没有擅自发明把行列塞进引用字符串的语法。
-
-`root` 是当前项目的引用名。“current”在讨论中是含义说明，未决定另加 `proj:current:` 语法。
-
-### alias
-
-一个 `.omd/` 或外置元数据目录可以同时组织当前项目与外部项目的关系。A 的来源可使用讨论中的标识 `git:github.com/someprojectpath`。
-
-这不是已验证的远程地址，也不是 clone 授权。物理路径映射、可选获取功能、当前内容/固定快照选择，以及不同存储间的反向查询发现范围见 Q-03。
-
-### 解析不能靠任意切割
-
-以下是工程待补规则，不是新功能：
-
-- `::` 可能出现在 JSON 字符串参数中，解析必须保留数组整体。
-- 文件路径可能包含冒号；Windows 程序路径可能含盘符和空格。
-- `byte::` 保留前缀与真实同名路径冲突时如何转义，要写入文法。
-- root/alias 保留名、路径边界及大小写需要明确，不能靠 OS 偶然行为决定。
-- 示例以一个完整引用字符串展示；在 bash/PowerShell 中传给未来 CLI 时，外层 shell 引号是另一层问题。
-
-## 2. 文本与字节
-
-### 已确认
-
-文本按指定编码解码后，以 Unicode 字符序号定位。默认 UTF-8，可在项目 TOML/全局配置设置默认编码，使用者也可明确指定其他编码。
-
-byte 模式按原始字节偏移，不尝试解码；文本文件也可以选择 byte 模式。文本的非空白覆盖规则不能直接套成“忽略二进制中的空白字节”。
-
-### 待规格化
-
-Q-07：行列从零还是从一开始、结束点包含还是排除、CRLF、tab、BOM、解码错误处理及内部原始字节映射。
-
-建议解码失败明确报错，不用替换字符悄悄改坐标；该建议不是额外的字符编码自动检测需求。不承诺字形簇计数或显示宽度计数。
-
-## 3. command
-
-以下仅展示引用语法，不执行命令，也不代表未来 CLI 已存在：
+范围创建使用：
 
 ```text
-command::bash::["-c", "printf '%s' 'hello'"]
-command::powershell.exe::["-NoProfile", "-Command", "Write-Output 'hello'"]
+omd commit commit <path> --range <start> <end> --mode text|byte ...
 ```
 
-### 已确认契约
+新范围未指定 `--id` 时创建独立对象；续改必须以当前有效 range tip 作为 `--id`。相同坐标和重叠坐标可以对应多个独立链。路径、坐标、当前 tip 和新增 UUID 都不替代链根身份。
 
-- executable 固定，args 是 JSON 字符串数组，可为空数组。
-- 参数硬编码，OMD 不提供变量模板、动态拼接或嵌套命令系统。
-- stdout 是跟踪内容；stderr 与退出状态独立用于诊断。
-- 只有正常退出且 exit code 为 0 的完整 stdout 才是成功内容。
-- 非零退出、启动失败、异常终止都不是成功；不能将部分输出确认为新基线。
-- exit 0 且 stdout 为空是合法空内容。
-- exit 0 且 stderr 非空不单独判失败。
-- 采集成功不自动把标记改成已确认。
+本地 link 端点使用 commit ID；跨 store 端点每项同时给出 alias 与 commit ID：
 
-### 实现建议，不增加动态能力
+```text
+--link-from <commit>
+--link-to <commit>
+--link-from-store <alias> <commit>
+--link-to-store <alias> <commit>
+```
 
-使用 JSON 解析器读取 `Vec<String>` 语义的参数。不要 eval，不把 argv 再拼接成 shell 字符串；顺序、空参数和参数内空格需要保留。不合法 JSON 或非字符串元素在启动前报错。
+完整 ID 或所选 store 内唯一前缀先解析为确切记录，再确定对象链根。错误 store、歧义前缀、缺失前驱、错误对象类型、旧 tip 或必要 dangling 依据都不得按路径、坐标或最新 tip 补齐。
 
-直接启动指定程序。若用户明确选择 bash、cmd 或 powershell.exe，则该程序按自己的规则解释参数；OMD 不再添加一层隐式 shell。不同 OS 的 argv 传递差异由实现测试覆盖。
+## 2. 文本与字节坐标
 
-固定参数不保证外部输出确定，也不保证无副作用。时间、网络、环境与程序内部逻辑可能改变结果。OMD 的确定性指：对于相同内容快照、规则及已保存依据，得到相同跟踪结论。
+两种模式均为 0 起点、左闭右开 `[start, end)`，允许空范围，并校验 `0 <= start <= end <= 来源长度`。
 
-### 执行失败与旧内容
+- `text`：按选定编码解码后的 Unicode scalar value 计数，不按 UTF-8 字节、字形簇或显示宽度计数。
+- `byte`：按原始字节偏移计数，不解码；文本空白过滤规则不能套用到 byte 覆盖统计。
+- BOM、CRLF、tab 和全部原始字节保留。BOM 是文本视图中的实际第 0 个字符。
+- 无效文本解码明确失败，不用替换字符静默改变坐标。
 
-失败应保留原基线用于恢复/解释，本次检查报告执行错误；不能把历史快照当作本次采集成功。执行错误属于诊断，不是第四个标记状态。
+编码优先级：本次 `--encoding` → 已记录来源版本 → 精确文件配置 → 项目默认 → 用户默认 → UTF-8。每次实际使用的编码保存在来源版本中，后续配置变化不重新解释历史。
 
-建议每次采集固定为一份不可变观察快照，后续确认校验这份快照和元数据版本，而不是为了确认反复执行有副作用的程序。
+## 3. 封闭来源字段
 
-### 尚未决定
+来源类型使用 `--source-type file|command|git`；新来源省略时默认 `file`。`--mode` 只选择坐标单位，不选择来源类型。对已有对象省略来源字段时，继续使用已登记观察定义，不把 command/git 重新解释为 file。
 
-见 Q-05：命令何时运行、显式注册/允许执行的边界、cwd、stdin、环境、PATH 解析、超时/输出限额、输出编码及命令输出 byte 模式的引用方式。
+### file
 
-读取陌生配置与执行其命令不是同一件事；不能把文档中的示例或本仓库的存在当成任意执行授权。
+- 当前项目目标路径由独立 `<path>` 提供。
+- 恢复内容位于其他项目时，使用 `--source-project <alias>` 与 `--source-path <path>`。
+- `source-project` 默认 `root`；普通 file init 省略 `source-path` 时使用目标路径。
+- 路径保持字面值，不做 URI decode，不按 `@`、`#`、`:`、`%` 或 `::` 切割。
+- 明确属于项目根的绝对输入可转换为项目相对位置；词法逃出根的输入拒绝。
 
-## 4. 来源统一为内容，但不抹掉差异
+### command
 
-候选处理接口：获取来源内容 → 保存本次原始字节快照及摘要 → 按文本/字节方式解释范围 → 与登记依据比较 → 更新派生诊断。
+```text
+--source-type command --executable <program> --args-json '<JSON 字符串数组>'
+```
 
-文件版本可在确认前重新读取校验；命令内容是某次执行的产物，重新运行可能得到另一个结果。两者不能用“再读一下”掩盖这个差别。
+- executable 固定；argv 是硬编码 JSON 字符串数组，可为空。
+- 参数顺序、空字符串、空格和字面 `::` 保持；不 eval、不拼回隐式 shell。用户显式选择 shell 时，由该程序解释参数。
+- cwd 是被跟踪对象所属项目根；stdin 关闭。
+- 只跟踪完整 stdout。只有正常退出且 exit code 0 才成功；stderr 独立诊断。
+- exit 0 + 空 stdout 合法；非零退出后的部分 stdout 不成为新基线。
+- 显式 init/replace 每次只执行一次并复用该观察。普通查询、历史读取和缓存重建不执行命令；verify/check 仍受显式许可控制。
+- 采集成功不自动确认范围，执行失败也不产生第四种标记状态。
 
-Myers 可以对序列作差异定位，但范围迁移、歧义、边界插入和确认传播必须由 Q-01/Q-02 定义；最短差异不等于语义或身份证明。
+### git
+
+```text
+--source-type git --source-project <alias> \
+  --git-commit <完整确切对象 ID> --git-path <该提交内路径>
+```
+
+- `source-project` 默认 `root`；项目通过本机显式映射定位。
+- 只读取本地已有 Git 对象，不接受浮动 ref，不 clone/fetch，不切换工作区，不创建 Git commit/ref。
+- 读取完整原始 blob；不执行 textconv、filter 或 lazy fetch。提交内符号链接按同一提交解析，并检测断链/循环。
+- 历史路径与当前登记路径可以不同。历史内容来自指定 commit/path；当前观察始终读取当前登记文件，包括未提交修改，不读取 HEAD、index 或 Git 状态替代。
+- 可选 remote 名/URL 是独立登记的身份约束，不是来源 URI 或获取指令。匹配按原始值和显式认可映射进行，SSH/HTTPS 不自动等价。
+
+系统在采集或发布前拒绝未知来源类型、缺必填字段和不兼容字段组合；无效 command 字段不得启动进程，无效 Git 字段不得发布记录。
+
+## 4. 观察与恢复 binding
+
+来源版本保存完整原始内容、hash、长度、文本视图和原始 acquisition 描述。当前观察定义与历史恢复 binding 分开：
+
+- `verify` 比较已记录完整旧内容和当前登记来源。
+- `replace <commit-id>` 只修改该 commit 所引用完整 source version 的恢复 binding，并要求 `--expected`。
+- replace 必须取得相同完整内容；相同片段不够。共享同一 version ID 的记录一起报告；内容 hash 相同但 version ID 不同的对象不混改。
+- `gc --content` 只释放不再需要本地副本、且确切替代恢复依据仍可复核的内容。缺对象、损坏 binding、共享版本或 peer 保护都要保留内容。
+
+hash 不能恢复旧内容。删除缓存或没有 Git 时，权威 metadata/content 仍必须足以恢复身份、历史和 Myers 所需基线。
+
+## 5. 调用方观察与执行边界
+
+`verify --json` 返回 `data.expected`。对已有 store/object 的写入必须通过 `--expected <JSON_OR_FILE>` 携带新的调用方依据。凭据绑定 publication、tips、来源版本/hash、项目/store/实例、映射和相关 peer/登记修订。
+
+写锁内重新核对这些依据。来源、映射、登记或 publication 在观察后改变时，返回 typed conflict，不自动获取新凭据后重试。成功的新观察与原始 stale 依据是两件事：新观察可以授权对应新内容；旧依据仍必须失败且零发布。
+
+## 6. JSON v2
+
+结构化输出使用 `{schema_version, ok, data, diagnostics}`。ID 和大整数使用字符串，不适用字段为 `null`。范围查询分别报告：
+
+- `node.kind` 与链根身份；
+- `selected_commit_id`、`tip_commit_id`、`effective_range_commit_id`；
+- `source_version_id` 与完整来源描述；
+- 所属文件、项目相对路径和位置；
+- link ID、创建 commit、对象端点和选定端点版本。
+
+BEGIN/END 是结构标记，不携带新正文时仍可由有效范围版本取得正文依据。只有 BEGIN 时，有效范围版本为空、覆盖为零、闭合检查失败；这不是新标记状态。真正缺失来源版本仍明确失败，不用空正文或最新内容补齐。
+
+## 7. 明确不做
+
+- 不提供 OMD URI 或复合来源表达式语言。
+- 不自动迁移旧 store、双格式读写、覆盖初始化或重写不可变历史。
+- 不自动联网、同步副本、合并冲突或建立分布式锁。
+- 不宣称 Myers 差异等于语义等价，也不判断理由是否合理或文档是否充分。

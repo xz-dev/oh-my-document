@@ -57,6 +57,7 @@ pub enum CommitKind {
 /// `schema`, `kind`, and `content_ref` are injected into the canonical
 /// payload — the top-level fields are projections that MUST agree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Commit {
     /// Derived ID (not stored; recomputed and checked on read).
     #[serde(skip)]
@@ -98,6 +99,8 @@ pub enum CommitError {
     BadSalt,
     #[error("timestamp must be UTC RFC3339 nanoseconds")]
     BadTimestamp,
+    #[error("unsupported commit schema: {0}")]
+    BadSchema(String),
     #[error("payload projection mismatch: {0}")]
     Projection(&'static str),
     #[error("first commit of a node must have empty previous_id")]
@@ -158,6 +161,9 @@ impl Commit {
     pub fn validate(&self, is_first: bool) -> Result<(), CommitError> {
         salt_bytes(&self.salt)?;
         parse_timestamp(&self.timestamp)?;
+        if self.schema != "omd.commit/3" {
+            return Err(CommitError::BadSchema(self.schema.clone()));
+        }
         if is_first && !self.previous_id.is_empty() {
             return Err(CommitError::BadFirstPrevious);
         }
@@ -185,16 +191,20 @@ impl Commit {
     fn allowed_payload_keys(kind: CommitKind) -> BTreeSet<&'static str> {
         use CommitKind::*;
         match kind {
-            Init => ["path"].into_iter().collect(),
+            Init => ["path", "position"].into_iter().collect(),
             Commit | Clean | Unclean | FileVerify => [
                 "path",
-                "range",
+                "position",
                 "reason",
                 "no_reason",
                 "expected",
                 "link_id",
                 "changes",
                 "stop",
+                // Declares the parent node a new range chain mounts under —
+                // the chain-root key cannot encode the parent, so the first
+                // range commit carries it explicitly.
+                "mount",
                 // Stamped when this range commit was created inside its
                 // parent file's open ATOMIC block — records cross-chain
                 // block membership the range's own chain cannot see.
@@ -202,18 +212,21 @@ impl Commit {
             ]
             .into_iter()
             .collect(),
-            AtomicBegin | AtomicEnd => ["path", "chain"].into_iter().collect(),
+            AtomicBegin | AtomicEnd => ["path", "chain", "mount"].into_iter().collect(),
             Link => [
                 "path",
                 "link_id",
                 "source",
+                "source_version",
                 "target",
+                "target_version",
                 "reason",
                 "peer_store_id",
+                "peer_link_id",
             ]
             .into_iter()
             .collect(),
-            Adapt => ["path", "link_id", "changes", "reason", "stop"]
+            Adapt => ["path", "link_id", "changes", "reason", "no_reason", "stop"]
                 .into_iter()
                 .collect(),
             Rename => ["path", "source", "target", "reason"].into_iter().collect(),
@@ -237,7 +250,7 @@ impl Commit {
         match kind {
             Init | Import | Remove => &["path"],
             Link => &["link_id", "source", "target"],
-            Adapt => &["link_id", "changes", "reason"],
+            Adapt => &["link_id", "changes"],
             Rename => &["source", "target"],
             Delete => &["source"],
             Tag => &["path", "tag"],

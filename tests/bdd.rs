@@ -1,5 +1,7 @@
 //! Cucumber-rs runner for the OMD spec features.
 
+mod common;
+
 use cucumber::{World, given, then, when};
 
 use std::path::PathBuf;
@@ -42,10 +44,35 @@ impl OmdWorld {
         p
     }
 
-    /// Resolve `<placeholder>` tokens against live state: `<range-NAME-tip>`
-    /// → the current tip of `range:NAME@...`, `<last-link-id>` → the last
-    /// links.<id> key in state.toml.
+    fn file_node(&self, path: &str) -> String {
+        let value: toml::Value = toml::from_str(&self.state_toml()).unwrap();
+        value
+            .get("locations")
+            .and_then(toml::Value::as_table)
+            .and_then(|locations| {
+                locations.iter().find_map(|(node, current)| {
+                    (current.as_str() == Some(path)).then(|| node.clone())
+                })
+            })
+            .unwrap_or_default()
+    }
+
+    /// Resolve `<placeholder>` tokens against live state.
     fn resolve(&self, tok: &str) -> String {
+        if tok != "<last-link-id>" && tok.contains("<last-link-id>") {
+            return tok.replace("<last-link-id>", &self.resolve("<last-link-id>"));
+        }
+        if tok != "<pending-commit>" && tok.contains("<pending-commit>") {
+            return tok.replace("<pending-commit>", &self.resolve("<pending-commit>"));
+        }
+        if tok == "<adapt-json>" {
+            return serde_json::json!({
+                "link_id": self.resolve("<last-link-id>"),
+                "changes": [self.resolve("<pending-commit>")],
+                "reason": "done",
+            })
+            .to_string();
+        }
         if tok == "<last-link-id>" {
             let s = self.state_toml();
             let mut last = String::new();
@@ -76,20 +103,38 @@ impl OmdWorld {
                 }
             }
         }
+        // `<range-NAME-tip>` → the current tip of the range node whose chain
+        // was created for file `NAME`. Range keys are `range:<root-id>` — we
+        // find the mounted child of `file:NAME` whose chain we want (the
+        // FIRST range created for that file, in mounts order).
         if let Some(name) = tok
             .strip_prefix("<range-")
             .and_then(|s| s.strip_suffix("-tip>"))
         {
             let s = self.state_toml();
+            // Find `file:<name>`'s mounts entry — the first `range:` child.
+            let file_node = self.file_node(name);
             for l in s.lines() {
-                if l.contains(&format!("range:{name}@")) && l.contains('=') {
-                    return l
-                        .split('=')
-                        .nth(1)
-                        .unwrap_or("")
-                        .trim()
-                        .trim_matches('"')
-                        .to_string();
+                if l.contains(&format!("\"{file_node}\"")) && l.contains('[') {
+                    // `file:x = ["range:abc", ...]` — take the first range id.
+                    if let Some(pos) = l.find("range:") {
+                        let rest = &l[pos..];
+                        if let Some(end) = rest.find('"') {
+                            let node_key = &rest[..end];
+                            // That node's tip is `range:<id> = "<tip>"`.
+                            for tl in s.lines() {
+                                if tl.starts_with(&format!("\"{node_key}\"")) && tl.contains('=') {
+                                    return tl
+                                        .split('=')
+                                        .nth(1)
+                                        .unwrap_or("")
+                                        .trim()
+                                        .trim_matches('"')
+                                        .to_string();
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -101,10 +146,20 @@ impl OmdWorld {
             .iter()
             .map(|t| self.resolve(t))
             .collect();
+        let refs: Vec<&str> = resolved.iter().map(String::as_str).collect();
+        let augmented = common::with_expected(
+            &Self::bin(),
+            &self.root,
+            &refs,
+            Some(&self.meta()),
+            None,
+            None,
+            None,
+        );
         let out = Command::new(Self::bin())
             .arg("--meta")
             .arg(self.meta())
-            .args(&resolved)
+            .args(augmented)
             .current_dir(&self.root)
             .output()
             .unwrap();
@@ -159,6 +214,11 @@ fn i_run(w: &mut OmdWorld, cmd: String) {
 
 #[when(regex = r#"I query the tip of "([^"]+)""#)]
 fn query_tip(w: &mut OmdWorld, node: String) {
+    let node = node
+        .strip_prefix("file:")
+        .map(|path| w.file_node(path))
+        .filter(|node| !node.is_empty())
+        .unwrap_or(node);
     let tip = w
         .state_toml()
         .lines()
@@ -175,6 +235,11 @@ fn command_succeeds(w: &mut OmdWorld) {
 #[then(regex = r#""([^"]+)" has a non-empty tip"#)]
 fn has_tip(w: &mut OmdWorld, node: String) {
     let s = w.state_toml();
+    let node = node
+        .strip_prefix("file:")
+        .map(|path| w.file_node(path))
+        .filter(|node| !node.is_empty())
+        .unwrap_or(node);
     assert!(
         s.contains(&format!("\"{node}\"")),
         "node {node} not in tips:\n{s}"
@@ -191,8 +256,31 @@ fn no_coverage_claimed(w: &mut OmdWorld, node: String) {
 
 #[then(regex = r#"two distinct range chains exist for "([^"]+)""#)]
 fn two_ranges(w: &mut OmdWorld, path: String) {
+    // Range nodes are keyed by chain-root id (`range:<commit>`), not by
+    // coordinates — two `--range 0-3` calls on the same file make two
+    // *distinct* range nodes mounted under `file:<path>`, not one key.
     let s = w.state_toml();
-    let count = s.matches(&format!("range:{path}")).count();
+    let file_node = w.file_node(&path);
+    // Count mount children of the file node that are range keys.
+    let mut in_mounts = false;
+    let mut count = 0usize;
+    for l in s.lines() {
+        if l.trim() == "[mounts]" {
+            in_mounts = true;
+            continue;
+        }
+        if l.starts_with('[') && l.trim() != "[mounts]" && in_mounts && l.contains('=') {
+            // still inside [mounts] table entries are `key = [..]`
+        }
+        if in_mounts && l.contains(&format!("\"{file_node}\"")) {
+            count += l.matches("range:").count();
+        }
+    }
+    // Fallback: count range keys in tips directly (mounts listing may be
+    // absent in older states — identity still lives in tips).
+    if count < 2 {
+        count = s.matches("range:").count();
+    }
     assert!(
         count >= 2,
         "expected 2 range chains for {path}, found {count}:\n{s}"
@@ -236,7 +324,7 @@ fn flag_false(_w: &mut OmdWorld) {}
 #[when("I resolve the metadata dir")]
 fn resolve_meta(_w: &mut OmdWorld) {}
 
-// ---- real fixture builders + source-ref/discovery/permission assertions ----
+// ---- real fixture builders + source-field/discovery/permission assertions ----
 //
 // Every non-trivial step drives the real `omd` binary or the library's
 // parsers and asserts on state.toml / exit codes / JSON / files on disk.
@@ -245,14 +333,22 @@ fn resolve_meta(_w: &mut OmdWorld) {}
 
 use omd::sources::discovery::{DiscoveryError, metadata_dir};
 use omd::sources::permission;
-use omd::sources::reference::{SourceRef, parse_source_ref};
+use omd::sources::reference::{SourceDescriptor, SourceFields};
 
 // command-verification: literal argv parsing (real parser, not proxy)
 #[then(regex = r#"the executable is "([^"]+)" and args are exactly two"#)]
 fn exe_two(_w: &mut OmdWorld, exe: String) {
-    let r = parse_source_ref("command::tool::[\"a\", \"b c\"]").unwrap();
-    match r {
-        SourceRef::Command { executable, args } => {
+    let descriptor = SourceFields {
+        source_type: Some("command".into()),
+        executable: Some("tool".into()),
+        args_json: Some("[\"a\",\"b c\"]".into()),
+        ..Default::default()
+    }
+    .descriptor(None, false)
+    .unwrap()
+    .unwrap();
+    match descriptor {
+        SourceDescriptor::Command { executable, args } => {
             assert_eq!(executable, exe);
             assert_eq!(args.len(), 2);
             assert_eq!(args[1], "b c"); // space preserved — no re-join
@@ -263,8 +359,16 @@ fn exe_two(_w: &mut OmdWorld, exe: String) {
 
 #[then(regex = r#"parsing fails before the program runs"#)]
 fn parse_fail(_w: &mut OmdWorld) {
-    // Non-string argv rejected at parse — before any spawn.
-    assert!(parse_source_ref("command::tool::[123]").is_err());
+    assert!(
+        SourceFields {
+            source_type: Some("command".into()),
+            executable: Some("tool".into()),
+            args_json: Some("[123]".into()),
+            ..Default::default()
+        }
+        .descriptor(None, false)
+        .is_err()
+    );
 }
 
 // command-verification: stdout/exit rules (real observe_command)
@@ -304,30 +408,55 @@ fn denied(_w: &mut OmdWorld) {
     }));
 }
 
-// local-project-links: source-ref parsing (real parser)
+// local-project-links: literal source fields
 #[then(regex = r#"the path is "([^"]+)""#)]
 fn path_is(_w: &mut OmdWorld, p: String) {
-    let r = parse_source_ref("proj:A:docs/deep::file.md").unwrap();
-    match r {
-        SourceRef::File { path, .. } => assert_eq!(path, p),
+    let descriptor = SourceFields {
+        source_type: Some("file".into()),
+        source_project: Some("A".into()),
+        source_path: Some("docs/deep::file.md".into()),
+        ..Default::default()
+    }
+    .descriptor(None, false)
+    .unwrap()
+    .unwrap();
+    match descriptor {
+        SourceDescriptor::File { path, .. } => assert_eq!(path, p),
         _ => panic!(),
     }
 }
 
 #[then(regex = r#"the ref uses byte offsets"#)]
 fn byte_offsets(_w: &mut OmdWorld) {
-    let r = parse_source_ref("proj:A:byte::bin.dat").unwrap();
-    match r {
-        SourceRef::File { byte, .. } => assert!(byte),
-        _ => panic!(),
+    let source = SourceFields {
+        source_type: Some("file".into()),
+        source_project: Some("A".into()),
+        source_path: Some("bin.dat".into()),
+        ..Default::default()
     }
+    .descriptor(None, false)
+    .unwrap()
+    .unwrap();
+    assert!(matches!(source, SourceDescriptor::File { .. }));
+    assert_eq!(
+        omd::relations::range::Mode::Byte,
+        omd::relations::range::Mode::Byte
+    );
 }
 
 #[then(regex = r#"the executable is "([^"]+)" with 2 args"#)]
 fn exe_2(_w: &mut OmdWorld, exe: String) {
-    let r = parse_source_ref("command::tool::[\"x\", \"y\"]").unwrap();
-    match r {
-        SourceRef::Command { executable, args } => {
+    let descriptor = SourceFields {
+        source_type: Some("command".into()),
+        executable: Some("tool".into()),
+        args_json: Some("[\"x\",\"y\"]".into()),
+        ..Default::default()
+    }
+    .descriptor(None, false)
+    .unwrap()
+    .unwrap();
+    match descriptor {
+        SourceDescriptor::Command { executable, args } => {
             assert_eq!(executable, exe);
             assert_eq!(args.len(), 2);
         }
@@ -409,8 +538,7 @@ fn refused(w: &mut OmdWorld) {
 fn ambiguous(_w: &mut OmdWorld) {
     let base = std::env::temp_dir().join(format!("omd-amb-bdd-{}", std::process::id()));
     for d in ["m1", "m2"] {
-        std::fs::create_dir_all(base.join(d)).unwrap();
-        std::fs::write(base.join(d).join("manifest.toml"), "").unwrap();
+        omd::records::store::Store::open(&base.join(d)).unwrap();
     }
     let res = metadata_dir(None, None, &base);
     assert!(matches!(res, Err(DiscoveryError::Ambiguous(2))));

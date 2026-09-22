@@ -1,61 +1,94 @@
-//! Coverage: union-counted link coverage over content positions (E-6).
+//! Same-unit union coverage over source coordinates.
 //!
-//! Coverage counts *positions covered by at least one confirmed link* over
-//! the source's denominator — never by summing per-file or per-link ratios.
-//! Overlapping links never double-count; unmarked content stays in the
-//! denominator. Text sources filter Unicode White_Space out of the counted
-//! positions (so whitespace edits don't fake coverage); byte sources count
-//! raw offsets with no filtering.
+//! Text excludes only Unicode `char::is_whitespace` positions from counting;
+//! byte coverage counts every raw byte. Coordinates and gaps always stay in
+//! original source units.
 
 use std::collections::BTreeSet;
 
 use crate::relations::range::{Mode, Range};
 
-/// Compute union-coverage: the set of positions covered by ≥1 link.
-/// Returns (covered_positions, denominator) in the source's own unit.
-///
-/// `ranges` are confirmed-link spans. `content` is the decoded text (text
-/// mode) or ignored (byte mode). Text denominator filters White_Space so
-/// whitespace-only positions don't inflate or fake coverage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CoverageStats {
+    pub covered: u64,
+    pub total: u64,
+    pub gaps: Vec<Range>,
+}
+
+/// Compute union coverage for decoded text or UTF-8 bytes retained by legacy
+/// library callers. CLI byte coverage uses [`byte_coverage`] with raw length.
 pub fn coverage(ranges: &[Range], content: &str, mode: Mode) -> (u64, u64) {
-    match mode {
-        Mode::Text => {
-            // Denominator: non-whitespace char positions.
-            let mut covered = BTreeSet::new();
-            let mut denom = 0u64;
-            for (i, ch) in content.chars().enumerate() {
-                if ch.is_whitespace() {
-                    continue;
-                }
-                denom += 1;
-                let pos = i as u64;
-                for r in ranges {
-                    if r.mode == Mode::Text && pos >= r.start && pos < r.end {
-                        covered.insert(pos);
-                        break;
-                    }
-                }
-            }
-            (covered.len() as u64, denom)
-        }
-        Mode::Byte => {
-            // Byte mode: no whitespace filtering; denominator = byte length.
-            let denom = content.len() as u64;
-            let mut covered = BTreeSet::new();
-            for r in ranges {
-                if r.mode == Mode::Byte {
-                    for pos in r.start..r.end.min(denom) {
-                        covered.insert(pos);
-                    }
-                }
-            }
-            (covered.len() as u64, denom)
-        }
+    let stats = match mode {
+        Mode::Text => text_coverage(ranges, content),
+        Mode::Byte => byte_coverage(ranges, content.len() as u64),
+    };
+    (stats.covered, stats.total)
+}
+
+pub fn text_coverage(ranges: &[Range], content: &str) -> CoverageStats {
+    let covered: BTreeSet<u64> = ranges
+        .iter()
+        .filter(|range| range.mode == Mode::Text)
+        .flat_map(|range| range.start..range.end)
+        .collect();
+    let counted: Vec<u64> = content
+        .chars()
+        .enumerate()
+        .filter_map(|(index, ch)| (!ch.is_whitespace()).then_some(index as u64))
+        .collect();
+    let uncovered: Vec<u64> = counted
+        .iter()
+        .copied()
+        .filter(|position| !covered.contains(position))
+        .collect();
+    CoverageStats {
+        covered: counted.len() as u64 - uncovered.len() as u64,
+        total: counted.len() as u64,
+        gaps: positions_to_gaps(&uncovered, Mode::Text),
     }
 }
 
-/// Empty or all-whitespace text reports 100% (logical N/A shown as 100% so
-/// the display isn't ragged), per the spec.
+pub fn byte_coverage(ranges: &[Range], byte_len: u64) -> CoverageStats {
+    let mut covered = BTreeSet::new();
+    for range in ranges.iter().filter(|range| range.mode == Mode::Byte) {
+        covered.extend(range.start..range.end.min(byte_len));
+    }
+    let uncovered: Vec<u64> = (0..byte_len)
+        .filter(|position| !covered.contains(position))
+        .collect();
+    CoverageStats {
+        covered: byte_len - uncovered.len() as u64,
+        total: byte_len,
+        gaps: positions_to_gaps(&uncovered, Mode::Byte),
+    }
+}
+
+fn positions_to_gaps(positions: &[u64], mode: Mode) -> Vec<Range> {
+    let mut gaps = Vec::new();
+    let Some(&first) = positions.first() else {
+        return gaps;
+    };
+    let mut start = first;
+    let mut previous = first;
+    for &position in &positions[1..] {
+        if position != previous + 1 {
+            gaps.push(Range {
+                start,
+                end: previous + 1,
+                mode,
+            });
+            start = position;
+        }
+        previous = position;
+    }
+    gaps.push(Range {
+        start,
+        end: previous + 1,
+        mode,
+    });
+    gaps
+}
+
 pub fn coverage_percent(covered: u64, denom: u64) -> f64 {
     if denom == 0 {
         100.0
@@ -64,7 +97,6 @@ pub fn coverage_percent(covered: u64, denom: u64) -> f64 {
     }
 }
 
-/// A range linked to an *empty* target fills no gap — it covers nothing.
 pub fn effective_link_span(r: &Range, target_empty: bool) -> u64 {
     if target_empty || r.is_empty() {
         0

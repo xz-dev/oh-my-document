@@ -8,17 +8,16 @@
 //! ambiguous ("cannot prove unrelated") — it dirties that range without
 //! expanding it or auto-confirming the new text.
 
-use similar::{ChangeTag, TextDiff};
+use similar::{Algorithm, DiffOp, capture_diff_slices};
 
 use crate::relations::range::Range;
 
-/// A changed hunk: `[pos, pos+len)` in new-content coordinates that differs
-/// from old, plus whether it is an insertion adjacent to a range end.
+/// A changed hunk in recorded-content coordinates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Hunk {
-    /// Start position in new-content units.
+    /// Start position in old/recorded-content units.
     pub pos: u64,
-    /// Length in new-content units (0 for pure deletion).
+    /// Affected recorded extent (insertions use their new extent).
     pub len: u64,
     /// True when this hunk is a pure insertion (no old content removed).
     pub insertion: bool,
@@ -27,46 +26,60 @@ pub struct Hunk {
 /// Diff old vs new *complete* contents, returning changed hunks in
 /// new-content character units. Operates on the full decoded text — never
 /// on a pre-existing diff.
+fn hunks_from_ops(ops: Vec<DiffOp>) -> Vec<Hunk> {
+    ops.into_iter()
+        .filter_map(|op| match op {
+            DiffOp::Equal { .. } => None,
+            DiffOp::Delete {
+                old_index, old_len, ..
+            } => Some(Hunk {
+                pos: old_index as u64,
+                len: old_len as u64,
+                insertion: false,
+            }),
+            DiffOp::Insert {
+                old_index, new_len, ..
+            } => Some(Hunk {
+                pos: old_index as u64,
+                len: new_len as u64,
+                insertion: true,
+            }),
+            DiffOp::Replace {
+                old_index,
+                old_len,
+                new_len,
+                ..
+            } => Some(Hunk {
+                pos: old_index as u64,
+                len: old_len.max(new_len) as u64,
+                insertion: false,
+            }),
+        })
+        .collect()
+}
+
 pub fn diff_text(old: &str, new: &str) -> Vec<Hunk> {
-    let diff = TextDiff::from_chars(old, new);
-    let mut hunks = Vec::new();
-    let mut pos = 0u64;
-    let mut pending: Option<Hunk> = None;
-    for change in diff.iter_all_changes() {
-        let v = change.value();
-        let n = v.chars().count() as u64;
-        match change.tag() {
-            ChangeTag::Equal => {
-                if let Some(h) = pending.take() {
-                    hunks.push(h);
-                }
-                pos += n;
-            }
-            ChangeTag::Delete => {
-                // Deletion consumes old, not new positions.
-                let h = pending.get_or_insert(Hunk {
-                    pos,
-                    len: 0,
-                    insertion: true,
-                });
-                h.insertion = h.insertion && h.len == 0;
-                // deletion itself doesn't advance pos
-            }
-            ChangeTag::Insert => {
-                let h = pending.get_or_insert(Hunk {
-                    pos,
-                    len: 0,
-                    insertion: true,
-                });
-                h.len += n;
-                pos += n;
-            }
-        }
+    let old: Vec<char> = old.chars().collect();
+    let new: Vec<char> = new.chars().collect();
+    hunks_from_ops(capture_diff_slices(Algorithm::Myers, &old, &new))
+}
+
+/// Diff complete raw byte sequences with Myers, returning byte-coordinate
+/// hunks. No decoding or whitespace treatment occurs on this path.
+pub fn diff_bytes(old: &[u8], new: &[u8]) -> Vec<Hunk> {
+    hunks_from_ops(capture_diff_slices(Algorithm::Myers, old, new))
+}
+
+/// Every raw-byte start where `fragment` occurs in `content`.
+pub fn locate_byte_candidates(fragment: &[u8], content: &[u8]) -> Vec<usize> {
+    if fragment.is_empty() || fragment.len() > content.len() {
+        return Vec::new();
     }
-    if let Some(h) = pending {
-        hunks.push(h);
-    }
-    hunks
+    content
+        .windows(fragment.len())
+        .enumerate()
+        .filter_map(|(i, window)| (window == fragment).then_some(i))
+        .collect()
 }
 
 /// Locate-candidate diagnostics for a fragment that lost reliable placement.
@@ -81,7 +94,10 @@ pub fn locate_candidates(fragment: &str, content: &str) -> Vec<usize> {
     if fragment.is_empty() {
         return vec![];
     }
-    content.match_indices(fragment).map(|(i, _)| i).collect()
+    content
+        .match_indices(fragment)
+        .map(|(byte, _)| content[..byte].chars().count())
+        .collect()
 }
 
 /// Is the fragment's placement ambiguous — more than one same-text match?

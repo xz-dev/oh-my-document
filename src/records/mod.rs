@@ -7,6 +7,7 @@ pub mod id;
 pub mod ids;
 pub mod ops;
 pub mod pipeline;
+pub mod registration;
 pub mod store;
 pub mod time;
 pub mod version;

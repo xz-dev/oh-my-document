@@ -72,7 +72,7 @@ fn mid_read_state_change_reports_conflict() {
         salt: "abcdefghijklmnop".into(),
         previous_id: "".into(),
         timestamp: "2026-09-20T03:00:00.000000000Z".into(),
-        schema: "omd.commit/1".into(),
+        schema: "omd.commit/3".into(),
         kind: omd::records::commit::CommitKind::Init,
         content_ref: "empty".into(),
         payload: {

@@ -25,6 +25,6 @@ Feature: explicit file and range tracking
     Scenario: same range twice without --id makes two objects
       Given a file "docs/c.md" containing "content"
       And I run "omd init docs/c.md"
-      When I run "omd commit commit docs/c.md --range 0-3"
-      And I run "omd commit commit docs/c.md --range 0-3"
+      When I run "omd commit commit docs/c.md --range 0 3"
+      And I run "omd commit commit docs/c.md --range 0 3"
       Then two distinct range chains exist for "docs/c.md"

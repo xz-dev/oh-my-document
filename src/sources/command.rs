@@ -1,4 +1,4 @@
-//! Command sources: `command::<executable>::<JSON args array>` (E-7/9).
+//! Command sources use a fixed executable plus a JSON string-array argv.
 //!
 //! A command object is a virtual file source whose bytes come from running a
 //! fixed executable with a hard-coded literal argv — never a shell string,
@@ -12,27 +12,22 @@ use std::process::Command;
 
 use super::{Observation, SourceError};
 
-/// Parse `command::<exe>::<args>` into (executable, argv).
-/// `args` must be a JSON array of *strings only* — numbers, objects, or
-/// nested arrays are rejected before launch, never coerced.
-/// `::` inside the args string is literal; we split only on the first two.
-pub fn parse_command_ref(s: &str) -> Result<(String, Vec<String>), SourceError> {
-    let rest = s.strip_prefix("command::").ok_or(SourceError::Command)?;
-    let (exe, args_json) = rest.split_once("::").ok_or(SourceError::Command)?;
-    if exe.is_empty() {
-        return Err(SourceError::Command);
-    }
-    let arr: serde_json::Value =
-        serde_json::from_str(args_json).map_err(|_| SourceError::Command)?;
-    let items = arr.as_array().ok_or(SourceError::Command)?;
-    let mut argv = Vec::new();
-    for it in items {
-        match it.as_str() {
-            Some(v) => argv.push(v.to_string()),
-            None => return Err(SourceError::Command), // non-string arg rejected
-        }
-    }
-    Ok((exe.to_string(), argv))
+/// Parse the independent `--args-json` value.
+/// Arguments must be strings only; no coercion or shell re-splitting.
+pub fn parse_args_json(raw: &str) -> Result<Vec<String>, SourceError> {
+    let arr: serde_json::Value = serde_json::from_str(raw)
+        .map_err(|_| SourceError::Invalid("--args-json must be a JSON string array".into()))?;
+    let items = arr
+        .as_array()
+        .ok_or_else(|| SourceError::Invalid("--args-json must be a JSON string array".into()))?;
+    items
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_string)
+                .ok_or_else(|| SourceError::Invalid("--args-json must contain strings only".into()))
+        })
+        .collect()
 }
 
 /// Execute the command once in `project_root`, capturing complete stdout.

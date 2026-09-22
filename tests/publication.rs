@@ -16,7 +16,7 @@ fn commit(kind: CommitKind, salt: &str) -> Commit {
         salt: salt.into(),
         previous_id: String::new(),
         timestamp: "2026-09-20T03:00:00.000000000Z".into(),
-        schema: "omd.commit/1".into(),
+        schema: "omd.commit/3".into(),
         kind,
         content_ref: "empty".into(),
         payload: serde_json::Map::new(),
@@ -51,7 +51,7 @@ fn expected_version_conflict_aborts() {
     let mut s = open_store(&sb.meta_dir());
     s.lock().unwrap();
     let exp = Expected {
-        publication: Some(999),
+        publication: 999,
         ..Default::default()
     };
     assert!(s.check_expected(&exp).is_err());
@@ -125,8 +125,8 @@ fn version_and_content_written_per_id_and_hash() {
         omd::records::ids::Id128([1; 16]),
         b"body",
         Acquisition::File {
+            project: "root".into(),
             path: "f".into(),
-            encoding: "utf-8".into(),
         },
         Some("utf-8".into()),
     );

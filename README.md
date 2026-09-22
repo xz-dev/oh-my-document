@@ -4,51 +4,9 @@
 
 **When code changes, don't leave the docs behind.**
 
-[Why agents?](#why-build-for-agents) · [Explore a project](#understand-a-project-step-by-step) · [Use cases](#what-can-you-link) · [Install](#install) · [Try it](#try-it-link-a-requirement-to-code) · [Docs](#read-more) · [Feedback](https://github.com/xz-dev/oh-my-document/issues)
+OMD (`omd`) links exact ranges in requirements, designs, diagrams, and code. It records why ranges are related, keeps object identity stable when locations move, and reports when tracked content needs review. People and agents use the same CLI and checks.
 
-A requirement says “retry at most 3 times.” Later, someone changes it to 5. Where is the retry code—and did anyone update it too?
-
-**OMD (`omd`) maps code, documentation, and UML diagrams to help people explore projects with an agent, understand agent-written code, and guide changes.** It links specific passages in requirements and designs to implementation ranges, tracks content changes, and records why those changes were handled a certain way.
-
-The current entry point is a Rust CLI that both people and agents can use. Markdown, diagram source, and code stay where they are; tracking records live in `.omd/`.
-
-## Why build for agents?
-
-After an agent writes some code, you still need to know: Which requirement led to this implementation? Does it follow the design? What else needs checking after this change? If those answers exist only in a chat, the next person has to ask again—or read the code from scratch.
-
-OMD is designed to keep those connections in the project. You can define requirements, flows, and component relationships, then let an agent work down to functions and implementation details. When the direction needs to change, the linked design and code give you concrete places to intervene.
-
-**Predictability here means having grounds to judge a change, not predicting the agent's next line of code:**
-
-- **Understand the reasoning.** Which requirement or design does this code correspond to, and why was it changed?
-- **Know what to review.** Follow recorded links to check what changed and what still needs attention.
-- **Guide the next edit.** Change a requirement or design, identify the implementations an agent should review, and keep a record of the outcome and reasoning.
-
-People or agents must create these links explicitly; OMD does not infer every dependency. The goal is to give you something to check beyond an agent's claim that the work is done.
-
-OMD is designed as **a second layer of assurance for agent-written code**: the agent makes edits, the tool performs repeatable content and rule checks, and people judge the result and adjust direction. It complements tests and code review. A link—or a passing check—does not prove that an implementation meets its requirements or is free of defects.
-
-OMD does not take over coding or require a particular agent. People and agents follow the same rules; automation gets no relaxed checks.
-
-## Understand a project step by step
-
-When joining an unfamiliar project, you can ask an agent to explain the existing code through documentation and UML diagrams, then use OMD to link those explanations to actual source ranges. Start with the question in front of you and go deeper as needed; you do not have to read the entire repository first.
-
-1. **Start with the big picture.** Ask the agent to describe the project's purpose, main components, and relationships through documentation and UML diagrams.
-2. **Follow a question deeper.** Pick a flow you want to understand. Have the agent explain its modules, states, and branches, linking the explanation and diagram source to the relevant code.
-3. **Check against the implementation.** Follow those mappings back to the code, ask about unclear parts, and correct or expand the explanation. The links stay in the project for later exploration and change checks.
-
-This works in both directions: when building, work from requirements and UML toward implementation; when learning, start with existing code, build explanations and diagrams, then explore the details. People or agents write the explanations and diagrams. OMD maintains explicit links so you can check their basis—it does not certify an explanation as fact.
-
-## What can you link?
-
-| What you're working with | How to connect it |
-| --- | --- |
-| A requirement and its implementation | Link the relevant passage to the code so you have specific content to review after a change |
-| A state diagram and business logic | Link states and branches in the diagram source to the functions that handle them |
-| Two implementations of the same algorithm | Link corresponding ranges and record how each change was handled |
-
-Choose the ranges you care about; you do not have to treat a whole document or file as one unit. File tracking does not depend on a Git repository, and you can keep your editor, document formats, and diagramming tools.
+OMD is a second layer of assurance, not a semantic verifier. A link or passing check does not prove an implementation is correct.
 
 ## Install
 
@@ -60,89 +18,164 @@ cd oh-my-document
 cargo install --path . --locked
 ```
 
-Run `omd --help` to explore the commands. Development and verification currently focus on Linux.
+Run `omd --help`. Current development and verification focus on Linux; Windows and macOS are not claimed by the present test evidence.
 
-## Try it: link a requirement to code
+## Run a complete local workflow
 
-This example uses two small files and Bash. No Git repository required.
+Prerequisites: Bash, Python 3, and `omd` on `PATH`. This creates an isolated demo with its own HOME, config, and cache. Every mutation after the first initialization uses a fresh caller observation from `verify`; IDs used later come from actual JSON responses.
 
-### 1. Write a requirement and its implementation
-
+<!-- readme-workflow:start -->
 ```bash
-mkdir omd-demo
-cd omd-demo
+set -euo pipefail
+OMD_BIN=${OMD_BIN:-omd}
+DEMO=$(mktemp -d)
+cleanup() {
+  if [ "${KEEP_DEMO:-0}" = 1 ]; then
+    printf 'demo_dir=%s\n' "$DEMO"
+  else
+    rm -rf "$DEMO"
+  fi
+}
+trap cleanup EXIT
+export HOME="$DEMO/home"
+export OMD_CONFIG_PATH="$DEMO/config"
+export OMD_CACHE_PATH="$DEMO/cache"
+mkdir -p "$HOME" "$OMD_CONFIG_PATH" "$OMD_CACHE_PATH" "$DEMO/project"
+cd "$DEMO/project"
+
+json_field() {
+  python3 -c 'import json,sys
+v=json.load(sys.stdin)
+for key in sys.argv[1].split("."):
+    v=v[int(key)] if isinstance(v,list) else v[key]
+print(json.dumps(v,separators=(",",":")) if isinstance(v,(dict,list)) else v)' "$1"
+}
+observe() {
+  local name=$1
+  "$OMD_BIN" verify --json > "$DEMO/observation-$name.json"
+  json_field data.expected < "$DEMO/observation-$name.json" > "$DEMO/expected-$name.json"
+}
 
 printf 'Retry at most 3 times.\n' > spec.md
 printf 'MAX_RETRIES = 3\n' > retry.py
-```
 
-| `spec.md` | `retry.py` |
-| --- | --- |
-| Retry at most **3** times. | `MAX_RETRIES = 3` |
+"$OMD_BIN" init spec.md --json > "$DEMO/init-spec.json"
+observe init-code
+"$OMD_BIN" init retry.py --expected "$DEMO/expected-init-code.json" --json \
+  > "$DEMO/init-code.json"
 
-### 2. Tell OMD that these ranges are related
+observe spec-range
+"$OMD_BIN" commit commit spec.md --range 0 22 --mode text \
+  --reason 'Require at most 3 retries' \
+  --expected "$DEMO/expected-spec-range.json" --json > "$DEMO/spec-range.json"
+SPEC_RANGE=$(json_field data.object.chain_root_commit_id < "$DEMO/spec-range.json")
 
-```bash
-omd init spec.md
-omd init retry.py
+observe code-range
+"$OMD_BIN" commit commit retry.py --range 0 15 --mode text \
+  --link-from "$SPEC_RANGE" \
+  --reason 'Implement retry limit with MAX_RETRIES' \
+  --expected "$DEMO/expected-code-range.json" --json > "$DEMO/code-range.json"
+CODE_RANGE=$(json_field data.object.chain_root_commit_id < "$DEMO/code-range.json")
+LINK_ID=$(json_field data.link_records.0.link_id < "$DEMO/code-range.json")
 
-omd commit commit spec.md --range 0-22 \
-  --reason "Require at most 3 retries"
+# OMD records the logical rename; move the working file separately.
+observe rename
+"$OMD_BIN" rename retry.py retry_limit.py \
+  --expected "$DEMO/expected-rename.json" --json > "$DEMO/rename.json"
+mv retry.py retry_limit.py
 
-omd commit commit retry.py --range 0-15 \
-  --link-from "spec.md@text:0-22" \
-  --reason "Implement the retry limit with MAX_RETRIES"
-```
+"$OMD_BIN" list --json > "$DEMO/list.json"
+"$OMD_BIN" log "$CODE_RANGE" --json > "$DEMO/log.json"
+python3 - "$DEMO/list.json" "$SPEC_RANGE" "$CODE_RANGE" "$LINK_ID" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1]))
+spec,code,link=sys.argv[2:]
+objects=v["data"]["objects"]
+assert any(o["chain_root_commit_id"]==spec for o in objects)
+assert any(o["chain_root_commit_id"]==code and
+           o["project_relative_path"]=="retry_limit.py" for o in objects)
+assert any(x["link_id"]==link for x in v["data"]["links"])
+PY
 
-Ranges use **zero-based character positions, with an inclusive start and an exclusive end**, not line numbers. `0-22` selects `Retry at most 3 times.`; `0-15` selects `MAX_RETRIES = 3`. Neither includes the trailing newline.
-
-`init` registers a file, `--range` selects a passage, `--link-from` creates a link, and `--reason` records the reasoning. OMD stores its `commit` records in `.omd/`; these are separate from Git commits.
-
-### 3. Change the requirement and check
-
-```bash
 printf 'Retry at most 5 times.\n' > spec.md
-omd verify
+set +e
+"$OMD_BIN" verify --json > "$DEMO/verify-dirty.json"
+VERIFY_STATUS=$?
+set -e
+test "$VERIFY_STATUS" -eq 1
+python3 - "$DEMO/verify-dirty.json" "$SPEC_RANGE" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1]))
+assert v["data"]["ok"] is False
+assert "range:"+sys.argv[2] in v["data"]["dirty"]
+PY
+
+set +e
+"$OMD_BIN" check --json > "$DEMO/check.json"
+CHECK_STATUS=$?
+set -e
+test "$CHECK_STATUS" -eq 1
+printf 'spec_range=%s\ncode_range=%s\nlink_id=%s\n' \
+  "$SPEC_RANGE" "$CODE_RANGE" "$LINK_ID"
+```
+<!-- readme-workflow:end -->
+
+Ranges are zero-based and half-open: `[start, end)`. Text mode counts decoded Unicode scalar values; byte mode counts raw bytes. IDs in the script are chain-root commit IDs returned by OMD, not path-and-span labels. JSON v2 reports chain root, current tip, effective range commit, source version, location, and link identity separately.
+
+## Source fields
+
+Source kind and coordinates are separate:
+
+- **File is the default.** `omd init docs/spec.md` observes that project-relative path. Use `--source-project` and `--source-path` when recovery content belongs to another registered project.
+- **Command is explicit and literal.** Use `--source-type command --executable <program> --args-json '<JSON string array>'`. OMD passes argv without an implicit shell, tracks complete stdout only after exit 0, and does not execute commands during `list`, `log`, `tree`, or cache rebuild. Later `verify`/`check` execution requires explicit permission.
+- **Git history is exact and local.** Use `--source-type git --source-project <alias> --git-commit <full object id> --git-path <path in that commit>`. Floating refs, automatic clone/fetch, and using HEAD as current file content are rejected.
+- `--mode text|byte` selects coordinate units; it does not select a provider. File paths remain literal, including `@`, `#`, `%`, spaces, colons where the platform permits them, and Unicode.
+
+## Configuration-first initialization
+
+A genuinely new project may contain only `.omd/omd.toml` before its first explicit `init`. This supports an encoding default such as:
+
+```toml
+format = "omd.encoding/1"
+default_encoding = "windows-1252"
 ```
 
-The check returns JSON with `data.ok` set to `false` and `range:spec.md@text:0-22` listed in `data.dirty`. That requirement has changed and needs review; `retry.py` still says `3`.
+The first initialization preserves those configuration bytes and uses the configured text view. Existing, damaged, externally selected, or already mapped metadata is not treated as a bootstrap target. Reading configuration does not execute a source command or grant normal write authority.
 
-You can now decide whether the implementation needs updating and record the outcome and reasoning in OMD. It will not change the code to `5` for you.
+## Local mappings, relocation, and copies
 
-**Known issue in this example:** after creating the link above, the current version also reports `version record missing` for the linked range in `retry.py`, even before either file is edited. The changed requirement is detected, but this linked verification flow is not yet working end to end. The result above reflects that limitation, not a successful validation.
+`omd project register <alias> <project-root> <metadata-dir>` stores machine-local placement in `projects.toml`; shared history keeps logical project/store identity and project-relative paths. Registration and relocation mutations require a fresh `verify` observation through `--expected`, like other writes.
 
-## Fit it into your workflow
+Moving one authoritative store can keep its store ID after explicit remapping. Copying metadata to another writable directory is different: the raw copy is read-only until explicit `omd activate`, which assigns a new store ID and completes required peer protection. Existing external references to the original store do not silently redirect to the copy. OMD does not synchronize or merge the two writable histories.
 
-Start with one requirement and implementation that often change together, then add links as needed. When working with an agent, you can make linking, checking changes, and recording the reasoning part of the task. People can review the result with the same commands.
+## Operational boundaries
 
-- **What changed?** Run `omd verify` to find tracked ranges that need review.
-- **What's missing a link?** Configure tags and link rules, then run `omd check` to inspect coverage. Rules can warn or fail the check.
-- **What happened before?** Use `omd list` to find current commit IDs, then `omd log <commit-id>` to read a chain's history.
-- **Want to script it?** Use `--json` for structured output without replacing your existing development workflow.
-
-Records live in the project's `.omd/` directory by default. Use `--meta <directory>` to choose another location. See `omd --help` and `omd commit --help` for more options.
+- Authoritative structured text, immutable records, and required content live under `.omd/` by default; the query index under `OMD_CACHE_PATH` is rebuildable.
+- `OMD_CONFIG_PATH` and `OMD_CACHE_PATH` take precedence over platform/XDG fallbacks. `--root`, `--meta`, `--project`, and `--store` select explicit context; invalid explicit locations do not fall back silently.
+- Writes require fresh caller evidence. Stale publication, source, registration, mapping, or peer evidence fails rather than rebasing or retrying against newer state.
+- Cross-store publication protects referenced versions before publishing the consumer. Late I/O failure can truthfully leave already published members and an open block; JSON reports those members, failed step, boundary, and operation ID instead of claiming rollback.
+- Unsupported old stores and removed compound source/coordinate interfaces are rejected without migration or rewriting.
 
 ## Read more
 
-The README introduces the tool and walks through an example. For design background and detailed contracts, see these documents, currently in Chinese:
+- [Requirements and design history](docs/requirements.md)
+- [Sources and coordinates](docs/source-model.md)
+- [Storage and paths](docs/storage.md)
+- [Implementation handoff](docs/handoff.md)
+- [Spec-to-task evidence](spec-traceability.md)
 
-- [Requirements and design goals](docs/requirements.md) — why OMD tracks content ranges, links, and reasoning.
-- [Sources and coordinates](docs/source-model.md) — contracts for files, command output, character ranges, and byte ranges.
-- [Storage and paths](docs/storage.md) — what metadata and indexes store.
-- [Spec-to-implementation traceability](spec-traceability.md) — implementation evidence and remaining gaps.
+Current Rust core and CLI exist, but overall change acceptance still depends on independent review. Product skills and the optional Lean workflow have not been delivered or validated. OMD does not claim semantic equivalence, document sufficiency, or all-platform support.
 
-These documents include design-stage contracts; consult the current CLI help for command syntax. Remote URL identity mapping and the optional Lean product skill are not yet available.
+## Contributing
 
-## Feedback and contributing
-
-Try linking a small, real piece of documentation to its implementation, then check what happens when it changes. If the result is unexpected, open an [issue](https://github.com/xz-dev/oh-my-document/issues) with the commands, relevant file excerpts, and the behavior you expected.
-
-To work on the code, run the tests from the repository:
+Run repository checks with:
 
 ```bash
-cargo test --all-targets
+cargo fmt --check
+cargo build --locked --bin omd
+cargo test --locked
 ```
 
 ## License
 
-A license has not been chosen. No open-source license is currently granted.
+No license has been chosen. No open-source license is currently granted.

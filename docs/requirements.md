@@ -1,5 +1,7 @@
 # 需求基线：已确认的产品决定
 
+> **当前覆盖说明：** 本文件保留 R 编号和历史产品决定。`separate-range-identity-and-location` 已取代 R-10～R-12 中的复合 `proj:`/`command::`/`byte::` 输入形式；当前 CLI 使用独立路径、`--project`、`--range`、`--mode` 和封闭来源字段，见 [来源、内容与坐标](source-model.md)。历史示例不是当前使用说明；未改变的产品意图继续有效。
+
 状态：核心要求已确认，边界规格未全部冻结。本文件整理自项目所有者的交互设计，不将调研建议当成用户决定。
 
 与实现行为有关的未决项见 [open-questions.md](open-questions.md)。R 编号是需求追溯编号，不是新增产品语法。

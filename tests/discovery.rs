@@ -1,51 +1,85 @@
-//! Group 5: deterministic discovery + source-reference parsing.
+//! Group 5: deterministic discovery + closed source-field validation.
 
 use omd::sources::discovery::{DiscoveryError, metadata_dir};
 use omd::sources::encoding::{EncodingChoice, resolve};
-use omd::sources::reference::{SourceRef, parse_source_ref};
+use omd::sources::reference::{SourceDescriptor, SourceFields};
 
 #[test]
-fn proj_ref_keeps_whole_path_with_colons_and_slashes() {
-    // `proj:A:` rest is the full path — never re-split on `::` or `/`.
-    let r = parse_source_ref("proj:A:docs/deep::weird.md").unwrap();
-    match r {
-        SourceRef::File { alias, path, byte } => {
-            assert_eq!(alias, "A");
-            assert_eq!(path, "docs/deep::weird.md"); // `::` preserved literally
-            assert!(!byte);
+fn file_fields_keep_literal_scheme_shaped_path() {
+    let descriptor = SourceFields {
+        source_type: Some("file".into()),
+        source_project: Some("A".into()),
+        source_path: Some("docs/command::deep::weird.md".into()),
+        ..Default::default()
+    }
+    .descriptor(None, false)
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        descriptor,
+        SourceDescriptor::File {
+            project: "A".into(),
+            path: "docs/command::deep::weird.md".into(),
         }
-        _ => panic!("expected file"),
-    }
+    );
 }
 
 #[test]
-fn proj_root_alias() {
-    let r = parse_source_ref("proj:root:a.md").unwrap();
-    match r {
-        SourceRef::File { alias, .. } => assert_eq!(alias, "root"),
-        _ => panic!(),
-    }
-}
-
-#[test]
-fn byte_mode_marker() {
-    let r = parse_source_ref("proj:A:byte::bin.dat").unwrap();
-    match r {
-        SourceRef::File { byte, .. } => assert!(byte),
-        _ => panic!(),
-    }
-}
-
-#[test]
-fn command_ref_parses_argv_as_json() {
-    let r = parse_source_ref("command::tool::[\"a\", \"b c\"]").unwrap();
-    match r {
-        SourceRef::Command { executable, args } => {
-            assert_eq!(executable, "tool");
-            assert_eq!(args, vec!["a", "b c"]);
+fn new_file_defaults_to_root_and_target_path() {
+    let descriptor = SourceFields::default()
+        .descriptor(Some("a.md"), false)
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        descriptor,
+        SourceDescriptor::File {
+            project: "root".into(),
+            path: "a.md".into(),
         }
-        _ => panic!("expected command"),
+    );
+}
+
+#[test]
+fn command_fields_parse_literal_json_argv() {
+    let descriptor = SourceFields {
+        source_type: Some("command".into()),
+        executable: Some("tool".into()),
+        args_json: Some("[\"\",\"a b\",\"::\"]".into()),
+        ..Default::default()
     }
+    .descriptor(None, false)
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        descriptor,
+        SourceDescriptor::Command {
+            executable: "tool".into(),
+            args: vec!["".into(), "a b".into(), "::".into()],
+        }
+    );
+}
+
+#[test]
+fn incompatible_or_non_string_command_fields_reject() {
+    assert!(
+        SourceFields {
+            source_type: Some("file".into()),
+            executable: Some("tool".into()),
+            ..Default::default()
+        }
+        .descriptor(Some("a.md"), false)
+        .is_err()
+    );
+    assert!(
+        SourceFields {
+            source_type: Some("command".into()),
+            executable: Some("tool".into()),
+            args_json: Some("[123]".into()),
+            ..Default::default()
+        }
+        .descriptor(None, false)
+        .is_err()
+    );
 }
 
 #[test]
@@ -60,8 +94,7 @@ fn explicit_bad_metadata_dir_never_falls_back() {
 fn two_metadata_candidates_is_ambiguous() {
     let base = std::env::temp_dir().join(format!("omd-amb-{}", std::process::id()));
     for d in ["m1", "m2"] {
-        std::fs::create_dir_all(base.join(d)).unwrap();
-        std::fs::write(base.join(d).join("manifest.toml"), "").unwrap();
+        omd::records::store::Store::open(&base.join(d)).unwrap();
     }
     let res = metadata_dir(None, None, &base);
     assert!(matches!(res, Err(DiscoveryError::Ambiguous(2))));
@@ -71,8 +104,7 @@ fn two_metadata_candidates_is_ambiguous() {
 #[test]
 fn unique_direct_child_manifest_resolves() {
     let base = std::env::temp_dir().join(format!("omd-uniq-{}", std::process::id()));
-    std::fs::create_dir_all(base.join("m")).unwrap();
-    std::fs::write(base.join("m").join("manifest.toml"), "").unwrap();
+    omd::records::store::Store::open(&base.join("m")).unwrap();
     let res = metadata_dir(None, None, &base).unwrap();
     assert_eq!(res, base.join("m"));
     let _ = std::fs::remove_dir_all(&base);
@@ -81,9 +113,8 @@ fn unique_direct_child_manifest_resolves() {
 #[test]
 fn dot_omd_under_root_wins_over_children() {
     let base = std::env::temp_dir().join(format!("omd-dot-{}", std::process::id()));
-    std::fs::create_dir_all(base.join(".omd")).unwrap();
-    std::fs::create_dir_all(base.join("other")).unwrap();
-    std::fs::write(base.join("other").join("manifest.toml"), "").unwrap();
+    omd::records::store::Store::open(&base.join(".omd")).unwrap();
+    omd::records::store::Store::open(&base.join("other")).unwrap();
     let res = metadata_dir(None, None, &base).unwrap();
     assert_eq!(res, base.join(".omd"));
     let _ = std::fs::remove_dir_all(&base);

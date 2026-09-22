@@ -10,10 +10,47 @@ pub mod command;
 pub mod discovery;
 pub mod encoding;
 pub mod file;
+pub mod git;
 pub mod permission;
+pub mod projects;
 pub mod reference;
+pub mod scope;
 
 use std::path::Path;
+
+pub use reference::SourceDescriptor;
+
+/// Normalize persisted source descriptors at the owning project boundary.
+/// File inputs may be absolute locally, but shared records never are.
+pub fn normalize_descriptor(
+    descriptor: SourceDescriptor,
+    config_cwd: &Path,
+    owning_project_root: &Path,
+) -> Result<SourceDescriptor, SourceError> {
+    match descriptor {
+        SourceDescriptor::File { project, path } => {
+            let (path, _) =
+                projects::resolve_path(config_cwd, owning_project_root, &project, &path)
+                    .map_err(|error| SourceError::Invalid(error.to_string()))?;
+            Ok(SourceDescriptor::File { project, path })
+        }
+        SourceDescriptor::Git {
+            project,
+            commit,
+            path,
+        } => {
+            projects::resolve(config_cwd, owning_project_root, &project, "")
+                .map_err(|error| SourceError::Invalid(error.to_string()))?;
+            let path = git::normalize_repo_path(Path::new(&path))?;
+            Ok(SourceDescriptor::Git {
+                project,
+                commit,
+                path,
+            })
+        }
+        other => Ok(other),
+    }
+}
 
 /// A raw observation of a source at this moment.
 #[derive(Debug)]
@@ -32,8 +69,12 @@ pub enum SourceError {
     Io(#[from] std::io::Error),
     #[error("invalid text encoding for this file")]
     Encoding,
-    #[error("command failed (non-zero exit)")]
-    Command,
+    #[error("invalid source fields: {0}")]
+    Invalid(String),
+    #[error("command failed (non-zero exit){0}")]
+    CommandFailed(String),
+    #[error("source unavailable: {0}")]
+    Unavailable(String),
 }
 
 /// Read the file at its registered path *right now*.
@@ -79,5 +120,69 @@ pub(crate) fn decode(bytes: &[u8], encoding: &str) -> Result<String, SourceError
         .map(|cow| cow.into_owned())
         .ok_or(SourceError::Encoding)
 }
-pub mod git;
-pub mod scope;
+
+/// Collect one complete source exactly once. Project aliases resolve through
+/// machine-local mappings; command cwd is always the owning project root.
+pub fn collect(
+    descriptor: &SourceDescriptor,
+    config_cwd: &Path,
+    owning_project_root: &Path,
+    text: bool,
+    encoding: Option<&str>,
+) -> Result<Observation, SourceError> {
+    descriptor.validate()?;
+    let selected_encoding = if text {
+        let encoding = encoding.unwrap_or("utf-8");
+        encoding::validate(encoding)?;
+        Some(encoding)
+    } else {
+        None
+    };
+    let bytes = match descriptor {
+        SourceDescriptor::File { project, path } => {
+            let resolved = projects::resolve(config_cwd, owning_project_root, project, path)
+                .map_err(|error| SourceError::Invalid(error.to_string()))?;
+            std::fs::read(resolved)?
+        }
+        SourceDescriptor::Command { executable, args } => {
+            let outcome = command::observe_command(executable, args, owning_project_root)?;
+            if !outcome.exit_ok {
+                let stderr = String::from_utf8_lossy(&outcome.stderr);
+                let suffix = if stderr.is_empty() {
+                    String::new()
+                } else {
+                    format!(": {}", stderr.trim_end())
+                };
+                return Err(SourceError::CommandFailed(suffix));
+            }
+            outcome.stdout
+        }
+        SourceDescriptor::Git {
+            project,
+            commit,
+            path,
+        } => {
+            let repo = projects::resolve(config_cwd, owning_project_root, project, "")
+                .map_err(|error| SourceError::Invalid(error.to_string()))?;
+            git::read_blob(&git::GitRef {
+                repo,
+                commit: commit.clone(),
+                path: path.clone(),
+            })?
+        }
+    };
+    if let Some(encoding) = selected_encoding {
+        decode(&bytes, encoding)?;
+        Ok(Observation {
+            bytes,
+            text: true,
+            encoding: Some(encoding.to_string()),
+        })
+    } else {
+        Ok(Observation {
+            bytes,
+            text: false,
+            encoding: None,
+        })
+    }
+}

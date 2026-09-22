@@ -44,10 +44,10 @@ Feature: local project links and source references
     Scenario: Adapt selects by link id and clears the pending entry
       Given a tracked file "a.md" with content "a"
       And a tracked file "b.md" with content "b"
-      And I run "omd commit commit a.md --range 0-1 --reason ra"
-      And I run "omd commit commit b.md --range 0-1 --reason rb"
-      And I run "omd commit link a.md --source range:a.md@text:0-1 --target range:b.md@text:0-1 --reason L"
-      And I run "omd commit commit a.md --id <range-a.md-tip> --range 0-1 --reason ch"
+      And I run "omd commit commit a.md --range 0 1 --reason ra"
+      And I run "omd commit commit b.md --range 0 1 --reason rb"
+      And I run "omd commit link a.md --source <range-a.md-tip> --target <range-b.md-tip> --reason L"
+      And I run "omd commit commit a.md --id <range-a.md-tip> --range 0 1 --reason ch"
       Then the link "<last-link-id>" has a pending entry
-      When I run "omd commit adapt a.md --link-id <last-link-id> --changes <pending-commit> --reason done"
+      When I run "omd commit adapt a.md --adapt <adapt-json>"
       Then the link "<last-link-id>" has no pending entries

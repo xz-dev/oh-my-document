@@ -1,0 +1,69 @@
+## MODIFIED Requirements
+
+### Requirement: Range identity is independent of coordinates
+
+系统 SHALL 在 `commit --range` 未指定 `--id` 时创建独立的范围跟踪首个 commit；指定既有范围当前有效 tip 的 `--id` 时，在该跟踪上提交范围变更，不原地覆盖历史。重叠范围和完全相同坐标的独立跟踪 SHALL 都被允许；系统 MUST NOT 仅按坐标合并其身份。
+
+范围身份 SHALL 为所选存储中该链首个 commit ID。所属文件、版本内位置、坐标模式、来源版本与当前 tip SHALL 分别表达，不再依赖路径拼坐标或位置 nonce 作为对象身份。范围续改、文件 rename 及同完整内容 replace SHALL 不改变该身份。新建范围组合的首提交是 BEGIN 时，BEGIN 即链首，不能在正文发布后改用正文 commit 作为身份。
+
+#### Scenario: Identical coordinates have independent records
+- **WHEN** 用户在同一文件同一来源版本上两次提交相同范围，均不指定 `--id`
+- **THEN** 得到两个独立的 range 跟踪记录
+- **AND** 后续处理其中一个不等于处理另一个
+
+#### Scenario: A range is extended explicitly
+- **GIVEN** range commit r0 记录范围 10～20，且是当前有效 tip
+- **WHEN** 用户指定 r0 的 ID，将范围修改为 10～30 并提交
+- **THEN** 生成该跟踪的后续 commit r1，记录新范围
+- **AND** r0 的坐标和记录保持不变，链首身份及已有 link 端点不变
+
+### Requirement: Git references identify historical contents without replacing current observation
+
+用户 SHALL 能显式选用 git 来源，从本地仓库已有 Git 提交中取得所记录版本的完整内容。该历史依据 SHALL 保存确切 Git commit ID、仓库定位及版本内文件定位等必要信息，并可追溯到对应 OMD commit；Git ID 与 OMD ID SHALL 分别保留，不能互相替代，也不假定一一对应。浮动 ref 名不能代替历史版本的确切 ID。
+
+真实文件的 verify SHALL 将记录中的完整旧内容与当前登记路径上的完整内容比较，不以 HEAD、某个分支、index 或 Git 状态列表选择或代替当前内容。未提交的 Y SHALL 被作为当前文件内容检查，但 MUST NOT 冒认成历史 G1 的 X。历史可读不能掩盖当前路径缺失，当前文件存在也不能替代丢失的历史对象。系统 SHALL 使用内容 hash 和 Rust 内 Myers，不以 Git diff 或 changed-files 替代；不能因使用 Git 历史而自动创建 Git 提交、切换工作区或获取远端。
+
+历史引用 SHALL 使用独立的来源类型、项目 alias、完整确切 Git commit ID 和版本内路径字段；CLI 对应 `--source-type git --source-project <alias> --git-commit <id> --git-path <path>`，项目默认 root。仓库 SHALL 通过显式本机项目映射定位，不把个人绝对仓库目录写入共享历史。可选 remote 名及 URL 按 local-project-links 的登记约束处理，不替代项目身份或内容版本。系统 SHALL 校验对象类型并读取完整原始 blob，不执行 textconv/filter 或隐式 lazy fetch。历史符号链接 SHALL 在同一提交内解析并检测循环/断链，不回退工作树。不再使用 `git::<JSON 对象>` 或 OMD URI。
+
+#### Scenario: Verify uncommitted changes after same-content replacement
+- **GIVEN** O1 记录文件的完整内容 X，已通过同内容 replace 改由 Git G1 中的该版本提供，之后登记路径上的文件变成未提交的 Y，HEAD 仍为 G1
+- **WHEN** 用户运行 verify
+- **THEN** 比较从 G1 取得的完整旧内容 X 与从当前路径读取的完整 Y，按共同规则判断受影响范围
+- **AND** O1 的 ID、原始输入、link 和 note 不变，不把 O1 改成 Y，也不因这次检查自动追加 OMD 或 Git commit
+
+#### Scenario: Readable Git history does not hide a missing current file
+- **GIVEN** O1 的历史内容 X 仍能从 G1 取回，但登记的当前文件路径已不存在且没有 tombstone
+- **WHEN** 用户运行 verify
+- **THEN** 报告当前文件 missing，不用 G1 的 X 充当当前文件或自动创建 delete commit
+- **AND** 历史 X 仍可按原记录查看，不因当前文件消失而改写历史依据
+
+#### Scenario: HEAD movement alone does not change the observed file
+- **GIVEN** O1 的旧内容由 G1 提供为 X，当前登记路径的文件也为 X，而 HEAD 已移到保存不同内容 Y 的 G2
+- **WHEN** 用户运行 verify
+- **THEN** 比较 G1 的 X 与路径上的 X，不用 G2 的 Y 替换当前观察，也不因 HEAD 改变就标为内容变脏
+- **AND** 既有 unclean 或其他待处理责任仍保留
+
+### Requirement: Text and byte sources retain distinct coordinate units
+
+系统 SHALL 采用 0 起点、左闭右开 `[start, end)`，允许空区间并检查 `0 <= start <= end <= 来源长度`。CLI SHALL 使用 `--range <start> <end>` 分别传入两个端点，使用独立 --mode 选择 text/byte，不在路径或范围数字中编码模式。文本范围 SHALL 按用户指定编码解码后的 Unicode scalar value 计数；byte 范围 SHALL 按原始字节偏移计数且不解码。编码 SHALL 按本次显式 `--encoding`、此跟踪已记录编码、文件配置、项目默认、用户默认、UTF-8 的顺序选择，并保存每次使用的编码，不能以配置变更重新解释历史。系统 MUST NOT 混用两种坐标或静默替换无效字符。原换行、BOM SHALL 保留，BOM 计入文本第 0 个位置；引用中的路径使用 `/`。
+
+#### Scenario: Multibyte text is not indexed as raw bytes
+- **GIVEN** 文件中包含占多个 UTF-8 字节的汉字
+- **WHEN** 同一文件分别被按文本和 byte 模式跟踪
+- **THEN** 文本位置使用 Unicode 字符序号，byte 位置使用原始字节偏移
+- **AND** 系统不能将一种模式的坐标不经区分地应用于另一种模式
+
+#### Scenario: User selects a non-UTF-8 encoding
+- **GIVEN** 文件不能按 UTF-8 正确解码，但用户明确指定了实际编码
+- **WHEN** OMD 读取该文本来源
+- **THEN** 使用指定编码解释文本范围，不强制按 UTF-8 解码
+
+### Requirement: Replacement targets a complete source version binding
+
+`replace <commit-id>` 配合独立来源字段及 `--expected <凭据>` SHALL 选择该 commit 引用的完整来源版本，不再接受复合 `--source <引用>` 或 --source-ref。没有此依据的元数据操作 SHALL 被拒绝，不按路径或“最近文件”猜测另一个来源版本。绑定按来源版本 ID 更新，结果 SHALL 列出共享该版本的受影响记录；不同版本即使内容 hash 相同也 MUST NOT 批量改绑。绑定修订 SHALL 与原始不可变输入分开持久化，不改变当前观察定义。`gc --content` SHALL 仅显式释放不再有保留记录要求本地副本的内容，并在释放 Git 替代的最后本地副本前重新核验其精确恢复依据；缺失、共享或保护需要不能被忽略。
+
+#### Scenario: Shared version IDs differ from equal content hashes
+- **GIVEN** O1/O2 引用同一来源版本 V，O3 引用另一个版本 W；V/W 完整内容相同
+- **WHEN** 用户选择 O1 成功 replace 到匹配 Git 内容
+- **THEN** V 的恢复 binding 改变并报告 O1/O2，W 和 O3 的 binding 不变
+- **AND** 只要 W 仍需本地副本，显式内容 gc 也不能删除那份共享内容

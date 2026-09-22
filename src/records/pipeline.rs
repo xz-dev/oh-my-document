@@ -11,7 +11,7 @@
 use crate::records::commit::{Commit, CommitKind};
 use crate::records::id::salt_from_bytes;
 use crate::records::ids::Id128;
-use crate::records::store::{Expected, PublishProbe, State, Store, StoreError};
+use crate::records::store::{Expected, PeerExpected, PublishProbe, State, Store, StoreError};
 use crate::records::version::{Acquisition, SourceVersion};
 use crate::sources::{Observation, SourceError, observe_file};
 use crate::testing::{Clock, Rng};
@@ -24,8 +24,33 @@ pub enum PipelineError {
     Source(#[from] SourceError),
     #[error("store: {0}")]
     Store(#[from] StoreError),
+    #[error("invalid input: {0}")]
+    Input(String),
     #[error("commit invalid: {0}")]
     Commit(String),
+}
+
+fn validate_range_payload(
+    payload: &serde_json::Map<String, serde_json::Value>,
+    bytes: &[u8],
+    encoding: Option<&str>,
+) -> Result<(), PipelineError> {
+    let Some(range) = payload
+        .get("position")
+        .and_then(crate::relations::node::position_from_value)
+    else {
+        return Ok(());
+    };
+    let len = match range.mode {
+        crate::relations::range::Mode::Byte => bytes.len() as u64,
+        crate::relations::range::Mode::Text => crate::relations::range::text_len(
+            &crate::sources::decode(bytes, encoding.unwrap_or("utf-8"))
+                .map_err(|_| PipelineError::Input("range source cannot be decoded".into()))?,
+        ),
+    };
+    crate::relations::range::Range::new(range.start, range.end, range.mode, len)
+        .map(|_| ())
+        .map_err(|e| PipelineError::Input(e.to_string()))
 }
 
 /// Draw a fresh 16-char salt from the RNG.
@@ -33,6 +58,56 @@ fn draw_salt(rng: &dyn Rng) -> String {
     let mut b = [0u8; 16];
     rng.fill(&mut b);
     String::from_utf8(salt_from_bytes(&b).to_vec()).unwrap()
+}
+
+/// Resolve an internal node locator to the authoritative object key. Public
+/// state stores only chain-root keys; the path form remains accepted here for
+/// existing library callers while tests and CLI migrate to explicit lookups.
+fn object_key(store: &Store, locator: &str) -> String {
+    if store.state().tips.contains_key(locator) {
+        return locator.to_string();
+    }
+    locator
+        .strip_prefix("file:")
+        .and_then(|path| crate::relations::node::file_at_path(store.state(), path))
+        .unwrap_or(locator)
+        .to_string()
+}
+
+fn node_source_version(store: &Store, node: &str) -> Option<SourceVersion> {
+    let mut current = store.state().tips.get(node)?.clone();
+    let mut guard = 0usize;
+    while !current.is_empty() && guard < 100_000 {
+        let commit = store.read_commit(&current).ok()?;
+        if commit.content_ref != "empty" {
+            return store.read_version(&commit.content_ref).ok();
+        }
+        current = commit.previous_id;
+        guard += 1;
+    }
+    None
+}
+
+fn canonicalize_mount(store: &Store, payload: &mut serde_json::Map<String, serde_json::Value>) {
+    let Some(parent) = payload
+        .get("mount")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+    else {
+        return;
+    };
+    let parent = object_key(store, &parent);
+    payload.insert("mount".into(), parent.into());
+}
+
+fn published_node_key(locator: &str, is_first: bool, commit_id: &str) -> String {
+    if is_first && crate::relations::node::is_file_key(locator) {
+        crate::relations::node::file_key(commit_id)
+    } else if is_first && locator == "range:pending" {
+        crate::relations::node::range_key(commit_id)
+    } else {
+        locator.to_string()
+    }
 }
 
 /// Observe a file source at its registered path (current bytes, not HEAD).
@@ -46,9 +121,24 @@ pub fn observe(
 
 /// Create a source version for an observation, drawn before the commit.
 pub fn make_version(rng: &dyn Rng, obs: &Observation, acquisition: Acquisition) -> SourceVersion {
+    make_version_with_recovery(rng, obs, acquisition.clone(), acquisition)
+}
+
+pub fn make_version_with_recovery(
+    rng: &dyn Rng,
+    obs: &Observation,
+    acquisition: Acquisition,
+    recovery: Acquisition,
+) -> SourceVersion {
     let mut idb = [0u8; 16];
     rng.fill(&mut idb);
-    SourceVersion::new(Id128(idb), &obs.bytes, acquisition, obs.encoding.clone())
+    SourceVersion::new_with_recovery(
+        Id128(idb),
+        &obs.bytes,
+        acquisition,
+        recovery,
+        obs.encoding.clone(),
+    )
 }
 
 /// Build a commit referencing a source version.
@@ -67,7 +157,8 @@ pub fn make_commit(
         salt: draw_salt(rng),
         previous_id: previous_id.to_string(),
         timestamp: Commit::format_timestamp(clock.now().0),
-        schema: "omd.commit/1".into(),
+        schema: "omd.commit/3".into(),
+
         kind,
         content_ref: version.id.to_hex(),
         payload,
@@ -83,47 +174,157 @@ fn with_content(version: &SourceVersion) -> SourceVersion {
     v
 }
 
-/// Full pipeline for one file commit: observe → version → commit → publish.
-/// Returns the derived commit id hex. `expected` is checked under the lock.
-/// Commit a command-sourced version: run `exe argv` in `project_root`,
-/// capture complete stdout as the version's content, and record
-/// `Acquisition::Command`. Only `exit 0` produces content — a failed run
-/// keeps the previous version and is an error, never partial output.
+fn normalize_persisted_source(
+    store: &Store,
+    descriptor: Acquisition,
+) -> Result<Acquisition, PipelineError> {
+    match (store.config_cwd(), store.project_root()) {
+        (Some(cwd), Some(root)) => Ok(crate::sources::normalize_descriptor(descriptor, cwd, root)?),
+        _ => {
+            descriptor.validate_portable()?;
+            Ok(descriptor)
+        }
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
-pub fn commit_command_source(
+pub fn commit_source(
     store: &mut Store,
     probe: &mut dyn PublishProbe,
     rng: &dyn Rng,
     clock: &dyn Clock,
     node_key: &str,
-    exe: &str,
-    argv: &[String],
-    project_root: &Path,
+    acquisition: Acquisition,
+    recovery: Acquisition,
+    initial_observation: Option<Observation>,
+    encoding_override: Option<&str>,
     kind: CommitKind,
-    payload: serde_json::Map<String, serde_json::Value>,
+    mut payload: serde_json::Map<String, serde_json::Value>,
     expected: &Expected,
 ) -> Result<String, PipelineError> {
+    let acquisition = normalize_persisted_source(store, acquisition)?;
+    let recovery = normalize_persisted_source(store, recovery)?;
     store.lock()?;
-    store.check_expected(expected)?;
-    let out = crate::sources::command::observe_command(exe, argv, project_root)
-        .map_err(PipelineError::Source)?;
-    let obs = out
-        .into_observation()
-        .ok_or(PipelineError::Source(SourceError::Command))?;
-    let acquisition = Acquisition::Command {
-        executable: exe.into(),
-        args: argv.to_vec(),
+    store.require_write_authority()?;
+
+    let node_key = object_key(store, node_key);
+    canonicalize_mount(store, &mut payload);
+    let is_first = !store.state().tips.contains_key(&node_key);
+    let unobserved_init = kind == CommitKind::Init && is_first;
+    if !unobserved_init {
+        store.check_expected(expected)?;
+        let evidence_node = if expected.source_versions.contains_key(&node_key) {
+            &node_key
+        } else {
+            payload
+                .get("mount")
+                .and_then(|value| value.as_str())
+                .unwrap_or(&node_key)
+        };
+        store.require_source_expected(expected, evidence_node)?;
+    }
+    let byte_mode = payload
+        .get("position")
+        .and_then(crate::relations::node::position_from_value)
+        .is_some_and(|range| range.mode == crate::relations::range::Mode::Byte);
+    let (obs, observed_version) = if unobserved_init {
+        let mut observation = initial_observation.ok_or_else(|| {
+            PipelineError::Input("new source requires one collected observation".into())
+        })?;
+        if byte_mode {
+            observation.text = false;
+            observation.encoding = None;
+        }
+        (observation, None)
+    } else {
+        let evidence_node = if expected.source_versions.contains_key(&node_key) {
+            &node_key
+        } else {
+            payload
+                .get("mount")
+                .and_then(|value| value.as_str())
+                .unwrap_or(&node_key)
+        };
+        let (version, bytes) = store.observed_version(evidence_node).ok_or_else(|| {
+            PipelineError::Store(StoreError::Conflict(format!(
+                "successful source observation for {evidence_node} is required"
+            )))
+        })?;
+        if version.acquisition != acquisition {
+            return Err(PipelineError::Store(StoreError::Conflict(format!(
+                "source observation definition for {evidence_node} changed"
+            ))));
+        }
+        let observed_is_byte = version.encoding.is_none();
+        let mut observation = Observation {
+            bytes: bytes.to_vec(),
+            text: !observed_is_byte,
+            encoding: version.encoding.clone(),
+        };
+        let view_changed = !byte_mode
+            && !observed_is_byte
+            && encoding_override
+                .is_some_and(|encoding| version.encoding.as_deref() != Some(encoding));
+        if view_changed {
+            let encoding = encoding_override.expect("changed view has override");
+            crate::sources::decode(&observation.bytes, encoding)?;
+            observation.text = true;
+            observation.encoding = Some(encoding.to_string());
+        }
+        (observation, (!view_changed).then(|| version.clone()))
     };
-    let version = make_version(rng, &obs, acquisition);
-    let version = with_content(&version);
+    validate_range_payload(&payload, &obs.bytes, obs.encoding.as_deref())?;
+    let version = match observed_version {
+        Some(version) => version,
+        None => {
+            let version = make_version_with_recovery(rng, &obs, acquisition, recovery);
+            if matches!(version.recovery, Acquisition::Git { .. }) {
+                version
+            } else {
+                with_content(&version)
+            }
+        }
+    };
+
     let prev = store
         .state()
         .tips
-        .get(node_key)
+        .get(&node_key)
         .cloned()
         .unwrap_or_default();
-    let is_first = !store.state().tips.contains_key(node_key);
-    let commit = make_commit(rng, clock, kind, &prev, &version, payload);
+    let mut commit = make_commit(rng, clock, kind, &prev, &version, payload);
+    if crate::relations::node::is_range_key(&node_key) {
+        let parent = crate::relations::node::parent_of(store.state(), &node_key)
+            .map(str::to_string)
+            .or_else(|| {
+                commit
+                    .payload
+                    .get("mount")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
+        if let Some(parent) = parent
+            && let Some(begin_id) = store
+                .state()
+                .open_blocks
+                .get(&parent)
+                .and_then(|b| b.last())
+        {
+            commit
+                .payload
+                .insert("in_block".into(), begin_id.clone().into());
+        }
+    }
+    if crate::relations::node::is_file_key(&node_key)
+        && !is_first
+        && let Some(children) = store.state().mounts.get(&node_key)
+    {
+        for child in children {
+            if let Some(tip) = store.state().tips.get(child) {
+                commit.range_tips.insert(child.clone(), tip.clone());
+            }
+        }
+    }
     commit
         .validate(is_first)
         .map_err(|e| PipelineError::Commit(e.to_string()))?;
@@ -131,21 +332,115 @@ pub fn commit_command_source(
         .derive_id(&obs.bytes)
         .map_err(|e| PipelineError::Commit(e.to_string()))?
         .to_hex();
+    let published_key = published_node_key(&node_key, is_first, &cid);
+
     let mut new_state: State = store.state().clone();
     new_state.publication += 1;
-    new_state.tips.insert(node_key.to_string(), cid.clone());
+    new_state.tips.insert(published_key.clone(), cid.clone());
     new_state.retained.push(cid.clone());
-    store.publish(
-        probe,
-        &commit,
-        &cid,
-        Some(&version),
-        Some(&obs.bytes),
-        new_state,
-    )?;
+    if is_first && crate::relations::node::is_file_key(&node_key) {
+        let location = commit
+            .payload
+            .get("path")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| PipelineError::Input("new file object requires path".into()))?;
+        if crate::relations::node::file_at_path(&new_state, location).is_some() {
+            return Err(PipelineError::Input(format!(
+                "location is already tracked: {location}"
+            )));
+        }
+        new_state
+            .locations
+            .insert(published_key.clone(), location.into());
+    }
+    if crate::relations::node::is_range_key(&published_key) && is_first {
+        let parent = commit
+            .payload
+            .get("mount")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| PipelineError::Input("new range requires file object mount".into()))?;
+        if !new_state.tips.contains_key(parent) || !crate::relations::node::is_file_key(parent) {
+            return Err(PipelineError::Input(format!(
+                "range mount is not a live file object: {parent}"
+            )));
+        }
+        new_state
+            .mounts
+            .entry(parent.into())
+            .or_default()
+            .push(published_key.clone());
+    }
+
+    let direct: Vec<String> = new_state
+        .links
+        .iter()
+        .filter(|(_, link)| link.source == published_key)
+        .map(|(id, _)| id.clone())
+        .collect();
+    for link_id in &direct {
+        new_state
+            .link_pending
+            .entry(link_id.clone())
+            .or_default()
+            .insert(cid.clone());
+    }
+    let downstream_sources: Vec<String> = direct
+        .iter()
+        .filter_map(|id| new_state.links.get(id).map(|link| link.target.clone()))
+        .collect();
+    let transitive: Vec<String> = new_state
+        .links
+        .iter()
+        .filter(|(_, link)| downstream_sources.contains(&link.source))
+        .map(|(id, _)| id.clone())
+        .collect();
+    for link_id in transitive {
+        new_state
+            .link_pending
+            .entry(link_id)
+            .or_default()
+            .insert(cid.clone());
+    }
+
+    match kind {
+        CommitKind::Unclean => {
+            let reason = commit
+                .payload
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            new_state
+                .dirty
+                .entry(published_key.clone())
+                .or_default()
+                .push_unclean(&cid, &reason);
+        }
+        CommitKind::Clean => {
+            if let Some(dirty) = new_state.dirty.get_mut(&published_key) {
+                dirty.obligations.retain(|o| o.commit_id != cid);
+            }
+        }
+        CommitKind::AtomicBegin => new_state
+            .open_blocks
+            .entry(published_key.clone())
+            .or_default()
+            .push(cid.clone()),
+        CommitKind::AtomicEnd => {
+            if let Some(stack) = new_state.open_blocks.get_mut(&published_key) {
+                stack.pop();
+            }
+        }
+        _ => {}
+    }
+
+    let content = version.content_file.as_ref().map(|_| obs.bytes.as_slice());
+    store.publish(probe, &commit, &cid, Some(&version), content, new_state)?;
     Ok(cid)
 }
 
+/// Compatibility library entry for direct file callers. CLI uses
+/// `commit_source` so aliased file, command, and Git sources share one path.
 #[allow(clippy::too_many_arguments)]
 pub fn commit_file(
     store: &mut Store,
@@ -159,165 +454,53 @@ pub fn commit_file(
     expected: &Expected,
     encoding: Option<&str>,
 ) -> Result<String, PipelineError> {
-    store.lock()?;
-    store.check_expected(expected)?;
-
-    let is_first = !store.state().tips.contains_key(node_key);
-    // Resolve the source path relative to the process CWD — the caller
-    // supplies the project root as its working directory. Observation reads
-    // the real file *now*, never a snapshot.
-    let enc = encoding.unwrap_or("utf-8");
-    let obs = observe_file(path, true, Some(enc))?;
-    let version = make_version(
-        rng,
-        &obs,
+    let node_key = object_key(store, node_key);
+    let is_first = !store.state().tips.contains_key(&node_key);
+    let descriptor = if is_first {
+        let source_path = payload
+            .get("path")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| PipelineError::Input("new file source requires path".into()))?
+            .to_string();
         Acquisition::File {
-            path: path.to_string_lossy().into(),
-            encoding: enc.into(),
-        },
-    );
-    let version = with_content(&version);
-
-    let prev = store
-        .state()
-        .tips
-        .get(node_key)
-        .cloned()
-        .unwrap_or_default();
-    let mut commit = make_commit(rng, clock, kind, &prev, &version, payload);
-    // A range commit created while its parent FILE's ATOMIC block is open
-    // is a block member — stamp the open BEGIN id on the payload so a later
-    // reset target check sees the cross-chain membership (the file chain's
-    // BEGIN is invisible from the range's own ancestor walk).
-    if crate::relations::node::is_range_key(node_key) {
-        let parent = crate::relations::node::parent_of(node_key);
-        if let Some(begin_id) = store
-            .state()
-            .open_blocks
-            .get(&parent)
-            .and_then(|b| b.last())
-        {
-            commit
-                .payload
-                .insert("in_block".into(), begin_id.clone().into());
+            project: "root".into(),
+            path: source_path,
         }
-    }
-    // A file-level commit snapshots which tip each child range points to now,
-    // so a later file reset restores exact children — not wall-clock order.
-    if crate::relations::node::is_file_key(node_key) {
-        for (k, tip) in &store.state().tips {
-            if crate::relations::node::is_range_key(k)
-                && crate::relations::node::parent_of(k) == *node_key
-            {
-                commit.range_tips.insert(k.clone(), tip.clone());
-            }
-        }
-    }
-    commit
-        .validate(is_first)
-        .map_err(|e| PipelineError::Commit(e.to_string()))?;
-    let cid = commit
-        .derive_id(&obs.bytes)
-        .map_err(|e| PipelineError::Commit(e.to_string()))?
-        .to_hex();
-
-    let mut new_state: State = store.state().clone();
-    new_state.publication += 1;
-    new_state.tips.insert(node_key.to_string(), cid.clone());
-    new_state.retained.push(cid.clone());
-    // Mount a new range node under its file the first time it appears.
-    if crate::relations::node::is_range_key(node_key) && is_first {
-        let parent = crate::relations::node::parent_of(node_key);
-        new_state
-            .mounts
-            .entry(parent)
-            .or_default()
-            .push(node_key.to_string());
-    }
-    // Upstream commits on a linked *source* range seed pending obligations on
-    // each link whose source is this node — adapt later clears the selected
-    // ones. The obligation key is this commit's id (one per change).
-    // TRANSITIVE: a commit on N also flags downstream links — if N→T is a
-    // link and T is itself a source of link L2, then L2's chain is now
-    // indirectly dirty (the breakage propagates c1→b1→a1 without B resetting).
-    let direct: Vec<String> = new_state
-        .links
-        .iter()
-        .filter(|(_, l)| l.source == node_key)
-        .map(|(id, _)| id.clone())
-        .collect();
-    for lid in &direct {
-        new_state
-            .link_pending
-            .entry(lid.clone())
-            .or_default()
-            .insert(cid.clone());
-    }
-    // One transitive hop: each link whose source is a TARGET of a direct link
-    // also gets flagged (the target node's chain now owes review downstream).
-    let downstream_sources: Vec<String> = direct
-        .iter()
-        .filter_map(|lid| new_state.links.get(lid).map(|l| l.target.clone()))
-        .collect();
-    let transitive: Vec<String> = new_state
-        .links
-        .iter()
-        .filter(|(_, l)| downstream_sources.contains(&l.source))
-        .map(|(id, _)| id.clone())
-        .collect();
-    for lid in transitive {
-        new_state
-            .link_pending
-            .entry(lid)
-            .or_default()
-            .insert(cid.clone());
-    }
-
-    // Kind-driven domain effects — persisted in state, not just computed.
-    match kind {
-        CommitKind::Unclean => {
-            // Each unclean is its own stacked obligation (distinct id/reason).
-            let reason = commit
-                .payload
-                .get("reason")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let ds = new_state.dirty.entry(node_key.to_string()).or_default();
-            ds.push_unclean(&cid, &reason);
-        }
-        CommitKind::Clean => {
-            // clean clears obligations raised against this node's range but
-            // does NOT rewrite history — dirty marks on other commits stay.
-            if let Some(ds) = new_state.dirty.get_mut(node_key) {
-                ds.obligations.retain(|o| o.commit_id != cid);
-            }
-        }
-        CommitKind::AtomicBegin => {
-            new_state
-                .open_blocks
-                .entry(node_key.to_string())
-                .or_default()
-                .push(cid.clone());
-        }
-        CommitKind::AtomicEnd => {
-            // END closes the nearest open BEGIN on this node.
-            if let Some(stack) = new_state.open_blocks.get_mut(node_key) {
-                stack.pop();
-            }
-        }
-        _ => {}
-    }
-
-    store.publish(
+    } else {
+        let version = node_source_version(store, &node_key).ok_or_else(|| {
+            PipelineError::Input(format!("source version missing for {node_key}"))
+        })?;
+        store
+            .current_acquisition(&node_key, &version)
+            .ok_or_else(|| PipelineError::Input(format!("current source missing for {node_key}")))?
+    };
+    let initial = if kind == CommitKind::Init && is_first {
+        let byte_mode = payload
+            .get("position")
+            .and_then(crate::relations::node::position_from_value)
+            .is_some_and(|range| range.mode == crate::relations::range::Mode::Byte);
+        Some(observe_file(
+            path,
+            !byte_mode,
+            (!byte_mode).then_some(encoding.unwrap_or("utf-8")),
+        )?)
+    } else {
+        None
+    };
+    commit_source(
+        store,
         probe,
-        &commit,
-        &cid,
-        Some(&version),
-        Some(&obs.bytes),
-        new_state,
-    )?;
-    Ok(cid)
+        rng,
+        clock,
+        &node_key,
+        descriptor.clone(),
+        descriptor,
+        initial,
+        encoding,
+        kind,
+        payload,
+        expected,
+    )
 }
 
 /// A state-only commit that observes no file — markers, obligations, and
@@ -331,13 +514,18 @@ pub fn commit_marker(
     clock: &dyn Clock,
     node_key: &str,
     kind: CommitKind,
-    payload: serde_json::Map<String, serde_json::Value>,
+    mut payload: serde_json::Map<String, serde_json::Value>,
     expected: &Expected,
 ) -> Result<String, PipelineError> {
     store.lock()?;
-    store.check_expected(expected)?;
+    store.require_write_authority()?;
 
-    let is_first = !store.state().tips.contains_key(node_key);
+    let node_key = object_key(store, node_key);
+    canonicalize_mount(store, &mut payload);
+    let is_first = !store.state().tips.contains_key(&node_key);
+    if !(kind == CommitKind::Init && is_first) {
+        store.check_expected(expected)?;
+    }
     let empty_obs = Observation {
         bytes: Vec::new(),
         text: false,
@@ -347,17 +535,28 @@ pub fn commit_marker(
         rng,
         &empty_obs,
         Acquisition::File {
+            project: "root".into(),
             path: "".into(),
-            encoding: "".into(),
         },
     );
     let prev = store
         .state()
         .tips
-        .get(node_key)
+        .get(&node_key)
         .cloned()
         .unwrap_or_default();
-    let commit = make_commit(rng, clock, kind, &prev, &version, payload);
+    let mut commit = make_commit(rng, clock, kind, &prev, &version, payload);
+    commit.content_ref = "empty".into();
+    if crate::relations::node::is_file_key(&node_key)
+        && !is_first
+        && let Some(children) = store.state().mounts.get(&node_key)
+    {
+        for child in children {
+            if let Some(tip) = store.state().tips.get(child) {
+                commit.range_tips.insert(child.clone(), tip.clone());
+            }
+        }
+    }
     commit
         .validate(is_first)
         .map_err(|e| PipelineError::Commit(e.to_string()))?;
@@ -365,11 +564,44 @@ pub fn commit_marker(
         .derive_id(b"")
         .map_err(|e| PipelineError::Commit(e.to_string()))?
         .to_hex();
+    let published_key = published_node_key(&node_key, is_first, &cid);
 
     let mut new_state: State = store.state().clone();
     new_state.publication += 1;
-    new_state.tips.insert(node_key.to_string(), cid.clone());
+    new_state.tips.insert(published_key.clone(), cid.clone());
     new_state.retained.push(cid.clone());
+    if is_first && crate::relations::node::is_file_key(&node_key) {
+        let location = commit
+            .payload
+            .get("path")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| PipelineError::Input("new file object requires path".into()))?;
+        if crate::relations::node::file_at_path(&new_state, location).is_some() {
+            return Err(PipelineError::Input(format!(
+                "location is already tracked: {location}"
+            )));
+        }
+        new_state
+            .locations
+            .insert(published_key.clone(), location.into());
+    }
+    if crate::relations::node::is_range_key(&published_key) && is_first {
+        let parent = commit
+            .payload
+            .get("mount")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| PipelineError::Input("new range requires file object mount".into()))?;
+        if !new_state.tips.contains_key(parent) || !crate::relations::node::is_file_key(parent) {
+            return Err(PipelineError::Input(format!(
+                "range mount is not a live file object: {parent}"
+            )));
+        }
+        new_state
+            .mounts
+            .entry(parent.into())
+            .or_default()
+            .push(published_key.clone());
+    }
     match kind {
         CommitKind::Unclean => {
             let reason = commit
@@ -380,40 +612,31 @@ pub fn commit_marker(
                 .to_string();
             new_state
                 .dirty
-                .entry(node_key.to_string())
+                .entry(published_key.clone())
                 .or_default()
                 .push_unclean(&cid, &reason);
         }
-        CommitKind::AtomicBegin => {
-            new_state
-                .open_blocks
-                .entry(node_key.to_string())
-                .or_default()
-                .push(cid.clone());
-        }
+        CommitKind::AtomicBegin => new_state
+            .open_blocks
+            .entry(published_key.clone())
+            .or_default()
+            .push(cid.clone()),
         CommitKind::AtomicEnd => {
-            if let Some(s) = new_state.open_blocks.get_mut(node_key) {
-                s.pop();
+            if let Some(stack) = new_state.open_blocks.get_mut(&published_key) {
+                stack.pop();
             }
         }
         CommitKind::Tag => {
-            // Flat project-local tag on this node. Dir nodes' tags inherit to
-            // members at check time (additive, deduped — a set, never counted
-            // twice). The tag name is scoped to this store; no cross-project
-            // identity merge.
-            if let Some(t) = commit.payload.get("tag").and_then(|v| v.as_str()) {
+            if let Some(tag) = commit.payload.get("tag").and_then(|v| v.as_str()) {
                 new_state
                     .tags
-                    .entry(node_key.to_string())
+                    .entry(published_key.clone())
                     .or_default()
-                    .insert(t.to_string());
+                    .insert(tag.to_string());
             }
         }
         CommitKind::ScopeAdjust => {
-            // Record a named tag-link rule (`spec->code` / `spec<->code`) with
-            // severity + skip. A declared rule is a check item — never auto-
-            // invents ranges/links and never gates verify.
-            if let Some(r) = commit.payload.get("rule").and_then(|v| v.as_str()) {
+            if let Some(rule) = commit.payload.get("rule").and_then(|v| v.as_str()) {
                 let level = commit
                     .payload
                     .get("level")
@@ -426,9 +649,9 @@ pub fn commit_marker(
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false);
                 new_state.tag_rules.insert(
-                    r.to_string(),
+                    rule.to_string(),
                     crate::records::store::TagRule {
-                        rule: r.to_string(),
+                        rule: rule.to_string(),
                         level,
                         skip,
                     },
@@ -464,9 +687,21 @@ pub fn commit_lifecycle(
     expected: &Expected,
 ) -> Result<String, PipelineError> {
     store.lock()?;
+    store.require_write_authority()?;
     store.check_expected(expected)?;
 
-    let src_key = format!("file:{source_path}");
+    let src_key = crate::relations::node::file_at_path(store.state(), source_path)
+        .ok_or_else(|| PipelineError::Input(format!("file is not tracked: {source_path}")))?
+        .to_string();
+    if kind == CommitKind::Rename {
+        let target = target_path
+            .ok_or_else(|| PipelineError::Input("rename requires target path".into()))?;
+        if crate::relations::node::file_at_path(store.state(), target).is_some() {
+            return Err(PipelineError::Input(format!(
+                "rename target is already tracked: {target}"
+            )));
+        }
+    }
     let empty_obs = Observation {
         bytes: Vec::new(),
         text: false,
@@ -476,91 +711,50 @@ pub fn commit_lifecycle(
         rng,
         &empty_obs,
         Acquisition::File {
+            project: "root".into(),
             path: source_path.into(),
-            encoding: "utf-8".into(),
         },
     );
 
     let mut payload = serde_json::Map::new();
     payload.insert("path".into(), source_path.into());
     payload.insert("source".into(), source_path.into());
-    if let Some(t) = target_path {
-        payload.insert("target".into(), t.into());
+    if let Some(target) = target_path {
+        payload.insert("target".into(), target.into());
     }
     payload.insert("reason".into(), reason.into());
 
-    let prev = store
-        .state()
-        .tips
-        .get(&src_key)
-        .cloned()
-        .unwrap_or_default();
-    let is_first = !store.state().tips.contains_key(&src_key);
-    let commit = make_commit(rng, clock, kind, &prev, &version, payload);
+    let prev = store.state().tips[&src_key].clone();
+    let mut commit = make_commit(rng, clock, kind, &prev, &version, payload);
+    commit.content_ref = "empty".into();
     commit
-        .validate(is_first)
+        .validate(false)
         .map_err(|e| PipelineError::Commit(e.to_string()))?;
     let cid = commit
         .derive_id(b"")
         .map_err(|e| PipelineError::Commit(e.to_string()))?
         .to_hex();
 
-    let mut new_state: State = store.state().clone();
+    let mut new_state = store.state().clone();
     new_state.publication += 1;
     new_state.retained.push(cid.clone());
-
-    match kind {
-        CommitKind::Rename => {
-            let target = target_path.expect("rename needs target");
-            let dst_key = format!("file:{target}");
-            // Migrate the node: tip moves to the target key, mounts and dirty
-            // state follow, ranges under the file keep their identity.
-            new_state.tips.remove(&src_key);
-            new_state.tips.insert(dst_key.clone(), cid.clone());
-            if let Some(m) = new_state.mounts.remove(&src_key) {
-                // Re-key child range nodes: `range:<path>@...` → `range:<target>@...`.
-                // The range identity (its tip/chain) is preserved; only the
-                // path component of its key follows the rename.
-                let remap = |c: &str| {
-                    c.replacen(
-                        &format!("range:{source_path}@"),
-                        &format!("range:{target}@"),
-                        1,
-                    )
-                };
-                for child in &m {
-                    let new_child = remap(child);
-                    if let Some(tip) = new_state.tips.remove(child) {
-                        new_state.tips.insert(new_child.clone(), tip);
-                    }
-                    if let Some(ds) = new_state.dirty.remove(child) {
-                        new_state.dirty.insert(new_child.clone(), ds);
-                    }
-                }
-                let remounted: Vec<String> = m.iter().map(|c| remap(c)).collect();
-                new_state.mounts.insert(dst_key.clone(), remounted);
-            }
-            if let Some(ds) = new_state.dirty.remove(&src_key) {
-                new_state.dirty.insert(dst_key.clone(), ds);
-            }
-        }
-        CommitKind::Delete => {
-            // Tombstone: tip stays on the source node recording target=null;
-            // dependents on this node report broken (handled at read).
-            new_state.tips.insert(src_key.clone(), cid.clone());
-        }
-        _ => {}
+    new_state.tips.insert(src_key.clone(), cid.clone());
+    if kind == CommitKind::Rename {
+        new_state.locations.insert(
+            src_key.clone(),
+            target_path.expect("validated rename target").to_string(),
+        );
+    } else if kind == CommitKind::Delete {
+        new_state.locations.remove(&src_key);
     }
-
     store.publish(probe, &commit, &cid, None, None, new_state)?;
     Ok(cid)
 }
 
-/// Create a link instance between two range-commits. Refuses file-level
-/// linking (source/target must name a range, not a whole file). Each link
-/// gets a fresh 128-bit id; identical endpoints+direction coexist as
-/// distinct instances. `source`/`target` are range-commit endpoints like
-/// `file:path@start-end` — presence of '@' marks a range.
+/// Create a link instance between two range nodes. Endpoints are node
+/// keys (`range:<chain-root>`) — the committing node itself may serve as
+/// one endpoint. Refuses file-level linking. Each link gets a fresh
+/// 128-bit id; identical endpoints+direction coexist as distinct instances.
 #[allow(clippy::too_many_arguments)]
 pub fn commit_link(
     store: &mut Store,
@@ -569,23 +763,28 @@ pub fn commit_link(
     clock: &dyn Clock,
     node_key: &str,
     source: &str,
+    source_version: &str,
     target: &str,
+    target_version: &str,
     reason: &str,
     expected: &Expected,
 ) -> Result<String, PipelineError> {
-    // Endpoints must name range nodes, not whole files — a range key is a
-    // first-class object identity, not a text sniff.
+    // Local link creation accepts local range nodes only. Cross-store
+    // endpoints must pass through commit_xlink, which validates store scope
+    // and target existence before publication.
     if !crate::relations::node::is_range_key(source)
         || !crate::relations::node::is_range_key(target)
     {
         return Err(PipelineError::Commit(
-            "links connect ranges, not whole files".into(),
+            "local links connect local ranges; use a cross-store link entry for peer endpoints"
+                .into(),
         ));
     }
     store.lock()?;
+    store.require_write_authority()?;
     store.check_expected(expected)?;
-    // Both endpoints must be REAL range nodes — a link to a range that was
-    // never initialized is a phantom reference, not a forward link.
+    // Both endpoints must be real local range objects. Peer endpoints cannot
+    // bypass CLI preflight through this lower-level local-link API.
     if !store.state().tips.contains_key(source) {
         return Err(PipelineError::Commit(format!(
             "link source range does not exist: {source}"
@@ -596,6 +795,10 @@ pub fn commit_link(
             "link target range does not exist: {target}"
         )));
     }
+    crate::relations::identity::resolve_version_on_chain(store, source, source_version)
+        .map_err(|e| PipelineError::Commit(format!("link source version: {e}")))?;
+    crate::relations::identity::resolve_version_on_chain(store, target, target_version)
+        .map_err(|e| PipelineError::Commit(format!("link target version: {e}")))?;
 
     let mut idb = [0u8; 16];
     rng.fill(&mut idb);
@@ -611,8 +814,8 @@ pub fn commit_link(
         rng,
         &empty_obs,
         Acquisition::File {
+            project: "root".into(),
             path: "".into(),
-            encoding: "".into(),
         },
     );
     let prev = store
@@ -624,9 +827,18 @@ pub fn commit_link(
     let mut payload = serde_json::Map::new();
     payload.insert("link_id".into(), link_id.clone().into());
     payload.insert("source".into(), source.into());
+    payload.insert("source_version".into(), source_version.into());
     payload.insert("target".into(), target.into());
+    payload.insert("target_version".into(), target_version.into());
     payload.insert("reason".into(), reason.into());
     let commit = make_commit(rng, clock, CommitKind::Link, &prev, &version, payload);
+    // Structural link commits consume no source bytes — content_ref is
+    // "empty"; a phantom version id would point at a record never written.
+    let commit = {
+        let mut c = commit;
+        c.content_ref = "empty".into();
+        c
+    };
     commit
         .validate(is_first)
         .map_err(|e| PipelineError::Commit(e.to_string()))?;
@@ -645,6 +857,8 @@ pub fn commit_link(
             link_id: link_id.clone(),
             source: source.to_string(),
             target: target.to_string(),
+            source_version: source_version.to_string(),
+            target_version: target_version.to_string(),
             created_by: cid.clone(),
         },
     );
@@ -653,70 +867,269 @@ pub fn commit_link(
     Ok(link_id)
 }
 
-/// Cross-store link: A records a link whose TARGET is a range node in a
-/// registered peer store B (endpoint `peer:<store_id>:<file>@<range>`).
-/// The link record lives only in A — each store keeps its own .omd, no
-/// commit files or tips are shared/merged. B gets a symmetric *inbound*
-/// record (queryable + gc-protected) persisted against the target range,
-/// referencing A's pending link record id. Source must be a local range.
-///
-/// `peer_tips` resolves the peer's live tip set (read-only) — the caller
-/// supplies it so the store crate stays free of peer-FS access; a peer
-/// whose store can't be opened makes the link fail, never a cached guess.
+/// Result of the cross-store protection-before-publication protocol.
+#[derive(Debug, Clone)]
+pub struct ProtectedXlink {
+    pub link_id: String,
+    pub credential_id: String,
+}
+
+#[derive(Debug)]
+pub struct ProtectedXlinkFailure {
+    pub error: PipelineError,
+    pub link_id: String,
+    pub credential_id: Option<String>,
+}
+
+struct PlannedXlink {
+    link_id: String,
+    record_id: String,
+    commit: Commit,
+    state: State,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalLinkDirection {
+    PeerToLocal,
+    LocalToPeer,
+}
+
 #[allow(clippy::too_many_arguments)]
-pub fn commit_xlink<F>(
+pub fn commit_xlink_protected(
     store: &mut Store,
+    peer: &mut Store,
     probe: &mut dyn PublishProbe,
     rng: &dyn Rng,
     clock: &dyn Clock,
     node_key: &str,
     source: &str,
+    source_version: &str,
     peer_store_id: &str,
     peer_target_key: &str,
+    peer_target_version: &str,
+    link_id: &str,
     reason: &str,
     expected: &Expected,
-    peer_tips: F,
-) -> Result<String, PipelineError>
-where
-    F: FnOnce(&str) -> Option<std::collections::BTreeMap<String, String>>,
-{
-    if !crate::relations::node::is_range_key(source) {
-        return Err(PipelineError::Commit(
-            "xlink source must be a range node".into(),
+    peer_expected: &PeerExpected,
+) -> Result<ProtectedXlink, ProtectedXlinkFailure> {
+    commit_external_link_protected(
+        store,
+        peer,
+        probe,
+        rng,
+        clock,
+        node_key,
+        source,
+        source_version,
+        peer_store_id,
+        peer_target_key,
+        peer_target_version,
+        link_id,
+        reason,
+        expected,
+        peer_expected,
+        ExternalLinkDirection::LocalToPeer,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn commit_external_link_protected(
+    store: &mut Store,
+    peer: &mut Store,
+    probe: &mut dyn PublishProbe,
+    rng: &dyn Rng,
+    clock: &dyn Clock,
+    node_key: &str,
+    local_endpoint: &str,
+    local_version: &str,
+    peer_store_id: &str,
+    peer_endpoint: &str,
+    peer_version: &str,
+    link_id: &str,
+    reason: &str,
+    expected: &Expected,
+    peer_expected: &PeerExpected,
+    direction: ExternalLinkDirection,
+) -> Result<ProtectedXlink, ProtectedXlinkFailure> {
+    let fail = |error, credential_id| ProtectedXlinkFailure {
+        error,
+        link_id: link_id.to_string(),
+        credential_id,
+    };
+    if !store.is_locked() && !peer.is_locked() {
+        let local = std::fs::canonicalize(store.root())
+            .map_err(StoreError::Io)
+            .map_err(|error| fail(error.into(), None))?;
+        let remote = std::fs::canonicalize(peer.root())
+            .map_err(StoreError::Io)
+            .map_err(|error| fail(error.into(), None))?;
+        if local == remote {
+            return Err(fail(
+                PipelineError::Input("cross-store participants are the same store".into()),
+                None,
+            ));
+        }
+        if local < remote {
+            store.lock().map_err(|error| fail(error.into(), None))?;
+            peer.lock().map_err(|error| fail(error.into(), None))?;
+        } else {
+            peer.lock().map_err(|error| fail(error.into(), None))?;
+            store.lock().map_err(|error| fail(error.into(), None))?;
+        }
+    } else if !store.is_locked() || !peer.is_locked() {
+        return Err(fail(
+            PipelineError::Store(StoreError::Conflict(
+                "all cross-store participants must be prelocked".into(),
+            )),
+            None,
         ));
     }
-    store.lock()?;
-    store.check_expected(expected)?;
-    if !store.state().tips.contains_key(source) {
-        return Err(PipelineError::Commit(format!(
-            "link source range does not exist: {source}"
-        )));
+    store
+        .require_write_authority()
+        .map_err(|error| fail(error.into(), None))?;
+    store
+        .check_expected(expected)
+        .map_err(|error| fail(error.into(), None))?;
+    crate::records::cross::validate_peer_locked(store, peer, peer_store_id, peer_expected)
+        .map_err(|error| fail(error.into(), None))?;
+    if peer_store_id != peer.state().store_id {
+        return Err(fail(
+            PipelineError::Commit(format!(
+                "selected peer identity differs from endpoint: {peer_store_id}"
+            )),
+            None,
+        ));
     }
-    // The peer must be REGISTERED and the target range must exist in its
-    // live tips — a cross-store link to a phantom peer range is refused.
-    let peer = store
+    if !crate::relations::node::is_range_key(local_endpoint) {
+        return Err(fail(
+            PipelineError::Commit("external link local endpoint must be a range".into()),
+            None,
+        ));
+    }
+    if !store.state().peers.contains_key(peer_store_id) {
+        return Err(fail(
+            PipelineError::Commit(format!("peer store not registered: {peer_store_id}")),
+            None,
+        ));
+    }
+    store.state().tips.get(local_endpoint).ok_or_else(|| {
+        fail(
+            PipelineError::Commit(format!("link local range does not exist: {local_endpoint}")),
+            None,
+        )
+    })?;
+    crate::relations::identity::resolve_version_on_chain(store, local_endpoint, local_version)
+        .map_err(|error| {
+            fail(
+                PipelineError::Commit(format!("link local version: {error}")),
+                None,
+            )
+        })?;
+    if !crate::relations::node::is_range_key(peer_endpoint)
+        || !peer.state().tips.contains_key(peer_endpoint)
+    {
+        return Err(fail(
+            PipelineError::Commit(format!(
+                "peer range does not exist: {peer_endpoint} @ {peer_store_id}"
+            )),
+            None,
+        ));
+    }
+    crate::relations::identity::resolve_version_on_chain(peer, peer_endpoint, peer_version)
+        .map_err(|error| {
+            fail(
+                PipelineError::Commit(format!("peer endpoint version: {error}")),
+                None,
+            )
+        })?;
+    if link_id.len() < 8 {
+        return Err(fail(
+            PipelineError::Commit("cross-store link id is invalid".into()),
+            None,
+        ));
+    }
+    let planned = plan_xlink(
+        store,
+        rng,
+        clock,
+        node_key,
+        local_endpoint,
+        local_version,
+        peer_store_id,
+        peer_endpoint,
+        peer_version,
+        link_id,
+        reason,
+        direction,
+    )
+    .map_err(|error| fail(error, None))?;
+    let consumer_registration_id = peer
         .state()
         .peers
-        .get(peer_store_id)
+        .get(&store.state().store_id)
         .cloned()
         .ok_or_else(|| {
-            PipelineError::Commit(format!("peer store not registered: {peer_store_id}"))
+            fail(
+                PipelineError::Store(StoreError::Conflict(format!(
+                    "peer {peer_store_id} has no registration for consumer {}",
+                    store.state().store_id
+                ))),
+                None,
+            )
         })?;
-    let tips = peer_tips(&peer.locator)
-        .ok_or_else(|| PipelineError::Commit(format!("peer store unreadable: {}", peer.locator)))?;
-    if !tips.contains_key(peer_target_key) {
-        return Err(PipelineError::Commit(format!(
-            "peer target range does not exist: {peer_target_key} @ {peer_store_id}"
-        )));
-    }
+    let credential_id = crate::records::cross::persist_inbound(
+        peer,
+        &store.identity().project_id,
+        &store.state().store_id,
+        &consumer_registration_id,
+        &planned.record_id,
+        &planned.link_id,
+        peer_endpoint,
+        peer_version,
+    )
+    .map_err(|error| fail(error.into(), None))?;
+    let link_id = publish_planned_xlink(store, probe, planned)
+        .map_err(|error| fail(error, Some(credential_id.clone())))?;
+    Ok(ProtectedXlink {
+        link_id,
+        credential_id,
+    })
+}
 
-    let mut idb = [0u8; 16];
-    rng.fill(&mut idb);
-    let link_id = crate::records::ids::Id128(idb).to_hex();
-    // The target key carries its peer store identity so it never collides
-    // with a local range key of the same coordinates.
-    let target_key = format!("peer:{peer_store_id}:{peer_target_key}");
-
+/// Form the exact immutable business record before peer protection. The
+/// returned record ID is persisted in the peer receipt, then this same commit
+/// and state are published without regenerating salt, time, or identity.
+#[allow(clippy::too_many_arguments)]
+fn plan_xlink(
+    store: &Store,
+    rng: &dyn Rng,
+    clock: &dyn Clock,
+    node_key: &str,
+    local_endpoint: &str,
+    local_version: &str,
+    peer_store_id: &str,
+    peer_endpoint: &str,
+    peer_version: &str,
+    link_id: &str,
+    reason: &str,
+    direction: ExternalLinkDirection,
+) -> Result<PlannedXlink, PipelineError> {
+    let link_id = link_id.to_string();
+    let peer_key = crate::relations::node::peer_key(peer_store_id, peer_endpoint);
+    let (source, source_version, target, target_version) = match direction {
+        ExternalLinkDirection::PeerToLocal => (
+            peer_key,
+            peer_version.to_string(),
+            local_endpoint.to_string(),
+            local_version.to_string(),
+        ),
+        ExternalLinkDirection::LocalToPeer => (
+            local_endpoint.to_string(),
+            local_version.to_string(),
+            peer_key,
+            peer_version.to_string(),
+        ),
+    };
     let is_first = !store.state().tips.contains_key(node_key);
     let empty_obs = Observation {
         bytes: Vec::new(),
@@ -727,8 +1140,8 @@ where
         rng,
         &empty_obs,
         Acquisition::File {
+            project: "root".into(),
             path: "".into(),
-            encoding: "".into(),
         },
     );
     let prev = store
@@ -739,35 +1152,60 @@ where
         .unwrap_or_default();
     let mut payload = serde_json::Map::new();
     payload.insert("link_id".into(), link_id.clone().into());
-    payload.insert("source".into(), source.into());
-    payload.insert("target".into(), target_key.clone().into());
+    payload.insert("source".into(), source.clone().into());
+    payload.insert("source_version".into(), source_version.clone().into());
+    payload.insert("target".into(), target.clone().into());
+    payload.insert("target_version".into(), target_version.clone().into());
     payload.insert("peer_store_id".into(), peer_store_id.into());
     payload.insert("reason".into(), reason.into());
-    let commit = make_commit(rng, clock, CommitKind::Link, &prev, &version, payload);
+    let mut commit = make_commit(rng, clock, CommitKind::Link, &prev, &version, payload);
+    commit.content_ref = "empty".into();
     commit
         .validate(is_first)
-        .map_err(|e| PipelineError::Commit(e.to_string()))?;
-    let cid = commit
+        .map_err(|error| PipelineError::Commit(error.to_string()))?;
+    let record_id = commit
         .derive_id(b"")
-        .map_err(|e| PipelineError::Commit(e.to_string()))?
+        .map_err(|error| PipelineError::Commit(error.to_string()))?
         .to_hex();
 
-    let mut new_state: State = store.state().clone();
-    new_state.publication += 1;
-    new_state.tips.insert(node_key.to_string(), cid.clone());
-    new_state.retained.push(cid.clone());
-    new_state.links.insert(
+    let mut state = store.state().clone();
+    state.publication += 1;
+    state.tips.insert(node_key.to_string(), record_id.clone());
+    state.retained.push(record_id.clone());
+    state.links.insert(
         link_id.clone(),
         crate::records::store::Link {
             link_id: link_id.clone(),
-            source: source.to_string(),
-            target: target_key,
-            created_by: cid.clone(),
+            source,
+            target,
+            source_version,
+            target_version,
+            created_by: record_id.clone(),
         },
     );
-    new_state.link_pending.entry(link_id.clone()).or_default();
-    store.publish(probe, &commit, &cid, None, None, new_state)?;
-    Ok(link_id)
+    state.link_pending.entry(link_id.clone()).or_default();
+    Ok(PlannedXlink {
+        link_id,
+        record_id,
+        commit,
+        state,
+    })
+}
+
+fn publish_planned_xlink(
+    store: &mut Store,
+    probe: &mut dyn PublishProbe,
+    planned: PlannedXlink,
+) -> Result<String, PipelineError> {
+    store.publish(
+        probe,
+        &planned.commit,
+        &planned.record_id,
+        None,
+        None,
+        planned.state,
+    )?;
+    Ok(planned.link_id)
 }
 
 /// Adapt: handle selected changes on a link with an explicit reason.
@@ -783,6 +1221,7 @@ pub fn commit_adapt(
     changes: &[String],
     reason: &str,
     stop: bool,
+    no_reason: bool,
     expected: &Expected,
 ) -> Result<String, PipelineError> {
     if link_id.is_empty() {
@@ -790,18 +1229,16 @@ pub fn commit_adapt(
             "adapt requires an explicit link_id".into(),
         ));
     }
-    if reason.is_empty() {
+    if reason.is_empty() && !(stop && no_reason) {
         return Err(PipelineError::Commit("adapt requires a reason".into()));
     }
-    // Adapt must record the *selected* changes (one, several, or all via
-    // --stop). A bare adapt with no --changes and no --stop has made no
-    // selection — refuse rather than silently waive pending obligations.
-    if !stop && changes.is_empty() {
+    if changes.is_empty() {
         return Err(PipelineError::Commit(
-            "adapt requires --changes <ids> (selected changes) or --stop (all)".into(),
+            "adapt/stop requires explicitly selected changes".into(),
         ));
     }
     store.lock()?;
+    store.require_write_authority()?;
     store.check_expected(expected)?;
     if !store.state().links.contains_key(link_id) {
         return Err(PipelineError::Commit(format!("unknown link_id: {link_id}")));
@@ -817,8 +1254,8 @@ pub fn commit_adapt(
         rng,
         &empty_obs,
         Acquisition::File {
+            project: "root".into(),
             path: "".into(),
-            encoding: "".into(),
         },
     );
     let prev = store
@@ -829,10 +1266,28 @@ pub fn commit_adapt(
         .unwrap_or_default();
     let mut payload = serde_json::Map::new();
     payload.insert("link_id".into(), link_id.into());
-    payload.insert("changes".into(), changes.join(",").into());
-    payload.insert("reason".into(), reason.into());
+    payload.insert(
+        "changes".into(),
+        changes
+            .iter()
+            .cloned()
+            .map(serde_json::Value::from)
+            .collect(),
+    );
+    if no_reason {
+        payload.insert("no_reason".into(), true.into());
+    } else {
+        payload.insert("reason".into(), reason.into());
+    }
     payload.insert("stop".into(), stop.into());
     let commit = make_commit(rng, clock, CommitKind::Adapt, &prev, &version, payload);
+    // Structural link commits consume no source bytes — content_ref is
+    // "empty"; a phantom version id would point at a record never written.
+    let commit = {
+        let mut c = commit;
+        c.content_ref = "empty".into();
+        c
+    };
     commit
         .validate(is_first)
         .map_err(|e| PipelineError::Commit(e.to_string()))?;
@@ -845,28 +1300,103 @@ pub fn commit_adapt(
     new_state.publication += 1;
     new_state.tips.insert(node_key.to_string(), cid.clone());
     new_state.retained.push(cid.clone());
-    // Adapt acknowledges the SELECTED pending obligations on this link.
-    // `--changes c1,c2` clears only the named pending commit ids (unselected
-    // obligations stay pending); `--stop` handles all upstream changes and
-    // blocks the whole source end.
+    // Adapt/stop acknowledges exactly selected pending obligations.
     if let Some(pend) = new_state.link_pending.get_mut(link_id) {
-        if stop {
-            pend.clear();
-        } else {
-            for c in changes {
-                pend.remove(c);
-            }
+        for change in changes {
+            pend.remove(change);
         }
     }
     store.publish(probe, &commit, &cid, None, None, new_state)?;
     Ok(cid)
 }
 
-/// File reset: restore each child range's recorded tip from the target file
-/// commit's `range_tips` snapshot — never by wall-clock or current table.
-/// `child_is_interior` reports whether a child's recorded tip sits inside an
-/// ATOMIC block (a block member, not a boundary); if ANY child's restore
-/// target is interior, the WHOLE file reset refuses, siblings unchanged.
+/// Immutable fields needed to decide whether a reset target is eligible.
+#[derive(Debug, Clone)]
+pub struct ResetTargetRecord {
+    pub kind: CommitKind,
+    pub previous_id: String,
+    pub parent_block: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ResetBlockMembership {
+    pub scope: &'static str,
+    pub block: String,
+}
+
+/// Shared reset eligibility: marker targets are legal boundaries; ordinary
+/// targets must be outside both their own chain's block and any parent-file
+/// block recorded on the immutable range commit.
+pub fn reset_block_membership<F>(
+    target: &str,
+    lookup: &mut F,
+) -> Result<Option<ResetBlockMembership>, ResetError>
+where
+    F: FnMut(&str) -> Option<ResetTargetRecord>,
+{
+    let target_record = lookup(target).ok_or_else(|| ResetError::UnknownTarget(target.into()))?;
+    if matches!(
+        target_record.kind,
+        CommitKind::AtomicBegin | CommitKind::AtomicEnd
+    ) {
+        return Ok(None);
+    }
+    if let Some(block) = target_record.parent_block {
+        return Ok(Some(ResetBlockMembership {
+            scope: "parent-file",
+            block,
+        }));
+    }
+    let mut depth = 0i64;
+    let mut cur = target.to_string();
+    let mut guard = 0usize;
+    while let Some(record) = lookup(&cur) {
+        match record.kind {
+            CommitKind::AtomicEnd => depth += 1,
+            CommitKind::AtomicBegin => {
+                if depth == 0 {
+                    return Ok(Some(ResetBlockMembership {
+                        scope: "same-chain",
+                        block: cur,
+                    }));
+                }
+                depth -= 1;
+            }
+            _ => {}
+        }
+        if record.previous_id.is_empty() || guard > 100_000 {
+            break;
+        }
+        guard += 1;
+        cur = record.previous_id;
+    }
+    Ok(None)
+}
+
+pub fn file_reset_children_checked<F>(
+    range_tips: &std::collections::BTreeMap<String, String>,
+    mut child_membership: F,
+) -> Result<Vec<(String, String)>, ResetError>
+where
+    F: FnMut(&str) -> Result<Option<ResetBlockMembership>, ResetError>,
+{
+    let mut restored = Vec::new();
+    for (range_id, tip) in range_tips {
+        if let Some(membership) = child_membership(tip)? {
+            return Err(ResetError::ChildInterior {
+                child: range_id.clone(),
+                target: tip.clone(),
+                scope: membership.scope,
+                block: membership.block,
+            });
+        }
+        restored.push((range_id.clone(), tip.clone()));
+    }
+    Ok(restored)
+}
+
+/// Compatibility wrapper for callers that already determined only a boolean
+/// same-chain membership. New reset paths use `file_reset_children_checked`.
 pub fn file_reset_children<F>(
     range_tips: &std::collections::BTreeMap<String, String>,
     mut child_is_interior: F,
@@ -874,16 +1404,12 @@ pub fn file_reset_children<F>(
 where
     F: FnMut(&str) -> bool,
 {
-    let mut restored = Vec::new();
-    for (range_id, tip) in range_tips {
-        if child_is_interior(tip) {
-            return Err(ResetError::UnknownTarget(format!(
-                "child {range_id} restore target {tip} is a block member"
-            )));
-        }
-        restored.push((range_id.clone(), tip.clone()));
-    }
-    Ok(restored)
+    file_reset_children_checked(range_tips, |tip| {
+        Ok(child_is_interior(tip).then(|| ResetBlockMembership {
+            scope: "same-chain",
+            block: "unknown".into(),
+        }))
+    })
 }
 
 /// Outcome of a `reset <id>`: where it landed and the machine-readable
@@ -904,34 +1430,33 @@ pub struct ResetOutcome {
 /// id to (kind, previous_id).
 pub fn reset<F>(_node_key: &str, target: &str, mut lookup: F) -> Result<ResetOutcome, ResetError>
 where
-    F: FnMut(&str) -> Option<(CommitKind, String)>,
+    F: FnMut(&str) -> Option<ResetTargetRecord>,
 {
-    let (kind, prev) = lookup(target).ok_or(ResetError::UnknownTarget(target.into()))?;
-    match kind {
+    let record = lookup(target).ok_or_else(|| ResetError::UnknownTarget(target.into()))?;
+    match record.kind {
         CommitKind::AtomicBegin | CommitKind::AtomicEnd => {
             // Marker: withdraw it and its successors, land on direct
             // predecessor — exactly one step, never skipped recursively.
             Ok(ResetOutcome {
                 requested: target.to_string(),
-                actual: prev.clone(),
+                actual: record.previous_id.clone(),
                 warning: format!(
                     "requested boundary {target} lands on predecessor {}",
-                    if prev.is_empty() {
+                    if record.previous_id.is_empty() {
                         "<empty>".into()
                     } else {
-                        prev.clone()
+                        record.previous_id.clone()
                     }
                 ),
             })
         }
         _ => {
-            // An ordinary commit *inside* an ATOMIC block is never a reset
-            // target — only markers and out-of-block commits are. Detect
-            // membership by walking ancestors: if a BEGIN precedes this
-            // commit without its matching END also preceding it, the commit
-            // is a block member.
-            if is_block_member(target, &mut lookup) {
-                return Err(ResetError::Interior(target.into()));
+            if let Some(membership) = reset_block_membership(target, &mut lookup)? {
+                return Err(ResetError::Interior {
+                    target: target.into(),
+                    scope: membership.scope,
+                    block: membership.block,
+                });
             }
             // Ordinary target outside a block: kept; successors dangle.
             Ok(ResetOutcome {
@@ -946,7 +1471,7 @@ where
 /// Walk ancestors of `commit` to detect whether it sits inside an ATOMIC
 /// block: an unmatched BEGIN before it (with no matching END before it too)
 /// makes it a block member.
-fn is_block_member<F>(commit: &str, lookup: &mut F) -> bool
+pub fn commit_is_block_member<F>(commit: &str, lookup: &mut F) -> bool
 where
     F: FnMut(&str) -> Option<(CommitKind, String)>,
 {
@@ -977,8 +1502,21 @@ where
 pub enum ResetError {
     #[error("unknown reset target: {0}")]
     UnknownTarget(String),
-    #[error("reset target is an ordinary block member: {0}")]
-    Interior(String),
+    #[error("reset target is an ordinary block member: {target} ({scope} block {block})")]
+    Interior {
+        target: String,
+        scope: &'static str,
+        block: String,
+    },
+    #[error(
+        "child {child} restore target {target} is an ordinary block member ({scope} block {block})"
+    )]
+    ChildInterior {
+        child: String,
+        target: String,
+        scope: &'static str,
+        block: String,
+    },
 }
 
 /// Apply a resolved reset to the node's state: move the tip to the actual
@@ -1033,6 +1571,113 @@ pub fn apply_reset_to_state<F>(
     }
 }
 
+#[derive(Debug)]
+enum RangeAssessment {
+    Clean,
+    Dirty(String),
+    Locate(String),
+    Unverified(String),
+    NoBody,
+}
+
+/// Compare one range's effective body with its current authoritative file
+/// location. Both verify and FileVerify use this exact fold/compare path.
+fn assess_range(store: &Store, range_key: &str, current_bytes: &[u8]) -> RangeAssessment {
+    let state = match crate::relations::identity::effective_range_state(store, range_key) {
+        Ok(state) => state,
+        Err(error) => return RangeAssessment::Unverified(error.to_string()),
+    };
+    let (version_id, range) = match (state.source_version_id, state.range) {
+        (Some(version), Some(range)) => (version, range),
+        _ => return RangeAssessment::NoBody,
+    };
+    let version = match store.read_version(&version_id) {
+        Ok(version) => version,
+        Err(_) => {
+            return RangeAssessment::Unverified(format!("version record missing ({version_id})"));
+        }
+    };
+    let old_bytes = match store.recover_version_bytes(&version_id) {
+        Ok(bytes) => bytes,
+        Err(error) => return RangeAssessment::Unverified(error.to_string()),
+    };
+
+    let (candidates, hunks) = match range.mode {
+        crate::relations::range::Mode::Byte => {
+            if range.end > old_bytes.len() as u64 {
+                return RangeAssessment::Unverified(format!(
+                    "range out of bounds for recorded source version {version_id}"
+                ));
+            }
+            let fragment = &old_bytes[range.start as usize..range.end as usize];
+            (
+                crate::relations::diff::locate_byte_candidates(fragment, current_bytes),
+                crate::relations::diff::diff_bytes(&old_bytes, current_bytes),
+            )
+        }
+        crate::relations::range::Mode::Text => {
+            let encoding = version.encoding.as_deref().unwrap_or("utf-8");
+            let old = match crate::sources::decode(&old_bytes, encoding) {
+                Ok(text) => text,
+                Err(_) => {
+                    return RangeAssessment::Unverified(format!(
+                        "recorded content undecodable as {encoding}"
+                    ));
+                }
+            };
+            let current = match crate::sources::decode(current_bytes, encoding) {
+                Ok(text) => text,
+                Err(_) => {
+                    return RangeAssessment::Unverified(format!(
+                        "current source cannot be decoded as {encoding}"
+                    ));
+                }
+            };
+            if range.end > crate::relations::range::text_len(&old) {
+                return RangeAssessment::Unverified(format!(
+                    "range out of bounds for recorded source version {version_id}"
+                ));
+            }
+            let fragment = match crate::relations::range::text_slice(&old, &range) {
+                Ok(fragment) => fragment,
+                Err(_) => {
+                    return RangeAssessment::Unverified(format!(
+                        "range out of bounds for recorded source version {version_id}"
+                    ));
+                }
+            };
+            (
+                crate::relations::diff::locate_candidates(fragment, &current),
+                crate::relations::diff::diff_text(&old, &current),
+            )
+        }
+    };
+
+    if candidates.len() > 1 {
+        return RangeAssessment::Locate(format!(
+            "ambiguous: {} candidates for effective range",
+            candidates.len()
+        ));
+    }
+    if candidates.len() == 1 && candidates[0] != range.start as usize {
+        return RangeAssessment::Locate(format!(
+            "moved: fragment now at {} (was {}), needs review",
+            candidates[0], range.start
+        ));
+    }
+    if crate::relations::diff::dirtied_by(&hunks, &[range])[0] {
+        return RangeAssessment::Dirty(format!("in-range edit at {}", state.tip_id));
+    }
+    RangeAssessment::Clean
+}
+
+#[derive(Debug, Clone)]
+pub struct SuccessfulObservation {
+    pub bytes: Vec<u8>,
+    pub acquisition: Acquisition,
+    pub encoding: Option<String>,
+}
+
 /// Result of `omd verify` over a store — the independent check distinct
 /// from `check` (coverage). Fails when any node has unclosed ATOMIC blocks,
 /// unhandled obligations, or a dirty tip caused by a dangling dependency.
@@ -1055,223 +1700,182 @@ pub struct VerifyReport {
     /// command wasn't permitted (`may_run` false). `unverified` is honest
     /// incomplete state — never counted as pass, never a silent failure.
     pub unverified: Vec<String>,
+    /// Selected project identity failures. Non-empty blocks all source
+    /// acquisition and business writes until explicit registration repair.
+    pub identity: Vec<String>,
+    /// Successful command acquisitions available for exact reuse by a later
+    /// write. Skipped from report serialization; CLI persists versions and
+    /// emits their IDs in `expected`.
+    #[serde(skip)]
+    pub successful_observations: std::collections::BTreeMap<String, SuccessfulObservation>,
 }
 
 /// Run verify against the persisted state — reads what's on disk, never
 /// fabricates a passing result from a moving target. `run_cmd` is the
 /// invocation's `--run-command` decision (from `may_run`); command-sourced
 /// versions report `unverified` when running isn't permitted.
-pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
+pub fn verify(
+    store: &Store,
+    project_root: &std::path::Path,
+    run_cmd: bool,
+    encoding_override: Option<&str>,
+) -> VerifyReport {
     let st = store.state();
     let open_blocks: Vec<String> = st
         .open_blocks
         .iter()
-        .filter(|(_, v)| !v.is_empty())
-        .map(|(k, _)| k.clone())
+        .filter(|(_, values)| !values.is_empty())
+        .map(|(node, _)| node.clone())
         .collect();
     let mut obligations = Vec::new();
     let mut dirty = std::collections::BTreeMap::new();
-    for (node, ds) in &st.dirty {
-        if !ds.obligations.is_empty() {
+    for (node, state) in &st.dirty {
+        if !state.obligations.is_empty() {
             obligations.push(node.clone());
         }
-        let ids: Vec<String> = ds.dirty.keys().cloned().collect();
+        let ids: Vec<String> = state.dirty.keys().cloned().collect();
         if !ids.is_empty() {
             dirty.insert(node.clone(), ids);
         }
     }
-    // Command/file observation failures collect here — verify never reports
-    // clean on content it could not actually observe.
-    let mut unverified: Vec<String> = Vec::new();
-    // Locate diagnostics: a range node whose recorded fragment now matches
-    // ambiguously in the current file is a problem — candidates reported, the
-    // track is never silently re-pointed nor kept as a valid confirmation.
-    let mut locate: std::collections::BTreeMap<String, Vec<String>> = Default::default();
-    let mut scan = |range_key: &str, tip_id: &str, unverified: &mut Vec<String>| {
-        // Recover the recorded fragment from the range's tip commit's version
-        // and count its occurrences in the *current* file. >1 = ambiguous.
-        // Any read/decode failure pushes `unverified` — verify never reports
-        // clean on content it could not actually observe.
-        let fail = |unverified: &mut Vec<String>, why: String| {
-            unverified.push(format!("{range_key}: {why}"));
+    let identity = store.identity_diagnostic().into_iter().collect::<Vec<_>>();
+    if !identity.is_empty() {
+        return VerifyReport {
+            ok: false,
+            open_blocks,
+            obligations,
+            dirty,
+            locate: Default::default(),
+            missing: Vec::new(),
+            unverified: identity.clone(),
+            identity,
+            successful_observations: Default::default(),
         };
-        if let Ok(commit) = store.read_commit(tip_id) {
-            let path = commit
-                .payload
-                .get("path")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let range_arg = commit
-                .payload
-                .get("range")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let ver = match store.read_version(&commit.content_ref) {
-                Ok(v) => v,
-                Err(_) => {
-                    return fail(
-                        unverified,
-                        format!("version record missing ({})", commit.content_ref),
-                    );
+    }
+
+    let config_cwd = store.config_cwd().unwrap_or(project_root);
+    let mut cache = std::collections::BTreeMap::<Acquisition, Result<Vec<u8>, String>>::new();
+    let mut successful_observations = std::collections::BTreeMap::new();
+    let mut current = std::collections::BTreeMap::<String, Vec<u8>>::new();
+    let mut unverified = Vec::new();
+    let mut missing = Vec::new();
+    let mut missing_seen = std::collections::BTreeSet::new();
+
+    for node in st.tips.keys() {
+        let version_id = match store.source_version_id(node) {
+            Ok(Some(version_id)) => version_id,
+            Ok(None) => continue,
+            Err(error) => {
+                unverified.push(format!("{node}: {error}"));
+                continue;
+            }
+        };
+        let version = match store.read_version(&version_id) {
+            Ok(version) => version,
+            Err(error) => {
+                unverified.push(format!(
+                    "{node}: version record missing ({version_id}): {error}"
+                ));
+                continue;
+            }
+        };
+        let Some(descriptor) = store.current_acquisition(node, &version) else {
+            unverified.push(format!("{node}: current source location is unavailable"));
+            continue;
+        };
+        let logical_path = crate::relations::node::path_of(st, node)
+            .or_else(|| {
+                crate::relations::node::parent_of(st, node)
+                    .and_then(|parent| crate::relations::node::path_of(st, parent))
+            })
+            .unwrap_or("");
+        let encoding = if version.encoding.is_some() {
+            match crate::sources::encoding::resolve_runtime(
+                encoding_override,
+                version.encoding.as_deref(),
+                config_cwd,
+                store.root(),
+                logical_path,
+            ) {
+                Ok(encoding) => Some(encoding),
+                Err(error) => {
+                    unverified.push(format!("{node}: {error}"));
+                    continue;
                 }
-            };
-            let old_bytes = match store.read_content(&ver.sha256) {
-                Ok(b) => b,
-                Err(_) => return fail(unverified, format!("content blob missing {}", ver.sha256)),
-            };
-            // Decode CURRENT bytes under the version's recorded acquisition
-            // encoding — a non-UTF-8 recorded file is not invalid, it just
-            // needs its own decoder (same path commit uses).
-            let recorded_enc = match &ver.acquisition {
-                crate::records::version::Acquisition::File { encoding, .. } => encoding.clone(),
-                _ => "utf-8".to_string(),
-            };
-            let cur_bytes = match std::fs::read(&path) {
-                Ok(b) => b,
-                Err(e) => return fail(unverified, format!("cannot read {path}: {e}")),
-            };
-            let cur = match crate::sources::decode(&cur_bytes, &recorded_enc) {
-                Ok(s) => s,
-                Err(_) => {
-                    return fail(
-                        unverified,
-                        format!("cannot decode {path} as {recorded_enc}"),
-                    );
+            }
+        } else {
+            None
+        };
+        if matches!(descriptor, Acquisition::Command { .. }) && !run_cmd {
+            unverified.push(format!("{node} (command source, not run)"));
+            continue;
+        }
+        let collected = cache.entry(descriptor.clone()).or_insert_with(|| {
+            crate::sources::collect(&descriptor, config_cwd, project_root, false, None)
+                .map(|observation| observation.bytes)
+                .map_err(|error| error.to_string())
+        });
+        let bytes = match collected {
+            Ok(bytes) => bytes.clone(),
+            Err(error) => {
+                if let Acquisition::File { path, .. } = &descriptor
+                    && crate::relations::node::is_file_key(node)
+                    && missing_seen.insert(path.clone())
+                {
+                    missing.push(format!("{path} (no tombstone)"));
                 }
-            };
-            let old = match crate::sources::decode(&old_bytes, &recorded_enc) {
-                Ok(s) => s,
-                Err(_) => {
-                    return fail(
-                        unverified,
-                        format!("recorded content undecodable as {recorded_enc}"),
-                    );
-                }
-            };
-            if let Some((_, s, e)) = crate::relations::node::parse_range_arg(&range_arg) {
-                let frag: String = old
-                    .chars()
-                    .skip(s as usize)
-                    .take((e - s) as usize)
-                    .collect();
-                let cands = crate::relations::diff::locate_candidates(&frag, &cur);
-                if cands.len() > 1 {
-                    locate
-                        .entry(range_key.to_string())
-                        .or_default()
-                        .push(format!(
-                            "ambiguous: {} candidates for '{}'",
-                            cands.len(),
-                            frag
-                        ));
-                } else if cands.len() == 1 && cands[0] != s as usize {
-                    // Pure position move: the fragment survives intact
-                    // but at a NEW offset — a candidate migration the
-                    // spec requires explicit review for, never an
-                    // auto-kept confirmation, never a silent CLEAN.
-                    locate
-                        .entry(range_key.to_string())
-                        .or_default()
-                        .push(format!(
-                            "moved: fragment now at {} (was {}), needs review",
-                            cands[0], s
-                        ));
-                }
-                // Myers dirty check: a hunk overlapping the recorded
-                // range marks it dirty even when the fragment still
-                // locates — in-range edits always need review.
-                let hunks = crate::relations::diff::diff_text(&old, &cur);
-                let ranges = [crate::relations::range::Range {
-                    start: s,
-                    end: e,
-                    mode: crate::relations::range::Mode::Text,
-                }];
-                if crate::relations::diff::dirtied_by(&hunks, &ranges)[0] {
+                unverified.push(format!("{node}: {error}"));
+                continue;
+            }
+        };
+        match store.recover_version_bytes(&version.id.to_hex()) {
+            Ok(recorded) => {
+                if matches!(descriptor, Acquisition::Command { .. }) && recorded != bytes {
                     dirty
-                        .entry(range_key.to_string())
+                        .entry(node.clone())
                         .or_insert_with(Vec::new)
-                        .push(format!("in-range edit at {}", tip_id));
+                        .push(format!("command output changed ({})", st.tips[node]));
                 }
             }
+            Err(error) => unverified.push(format!("{node}: {error}")),
         }
-    };
-    for (k, tip) in &st.tips {
-        if crate::relations::node::is_range_key(k) {
-            scan(k, tip, &mut unverified);
-        }
+        current.insert(node.clone(), bytes.clone());
+        successful_observations.insert(
+            node.clone(),
+            SuccessfulObservation {
+                bytes,
+                acquisition: descriptor,
+                encoding,
+            },
+        );
     }
-    // Missing-source diagnostics: a tracked file node whose registered path
-    // vanished WITHOUT a tombstone is `missing` — never auto-interpreted as
-    // an intentional delete, never silently OK. A tombstone (Delete kind tip)
-    // is intentional and is not `missing`.
-    let mut missing: Vec<String> = Vec::new();
-    for (k, tip) in &st.tips {
-        if let Some(path) = k.strip_prefix("file:") {
-            let is_tombstone = store
-                .read_commit(tip)
-                .map(|c| c.kind == CommitKind::Delete)
-                .unwrap_or(false);
-            // A command/git-sourced file node is virtual — it has no disk
-            // path to go missing. Only FILE-acquired nodes check the FS.
-            let is_virtual = store
-                .read_commit(tip)
-                .and_then(|c| {
-                    store
-                        .read_version(&c.content_ref)
-                        .map(|v| v.acquisition.clone())
-                })
-                .map(|a| !matches!(a, crate::records::version::Acquisition::File { .. }))
-                .unwrap_or(false);
-            let proj_root = std::env::current_dir().unwrap_or_default();
-            if !is_tombstone && !is_virtual && !proj_root.join(path).exists() {
-                missing.push(format!("{path} (no tombstone)"));
+
+    let mut locate = std::collections::BTreeMap::new();
+    for range_key in st
+        .tips
+        .keys()
+        .filter(|key| crate::relations::node::is_range_key(key))
+    {
+        let Some(bytes) = current.get(range_key) else {
+            continue;
+        };
+        match assess_range(store, range_key, bytes) {
+            RangeAssessment::Clean | RangeAssessment::NoBody => {}
+            RangeAssessment::Dirty(message) => {
+                dirty.entry(range_key.clone()).or_default().push(message);
+            }
+            RangeAssessment::Locate(message) => {
+                locate
+                    .entry(range_key.clone())
+                    .or_insert_with(Vec::new)
+                    .push(message);
+            }
+            RangeAssessment::Unverified(message) => {
+                unverified.push(format!("{range_key}: {message}"));
             }
         }
     }
-    // Command-sourced versions: without `run_cmd` permission we cannot get
-    // their current output — report them `unverified` (incomplete), never
-    // a fabricated pass and never a hidden failure.
-    let proj_root = std::env::current_dir().unwrap_or_default();
-    for (k, tip) in &st.tips {
-        if let Ok(c) = store.read_commit(tip)
-            && let Ok(v) = store.read_version(&c.content_ref)
-            && let crate::records::version::Acquisition::Command { executable, args } =
-                &v.acquisition
-        {
-            if !run_cmd {
-                unverified.push(format!("{k} (command source, not run)"));
-            } else {
-                // Re-run the command and compare its stdout to the
-                // recorded content — like a file re-read. Changed
-                // output → dirty; identical → stays confirmed.
-                match crate::sources::command::observe_command(executable, args, &proj_root) {
-                    Ok(out) if out.exit_ok => {
-                        // A missing recorded blob is not "empty output" — it
-                        // is a store-integrity failure, never compared equal.
-                        match store.read_content(&v.sha256) {
-                            Ok(recorded) => {
-                                if out.stdout != recorded {
-                                    dirty
-                                        .entry(k.clone())
-                                        .or_insert_with(Vec::new)
-                                        .push(format!("command output changed ({})", tip));
-                                }
-                            }
-                            Err(_) => unverified
-                                .push(format!("{k} (recorded content blob missing {})", v.sha256)),
-                        }
-                    }
-                    _ => {
-                        // Non-zero exit / spawn failure → unverified,
-                        // never a fabricated clean.
-                        unverified.push(format!("{k} (command failed to run)"));
-                    }
-                }
-            }
-        }
-    }
+
     let ok = open_blocks.is_empty()
         && obligations.is_empty()
         && dirty.is_empty()
@@ -1286,74 +1890,32 @@ pub fn verify(store: &Store, run_cmd: bool) -> VerifyReport {
         locate,
         missing,
         unverified,
+        identity,
+        successful_observations,
     }
 }
 
-/// Recompute whether a range node's recorded content still matches the
-/// current file — the same Myers check verify runs, exposed so a FileVerify
-/// commit can block on outstanding (not-yet-persisted) range dirt. Returns
-/// true when the range is dirty or has a position problem needing review.
-pub fn range_needs_review(store: &Store, tip_id: &str) -> bool {
-    let commit = match store.read_commit(tip_id) {
-        Ok(c) => c,
-        Err(_) => return false,
+/// Recompute whether a range node's effective body still matches the current
+/// authoritative file location. Missing/corrupt evidence blocks verification;
+/// a first-BEGIN-only range has no body and is handled by open-block state.
+pub fn range_needs_review(store: &Store, project_root: &std::path::Path, range_key: &str) -> bool {
+    let Some(version) = node_source_version(store, range_key) else {
+        return true;
     };
-    let path = commit
-        .payload
-        .get("path")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let range_arg = commit
-        .payload
-        .get("range")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    let (_, s, e) = match crate::relations::node::parse_range_arg(&range_arg) {
-        Some(t) => t,
-        None => return false,
+    let Some(descriptor) = store.current_acquisition(range_key, &version) else {
+        return true;
     };
-    let ver = match store.read_version(&commit.content_ref) {
-        Ok(v) => v,
-        Err(_) => return false,
-    };
-    let old_bytes = match store.read_content(&ver.sha256) {
-        Ok(b) => b,
-        Err(_) => return true, // missing blob = cannot prove clean → block
-    };
-    // Decode both sides under the version's recorded acquisition encoding —
-    // a non-UTF-8 file fails read_to_string but is perfectly decodable here.
-    let recorded_enc = match &ver.acquisition {
-        crate::records::version::Acquisition::File { encoding, .. } => encoding.clone(),
-        _ => "utf-8".to_string(),
-    };
-    let cur_bytes = match std::fs::read(&path) {
-        Ok(b) => b,
-        Err(_) => return true,
-    };
-    let cur = match crate::sources::decode(&cur_bytes, &recorded_enc) {
-        Ok(s) => s,
-        Err(_) => return true, // cannot decode = cannot prove clean → block
-    };
-    let old = match crate::sources::decode(&old_bytes, &recorded_enc) {
-        Ok(s) => s,
-        Err(_) => return true,
-    };
-    let frag: String = old
-        .chars()
-        .skip(s as usize)
-        .take((e - s) as usize)
-        .collect();
-    let cands = crate::relations::diff::locate_candidates(&frag, &cur);
-    if cands.len() > 1 || (cands.len() == 1 && cands[0] != s as usize) {
-        return true; // ambiguous or moved — needs review
+    if !matches!(descriptor, Acquisition::File { .. }) {
+        return true;
     }
-    let hunks = crate::relations::diff::diff_text(&old, &cur);
-    let ranges = [crate::relations::range::Range {
-        start: s,
-        end: e,
-        mode: crate::relations::range::Mode::Text,
-    }];
-    crate::relations::diff::dirtied_by(&hunks, &ranges)[0]
+    let config_cwd = store.config_cwd().unwrap_or(project_root);
+    let Ok(observation) =
+        crate::sources::collect(&descriptor, config_cwd, project_root, false, None)
+    else {
+        return true;
+    };
+    !matches!(
+        assess_range(store, range_key, &observation.bytes),
+        RangeAssessment::Clean | RangeAssessment::NoBody
+    )
 }

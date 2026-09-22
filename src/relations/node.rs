@@ -1,67 +1,113 @@
-//! Node keys: how file and range nodes are named in the mount tree.
+//! Object keys and derived current locations.
 //!
-//! A range node is a *first-class object* with its own commit chain, mounted
-//! under its file node. The key encodes the tracked span so the same file
-//! can carry many independent ranges (including identical or overlapping
-//! spans — those are separate chains with separate histories).
+//! Persistent file/range identity is always `<kind>:<chain-root-commit-id>`.
+//! File paths live in `State::locations`; ranges mount under file object keys.
+//! Nothing recovers identity by parsing a path or coordinate from a key.
 
-use crate::relations::range::Mode;
+use crate::records::store::State;
+use crate::relations::range::{Mode, Range};
 
-/// Key for a file node: `file:<path>`.
-pub fn file_key(path: &str) -> String {
-    format!("file:{path}")
+/// Persisted range position. Numeric fields stay decimal strings so canonical
+/// JSON never loses precision; consumers convert directly to the shared Range.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Position {
+    pub mode: Mode,
+    pub start: String,
+    pub end: String,
 }
 
-/// Key for a range node: `range:<path>@<mode>:<start>-<end>` for the
-/// canonical whole-span chain, or `range:<path>@<mode>:<start>-<end>#<nonce>`
-/// for a duplicate-span independent chain. The span is part of identity; a
-/// nonce distinguishes two tracked objects over identical coordinates.
-pub fn range_key(path: &str, mode: Mode, start: u64, end: u64) -> String {
-    let m = match mode {
-        Mode::Text => "text",
-        Mode::Byte => "byte",
-    };
-    format!("range:{path}@{m}:{start}-{end}")
+impl From<Range> for Position {
+    fn from(range: Range) -> Self {
+        Self {
+            mode: range.mode,
+            start: range.start.to_string(),
+            end: range.end.to_string(),
+        }
+    }
 }
 
-/// A duplicate-coordinate independent range chain (`#nonce` suffix).
-pub fn range_key_nonce(path: &str, mode: Mode, start: u64, end: u64, nonce: &str) -> String {
-    format!("{}#{}", range_key(path, mode, start, end), nonce)
+impl TryFrom<Position> for Range {
+    type Error = &'static str;
+
+    fn try_from(position: Position) -> Result<Self, Self::Error> {
+        let start = position
+            .start
+            .parse()
+            .map_err(|_| "invalid position start")?;
+        let end = position.end.parse().map_err(|_| "invalid position end")?;
+        if end < start {
+            return Err("position end precedes start");
+        }
+        Ok(Self {
+            start,
+            end,
+            mode: position.mode,
+        })
+    }
 }
 
-/// Parse a `--range` arg like `0-5` or `byte:0-5` into (mode, start, end).
-/// Returns None when unparseable — caller reports the diagnostic, never a
-/// silent clamp or a guessed span.
-pub fn parse_range_arg(arg: &str) -> Option<(Mode, u64, u64)> {
-    let (mode, rest) = if let Some(r) = arg.strip_prefix("byte:") {
-        (Mode::Byte, r)
-    } else if let Some(r) = arg.strip_prefix("text:") {
-        (Mode::Text, r)
-    } else {
-        (Mode::Text, arg) // bare "0-5" defaults to text coordinates
-    };
-    let (s, e) = rest.split_once('-')?;
-    let start = s.trim().parse().ok()?;
-    let end = e.trim().parse().ok()?;
-    Some((mode, start, end))
+pub fn position_value(range: Range) -> serde_json::Value {
+    serde_json::to_value(Position::from(range)).expect("position is serializable")
 }
 
-/// Does `key` name a range node (vs a file node)?
+pub fn position_from_value(value: &serde_json::Value) -> Option<Range> {
+    serde_json::from_value::<Position>(value.clone())
+        .ok()
+        .and_then(|position| position.try_into().ok())
+}
+
+/// Key for a file object rooted at `root_commit_id`.
+pub fn file_key(root_commit_id: &str) -> String {
+    format!("file:{root_commit_id}")
+}
+
+/// Key for a range object rooted at `root_commit_id`.
+pub fn range_key(root_commit_id: &str) -> String {
+    format!("range:{root_commit_id}")
+}
+
+/// Current file object at a project-relative path. This is a derived locator,
+/// never object identity; duplicate live locations are rejected at store open.
+pub fn file_at_path<'a>(state: &'a State, path: &str) -> Option<&'a str> {
+    state
+        .locations
+        .iter()
+        .find_map(|(node, current)| (current == path && is_file_key(node)).then_some(node.as_str()))
+}
+
+/// Current project-relative path for a file object.
+pub fn path_of<'a>(state: &'a State, node: &str) -> Option<&'a str> {
+    state.locations.get(node).map(String::as_str)
+}
+
+/// Key for a peer endpoint: `peer:<store-id>:<remote node key>`.
+pub fn peer_key(store_id: &str, remote_node_key: &str) -> String {
+    format!("peer:{store_id}:{remote_node_key}")
+}
+
+/// Does `key` name a range object?
 pub fn is_range_key(key: &str) -> bool {
     key.starts_with("range:")
 }
 
-/// The file a range node mounts under.
-pub fn parent_of(key: &str) -> String {
-    if let Some(rest) = key.strip_prefix("range:") {
-        let path = rest.split('@').next().unwrap_or("");
-        file_key(path)
-    } else {
-        "root".to_string()
-    }
-}
-
-/// Is `key` a whole-file endpoint (illegal as a link endpoint)?
+/// Does `key` name a file object?
 pub fn is_file_key(key: &str) -> bool {
     key.starts_with("file:")
+}
+
+/// Is `key` a peer endpoint reference?
+pub fn is_peer_key(key: &str) -> bool {
+    key.starts_with("peer:")
+}
+
+/// The node a range mounts under — looked up in the mount tree, never
+/// parsed out of the key (the key carries no location).
+pub fn parent_of<'a>(state: &'a State, key: &str) -> Option<&'a str> {
+    for (parent, children) in &state.mounts {
+        if children.iter().any(|c| c == key) {
+            return Some(parent.as_str());
+        }
+    }
+    None
 }

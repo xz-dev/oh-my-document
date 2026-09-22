@@ -1,31 +1,28 @@
 //! Group 9: command sources — fixed argv, project-root cwd, stdout-only
 //! content, exit-0 requirement, execution permission precedence.
 
-use omd::sources::command::{observe_command, parse_command_ref};
+use omd::sources::command::{observe_command, parse_args_json};
 use omd::sources::permission::{RunChoice, may_run};
 
 #[test]
 fn literal_argv_boundaries_preserved() {
     // Args with empty strings, spaces, and literal `::` keep their order and
     // boundaries — never re-split.
-    let (exe, argv) =
-        parse_command_ref("command::mycmd::[\"\", \"has space\", \"a::b\", \"x\"]").unwrap();
-    assert_eq!(exe, "mycmd");
+    let argv = parse_args_json("[\"\", \"has space\", \"a::b\", \"x\"]").unwrap();
     assert_eq!(argv, vec!["", "has space", "a::b", "x"]);
 }
 
 #[test]
 fn non_string_args_rejected_before_launch() {
     // Numbers/objects in the JSON array are invalid — rejected pre-launch.
-    assert!(parse_command_ref("command::c::[1,2]").is_err());
-    assert!(parse_command_ref("command::c::[{\"a\":1}]").is_err());
-    assert!(parse_command_ref("command::c::not-json").is_err());
+    assert!(parse_args_json("[1,2]").is_err());
+    assert!(parse_args_json("[{\"a\":1}]").is_err());
+    assert!(parse_args_json("not-json").is_err());
 }
 
 #[test]
 fn empty_argv_is_legal() {
-    let (exe, argv) = parse_command_ref("command::c::[]").unwrap();
-    assert_eq!(exe, "c");
+    let argv = parse_args_json("[]").unwrap();
     assert!(argv.is_empty());
 }
 

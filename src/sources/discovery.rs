@@ -17,6 +17,8 @@ pub enum DiscoveryError {
     BadExplicit(String),
     #[error("ambiguous metadata dir: {0} candidates")]
     Ambiguous(usize),
+    #[error("metadata dir is invalid: {0}")]
+    Invalid(String),
     #[error("no project root found")]
     NoRoot,
 }
@@ -27,14 +29,14 @@ pub enum DiscoveryError {
 pub fn config_dir(cwd: &Path) -> PathBuf {
     env_path("OMD_CONFIG_PATH", cwd)
         .or_else(xdg_config)
-        .unwrap_or_else(|| PathBuf::from(".omd"))
+        .unwrap_or_else(|| cwd.join(".omd"))
 }
 
 /// Cache dir: `OMD_CACHE_PATH` first, then XDG `~/.cache/omd`, then fallback.
 pub fn cache_dir(cwd: &Path) -> PathBuf {
     env_path("OMD_CACHE_PATH", cwd)
         .or_else(xdg_cache)
-        .unwrap_or_else(|| PathBuf::from(".omd-cache"))
+        .unwrap_or_else(|| cwd.join(".omd-cache"))
 }
 
 fn env_path(var: &str, cwd: &Path) -> Option<PathBuf> {
@@ -76,13 +78,19 @@ pub fn metadata_dir(
         if !p.exists() {
             return Err(DiscoveryError::BadExplicit(p.display().to_string()));
         }
+        crate::records::store::Store::identity_at(p)
+            .map_err(|error| DiscoveryError::Invalid(error.to_string()))?;
         return Ok(p.to_path_buf());
     }
     if let Some(p) = registered {
+        crate::records::store::Store::identity_at(&p)
+            .map_err(|error| DiscoveryError::Invalid(error.to_string()))?;
         return Ok(p);
     }
     let dot = root.join(".omd");
     if dot.exists() {
+        crate::records::store::Store::identity_at(&dot)
+            .map_err(|error| DiscoveryError::Invalid(error.to_string()))?;
         return Ok(dot);
     }
     // Direct children of root that look like a metadata dir (have a manifest
@@ -92,6 +100,8 @@ pub fn metadata_dir(
         for e in rd.flatten() {
             let p = e.path();
             if p.is_dir() && p.join("manifest.toml").exists() {
+                crate::records::store::Store::identity_at(&p)
+                    .map_err(|error| DiscoveryError::Invalid(error.to_string()))?;
                 cands.push(p);
             }
         }

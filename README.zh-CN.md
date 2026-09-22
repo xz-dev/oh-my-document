@@ -4,55 +4,13 @@
 
 **代码改了，文档别掉队。**
 
-[设计思想](#为什么面向-agent) · [读懂项目](#借助-agent逐步读懂项目) · [用途](#它能帮你做什么) · [安装](#安装) · [动手试试](#试一下把一条需求连到实现) · [文档](#继续了解) · [反馈](https://github.com/xz-dev/oh-my-document/issues)
+OMD（`omd`）把需求、设计、图表和代码中的具体范围关联起来，记录这些范围为什么相关，在位置变化时保持对象身份，并报告哪些内容需要重新核对。人和 Agent 使用同一套 CLI 与检查规则。
 
-需求里写着“最多重试 3 次”，后来改成了 5 次。负责重试的代码呢？谁还记得它在哪儿，又有没有一起改？
-
-**OMD（`omd`）通过代码、文档与 UML 图之间的映射，帮助人借助 Agent 逐步读懂项目，并理解和调整 Agent 写出的代码。** 它把需求、设计与实现中的具体片段关联起来，跟踪内容变化，并保存处理变化的理由，为项目理解和编码过程留下可核对的依据。
-
-目前的使用入口是 Rust 编写的 CLI，人和 Agent 都可以调用。Markdown、图表源码和程序源码可以留在原来的位置，跟踪记录放在 `.omd/` 中。
-
-## 为什么面向 Agent
-
-Agent 写完一版代码后，人仍然需要知道：它依据哪条需求？实现有没有偏离设计？这次改动还有哪些地方需要一起检查？如果这些信息只留在对话里，接手的人就得重新问一遍，或者重新读一遍代码。
-
-OMD 的设计目标，是把这些依据和关系留在项目里。人可以先明确需求、流程与组件关系，让 Agent 继续细化到函数和实现；当方向需要调整时，也能从相应的设计和关联片段入手，指出哪里需要重新处理。
-
-**这里的“可预见性”，是让人更有依据地判断一次改动，而不是预测 Agent 下一行会写什么：**
-
-- **看得懂依据：** 这段实现对应哪条需求、哪段设计，为什么这样改？
-- **知道要核对哪里：** 沿着已经建立的关联，检查哪些内容变了、哪些还没有处理。
-- **找得到调整入口：** 修改需求或设计后，明确要求 Agent 核对哪些实现，并留下处理理由。
-
-这些关联需要人或 Agent 明确建立，OMD 不会自动猜出所有依赖。它希望减少的是“只能相信 Agent 说已经完成”的情况，让人能对照具体内容和记录判断工作进展。
-
-因此，OMD 被设计为 **Agent 编写代码的第二层保障**：Agent 负责执行修改，工具负责可重复的内容与规则检查，人负责判断和调整方向。它补充测试与代码审查；有关联、检查通过，都不等于实现已经符合需求或不存在缺陷。
-
-OMD 不接管编码过程，也不绑定某个 Agent。人和 Agent 使用同一套规则，不因自动化而放宽检查。
-
-## 借助 Agent，逐步读懂项目
-
-接手陌生项目时，可以让 Agent 从已有代码出发，整理说明和 UML 图，再通过 OMD 把它们对应到实际源码范围。不必一开始就读完整个仓库，先围绕当前问题建立理解，再按需要深入。
-
-1. **先看全貌。** 让 Agent 梳理项目的用途、主要组件和关系，用文档与 UML 图解释整体结构。
-2. **沿着问题深入。** 选一个想弄懂的流程，让 Agent 展开相关模块、状态和分支，并把说明、图表源码与实现片段关联起来。
-3. **回到代码核对。** 沿已建立的映射阅读实现，追问不清楚的地方，纠正解释或补充细节；这些关联留在项目里，供后续继续阅读和检查变化。
-
-这与从设计推进实现相互补充：写代码时，从需求和 UML 细化到实现；读项目时，从已有代码整理出说明和图，再逐层深入。解释与绘图由人或 Agent 完成，OMD 维护显式建立的关联，方便核对解释的依据，不把解释自动认定为事实。
-
-## 它能帮你做什么
-
-| 你在维护什么 | 可以怎样关联 |
-| --- | --- |
-| 一条需求和它的实现 | 把需求中的那段话连到对应代码，修改后有明确的核对对象 |
-| 一张状态图和业务逻辑 | 把图表源码中的状态、分支连到处理它们的函数 |
-| 同一个算法的两种实现 | 把对应片段关联起来，留下每次适配的记录 |
-
-你选择需要跟踪的片段，不必把整份文档或整个文件当成一个整体。OMD 的文件跟踪不依赖 Git 仓库，也不要求更换编辑器、文档格式或绘图工具。
+OMD 是第二层保障，不是语义证明器。有关联或检查通过，不等于实现一定正确。
 
 ## 安装
 
-先安装 [Rust 与 Cargo](https://rustup.rs/)，然后从源码安装：
+先安装 [Rust 与 Cargo](https://rustup.rs/)，再从源码构建：
 
 ```bash
 git clone https://github.com/xz-dev/oh-my-document.git
@@ -60,87 +18,162 @@ cd oh-my-document
 cargo install --path . --locked
 ```
 
-安装后运行 `omd --help` 即可查看命令。目前主要在 Linux 上开发和验证。
+运行 `omd --help` 查看命令。目前开发与验证集中在 Linux；现有证据不代表 Windows、macOS 已完成验证。
 
-## 试一下：把一条需求连到实现
+## 跑一遍完整本地流程
 
-下面用两个很小的文件演示。命令使用 Bash；不需要创建 Git 仓库。
+需要 Bash、Python 3，并保证 `omd` 在 `PATH` 中。下面的脚本使用隔离的 HOME、配置和缓存目录。首次初始化之后，每次写入前都从 `verify` 获取新的调用方观察凭据；后续使用的 ID 全部来自 OMD 实际返回的 JSON。
 
-### 1. 写下需求和实现
-
+<!-- readme-workflow:start -->
 ```bash
-mkdir omd-demo
-cd omd-demo
+set -euo pipefail
+OMD_BIN=${OMD_BIN:-omd}
+DEMO=$(mktemp -d)
+cleanup() {
+  if [ "${KEEP_DEMO:-0}" = 1 ]; then
+    printf 'demo_dir=%s\n' "$DEMO"
+  else
+    rm -rf "$DEMO"
+  fi
+}
+trap cleanup EXIT
+export HOME="$DEMO/home"
+export OMD_CONFIG_PATH="$DEMO/config"
+export OMD_CACHE_PATH="$DEMO/cache"
+mkdir -p "$HOME" "$OMD_CONFIG_PATH" "$OMD_CACHE_PATH" "$DEMO/project"
+cd "$DEMO/project"
 
-printf '最多重试 3 次。\n' > spec.md
+json_field() {
+  python3 -c 'import json,sys
+v=json.load(sys.stdin)
+for key in sys.argv[1].split("."):
+    v=v[int(key)] if isinstance(v,list) else v[key]
+print(json.dumps(v,separators=(",",":")) if isinstance(v,(dict,list)) else v)' "$1"
+}
+observe() {
+  local name=$1
+  "$OMD_BIN" verify --json > "$DEMO/observation-$name.json"
+  json_field data.expected < "$DEMO/observation-$name.json" > "$DEMO/expected-$name.json"
+}
+
+printf '最多重试 3 次。\n' > 需求.md
 printf 'MAX_RETRIES = 3\n' > retry.py
+
+"$OMD_BIN" init 需求.md --json > "$DEMO/init-spec.json"
+observe init-code
+"$OMD_BIN" init retry.py --expected "$DEMO/expected-init-code.json" --json \
+  > "$DEMO/init-code.json"
+
+observe spec-range
+"$OMD_BIN" commit commit 需求.md --range 0 9 --mode text \
+  --reason '约定最多重试 3 次' \
+  --expected "$DEMO/expected-spec-range.json" --json > "$DEMO/spec-range.json"
+SPEC_RANGE=$(json_field data.object.chain_root_commit_id < "$DEMO/spec-range.json")
+
+observe code-range
+"$OMD_BIN" commit commit retry.py --range 0 15 --mode text \
+  --link-from "$SPEC_RANGE" \
+  --reason '用 MAX_RETRIES 实现重试上限' \
+  --expected "$DEMO/expected-code-range.json" --json > "$DEMO/code-range.json"
+CODE_RANGE=$(json_field data.object.chain_root_commit_id < "$DEMO/code-range.json")
+LINK_ID=$(json_field data.link_records.0.link_id < "$DEMO/code-range.json")
+
+# OMD 记录逻辑改名；工作区文件需要另行移动。
+observe rename
+"$OMD_BIN" rename retry.py retry_limit.py \
+  --expected "$DEMO/expected-rename.json" --json > "$DEMO/rename.json"
+mv retry.py retry_limit.py
+
+"$OMD_BIN" list --json > "$DEMO/list.json"
+"$OMD_BIN" log "$CODE_RANGE" --json > "$DEMO/log.json"
+python3 - "$DEMO/list.json" "$SPEC_RANGE" "$CODE_RANGE" "$LINK_ID" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1]))
+spec,code,link=sys.argv[2:]
+objects=v["data"]["objects"]
+assert any(o["chain_root_commit_id"]==spec for o in objects)
+assert any(o["chain_root_commit_id"]==code and
+           o["project_relative_path"]=="retry_limit.py" for o in objects)
+assert any(x["link_id"]==link for x in v["data"]["links"])
+PY
+
+printf '最多重试 5 次。\n' > 需求.md
+set +e
+"$OMD_BIN" verify --json > "$DEMO/verify-dirty.json"
+VERIFY_STATUS=$?
+set -e
+test "$VERIFY_STATUS" -eq 1
+python3 - "$DEMO/verify-dirty.json" "$SPEC_RANGE" <<'PY'
+import json,sys
+v=json.load(open(sys.argv[1]))
+assert v["data"]["ok"] is False
+assert "range:"+sys.argv[2] in v["data"]["dirty"]
+PY
+
+set +e
+"$OMD_BIN" check --json > "$DEMO/check.json"
+CHECK_STATUS=$?
+set -e
+test "$CHECK_STATUS" -eq 1
+printf 'spec_range=%s\ncode_range=%s\nlink_id=%s\n' \
+  "$SPEC_RANGE" "$CODE_RANGE" "$LINK_ID"
+```
+<!-- readme-workflow:end -->
+
+范围使用从 0 开始、左闭右开的 `[start, end)`。text 模式按解码后的 Unicode scalar value 计数，byte 模式按原始字节计数。脚本中的 ID 是 OMD 实际返回的链根 commit ID，不是“路径加坐标”的标签。JSON v2 分别报告链根、当前 tip、有效范围 commit、来源版本、位置和 link 身份。
+
+## 来源字段
+
+来源类型与坐标单位分开表达：
+
+- **file 是默认来源。** `omd init docs/spec.md` 观察该项目相对路径。恢复内容位于另一个已登记项目时，使用 `--source-project` 与 `--source-path`。
+- **command 必须显式且参数保持字面值。** 使用 `--source-type command --executable <程序> --args-json '<JSON 字符串数组>'`。OMD 不增加隐式 shell；只有进程 exit 0 后的完整 stdout 才是成功内容。`list`、`log`、`tree` 和缓存重建不会执行命令，后续 `verify`/`check` 也需要显式许可。
+- **Git 历史必须精确且已在本地。** 使用 `--source-type git --source-project <alias> --git-commit <完整对象 ID> --git-path <该提交内路径>`。不接受浮动 ref，不自动 clone/fetch，也不把 HEAD 当成当前文件内容。
+- `--mode text|byte` 只选择坐标单位，不选择来源。路径中的 `@`、`#`、`%`、空格、平台允许的冒号和 Unicode 都保持字面含义。
+
+## 配置先行初始化
+
+真正的新项目可以在第一次显式 `init` 前只包含 `.omd/omd.toml`，例如先设置编码：
+
+```toml
+format = "omd.encoding/1"
+default_encoding = "windows-1252"
 ```
 
-| `spec.md` | `retry.py` |
-| --- | --- |
-| 最多重试 **3** 次。 | `MAX_RETRIES = 3` |
+首次初始化会保留配置原字节，并使用该文本视图。已有、损坏、显式外置或已经绑定的元数据不能借此覆盖初始化。读取配置不会执行来源命令，也不会自动授予普通写入资格。
 
-### 2. 告诉 OMD，这两段内容有关联
+## 本机映射、移动与副本
 
-```bash
-omd init spec.md
-omd init retry.py
+`omd project register <alias> <project-root> <metadata-dir>` 把本机位置写入 `projects.toml`；共享历史保存逻辑 project/store 身份与项目相对路径。登记和移动映射也是写操作，需要先由 `verify` 得到新的 `--expected` 调用方凭据。
 
-omd commit commit spec.md --range 0-9 \
-  --reason "约定最多重试 3 次"
+显式移动同一个权威 store 后，可以保留原 store ID。复制元数据并把副本作为另一处可写权威则不同：原始副本默认只读，必须显式运行 `omd activate`，取得新 store ID，并补齐必要 peer 保护。其他位置原本指向旧 store 的外部引用不会自动改指副本。OMD 不负责同步或合并两份可写历史。
 
-omd commit commit retry.py --range 0-15 \
-  --link-from "spec.md@text:0-9" \
-  --reason "用 MAX_RETRIES 实现重试上限"
-```
+## 运行边界
 
-这里的范围是**从 0 开始的字符位置，包含起点、不包含终点**，不是行号。`0-9` 对应“最多重试 3 次。”，`0-15` 对应 `MAX_RETRIES = 3`；两者都不含末尾换行。
-
-`init` 登记文件，`--range` 选择片段，`--link-from` 建立关联，`--reason` 留下理由。OMD 的 `commit` 记录保存在 `.omd/`，与 Git 提交无关。
-
-### 3. 改一下需求，再检查
-
-```bash
-printf '最多重试 5 次。\n' > spec.md
-omd verify
-```
-
-检查结果以 JSON 返回：`data.ok` 为 `false`，`data.dirty` 中列出 `range:spec.md@text:0-9`。这段需求已经变了，需要重新核对；此时 `retry.py` 中仍然是 `3`。
-
-接下来，你可以检查实现是否也要调整，并在 OMD 中记录处理结果和理由。它不会替你把代码里的数字改成 `5`。
-
-**本例的已知问题：** 当前版本在建立上述关联后，`verify` 还会为 `retry.py` 的关联范围报告 `version record missing`，未编辑文件时也会出现。文档修改能够被检出，但这条关联验证流程尚未完整跑通；这里保留实际结果，不把它当作校验成功。
-
-## 放进自己的工作流
-
-从一条经常一起修改的需求和实现开始，逐步增加关联即可。在 Agent 工作流中，可以把建立关联、检查变化和记录处理理由约定为任务的一部分；人也能用同一套命令复查。
-
-- **想知道哪些内容变了？** 运行 `omd verify`，查看需要复核的跟踪范围。
-- **想知道哪些内容还没关联？** 配置标签与关联规则后运行 `omd check`，查看覆盖情况；规则可选择提醒或使检查失败。
-- **想回看记录？** 用 `omd list` 查看当前提交 ID，再用 `omd log <commit-id>` 查看这条链的历史。
-- **想接入脚本？** 用 `--json` 读取结构化结果，保留你现有的开发流程。
-
-默认在当前项目的 `.omd/` 保存记录，也可以用 `--meta <目录>` 指定位置。更多选项从 `omd --help` 和 `omd commit --help` 查看。
+- 权威结构化文本、不可变记录和必要内容默认保存在 `.omd/`；`OMD_CACHE_PATH` 下的查询索引可以删除重建。
+- `OMD_CONFIG_PATH`、`OMD_CACHE_PATH` 优先于平台/XDG 后备路径。`--root`、`--meta`、`--project`、`--store` 用于明确选择上下文；显式错误不会悄悄回退。
+- 写入必须携带新的调用方依据。publication、来源、登记、映射或 peer 依据过期时直接失败，不自动读取新值后重试。
+- 跨 store 发布先保护被引用版本，再发布消费方。晚期 I/O 失败可能留下已成功发布的成员和开放块；JSON 会如实列出成功成员、失败步骤、边界和 operation ID，不假称整体回滚。
+- 不支持的旧 store，以及已移除的复合来源/坐标接口，会被明确拒绝，不自动迁移或重写。
 
 ## 继续了解
 
-README 只带你认识工具和走一遍例子。设计背景与更细的约定在这里：
+- [需求与设计历史](docs/requirements.md)
+- [来源与坐标](docs/source-model.md)
+- [存储与路径](docs/storage.md)
+- [实施交接](docs/handoff.md)
+- [规格与任务证据](spec-traceability.md)
 
-- [需求与设计目标](docs/requirements.md) — 为什么要跟踪内容范围、关联和处理理由。
-- [来源与坐标](docs/source-model.md) — 文件、命令输出、字符范围与字节范围的设计约定。
-- [存储与路径](docs/storage.md) — 元数据和索引各自保存什么。
-- [规格与实现追溯](spec-traceability.md) — 需要查验实现细节时再看。
+Rust 核心和 CLI 已经存在，但整个 change 是否接受仍需独立审查。产品 skills 与可选 Lean 工作流尚未交付或验证。OMD 不承诺证明语义等价、判断文档充分，或已经覆盖所有平台。
 
-这些文档包含设计阶段的约定，具体命令参数以当前 CLI 帮助为准。远程 URL 身份映射与可选 Lean 产品 skill 尚未提供。
+## 参与开发
 
-## 交流与参与
-
-用它关联一小段真实的说明和实现，看看修改后能否找到你关心的范围。遇到不符合预期的结果，欢迎在 [Issues](https://github.com/xz-dev/oh-my-document/issues) 留下命令、相关文件片段，以及你希望看到的行为。
-
-想修改代码，可以从仓库运行：
+在仓库中运行：
 
 ```bash
-cargo test --all-targets
+cargo fmt --check
+cargo build --locked --bin omd
+cargo test --locked
 ```
 
 ## 许可证

@@ -1,69 +1,70 @@
-//! The unified `--json` envelope every command emits on stdout (E-12.4).
+//! Versioned structured CLI output.
 //!
-//! One parseable JSON object per invocation — stderr stays clean for
-//! diagnostics. Unknown current content is `incomplete`/`null`, never a fake
-//! empty-content 100%. Reset results carry requested vs actual plus warning;
-//! partial successes and indeterminate publishes are machine-distinguishable.
+//! Every invocation emits one JSON object on stdout. Diagnostics keep stable
+//! typed fields; command payloads remain under `data`.
 
 use serde::Serialize;
 
-/// The single stdout envelope. `ok` is the top-level success bit; `code`
-/// mirrors the process exit code so scripts needn't read the status.
+pub const SCHEMA_VERSION: &str = "2";
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Diagnostic {
+    pub kind: String,
+    pub severity: String,
+    pub message: String,
+    pub store: Option<String>,
+    pub node: Option<serde_json::Value>,
+    pub commit_id: Option<String>,
+}
+
+impl Diagnostic {
+    pub fn new(
+        kind: impl Into<String>,
+        severity: impl Into<String>,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            kind: kind.into(),
+            severity: severity.into(),
+            message: message.into(),
+            store: None,
+            node: None,
+            commit_id: None,
+        }
+    }
+
+    pub fn context(
+        mut self,
+        store: Option<String>,
+        node: Option<serde_json::Value>,
+        commit_id: Option<String>,
+    ) -> Self {
+        self.store = store;
+        self.node = node;
+        self.commit_id = commit_id;
+        self
+    }
+}
+
 #[derive(Debug, Serialize)]
 pub struct Envelope {
+    pub schema_version: &'static str,
     pub ok: bool,
-    /// Numeric exit code (0 success, 1 generic failure, 2 usage).
-    pub code: i32,
-    /// The command-specific payload (report, commit id, coverage, …).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub result: Option<serde_json::Value>,
-    /// Diagnostics that must not corrupt the payload channel.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub diagnostics: Vec<String>,
-    /// Partial-success detail: which sub-operations succeeded before a
-    /// failure (machine-distinguishable, never a bare error string).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub partial: Vec<String>,
+    pub data: serde_json::Value,
+    pub diagnostics: Vec<Diagnostic>,
 }
 
 impl Envelope {
-    pub fn ok(result: serde_json::Value) -> Self {
+    pub fn new(ok: bool, data: serde_json::Value, diagnostics: Vec<Diagnostic>) -> Self {
         Self {
-            ok: true,
-            code: 0,
-            result: Some(result),
-            diagnostics: vec![],
-            partial: vec![],
+            schema_version: SCHEMA_VERSION,
+            ok,
+            data,
+            diagnostics,
         }
     }
-    pub fn err(msg: impl Into<String>, code: i32) -> Self {
-        Self {
-            ok: false,
-            code,
-            result: None,
-            diagnostics: vec![msg.into()],
-            partial: vec![],
-        }
-    }
-    /// Unknown current content — `incomplete`, not a fabricated 100%.
-    pub fn incomplete(what: impl Into<String>) -> serde_json::Value {
-        serde_json::json!({ "status": "incomplete", "subject": what.into(), "coverage": null })
-    }
-    /// A reset result: requested vs actual landing + warning.
-    pub fn reset(requested: &str, actual: &str, warning: &str) -> serde_json::Value {
-        serde_json::json!({
-            "reset": { "requested": requested, "actual": actual },
-            "warning": warning,
-        })
-    }
-    /// A composite that partially succeeded — lists completed sub-ops.
-    pub fn partial(completed: Vec<String>, err: impl Into<String>) -> Self {
-        Self {
-            ok: false,
-            code: 1,
-            result: None,
-            diagnostics: vec![err.into()],
-            partial: completed,
-        }
-    }
+}
+
+pub fn decimal(value: u64) -> String {
+    value.to_string()
 }

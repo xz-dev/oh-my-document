@@ -1,5 +1,6 @@
 //! Group 7.2/7.3: tags, inheritance, direction rules, check+verify integration.
 
+mod common;
 use std::collections::BTreeSet;
 use std::process::Command;
 static TDIR_UNIQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -30,8 +31,19 @@ impl T {
         let o = Command::new(omd())
             .arg("--meta")
             .arg(self.0.join(".omd"))
-            .args(args)
+            .args(common::with_expected(
+                &omd(),
+                &self.0,
+                args,
+                Some(&self.0.join(".omd")),
+                Some(&self.0.join("home")),
+                Some(&self.0.join("config")),
+                Some(&self.0.join("cache")),
+            ))
             .current_dir(&self.0)
+            .env("HOME", self.0.join("home"))
+            .env("OMD_CONFIG_PATH", self.0.join("config"))
+            .env("OMD_CACHE_PATH", self.0.join("cache"))
             .output()
             .unwrap();
         (
@@ -57,13 +69,18 @@ fn dir_tag_inherits_to_members_deduped() {
     // Inheritance: docs/s.md gets `spec` from file:docs AND its own tag —
     // deduped (a set), never counted twice.
     let mut st = omd::records::store::State::default();
-    st.tags
-        .insert("file:docs".into(), BTreeSet::from(["spec".to_string()]));
+    st.locations.insert("file:docs-root".into(), "docs".into());
+    st.locations
+        .insert("file:file-root".into(), "docs/s.md".into());
     st.tags.insert(
-        "file:docs/s.md".into(),
+        "file:docs-root".into(),
+        BTreeSet::from(["spec".to_string()]),
+    );
+    st.tags.insert(
+        "file:file-root".into(),
         BTreeSet::from(["spec".to_string(), "example".to_string()]),
     );
-    let got = omd::relations::tags::resolve_tags(&st, "file:docs/s.md");
+    let got = omd::relations::tags::resolve_tags(&st, "file:file-root");
     assert!(got.contains("spec") && got.contains("example"));
     assert_eq!(got.len(), 2, "same tag inherited twice must dedup: {got:?}");
 }
@@ -73,13 +90,19 @@ fn new_member_inherits_dir_tag() {
     // A file added AFTER the dir tag still inherits (resolve at check time).
     let t = T::new();
     t.write("docs/a.md", "a");
+    t.run(&["init", "docs/a.md"]);
     t.run(&["import", "docs"]);
     t.run(&["commit", "tag", "docs", "--tag", "spec"]);
     t.write("docs/late.md", "b"); // added after tag
     let mut st = omd::records::store::State::default();
-    st.tags
-        .insert("file:docs".into(), BTreeSet::from(["spec".to_string()]));
-    let got = omd::relations::tags::resolve_tags(&st, "file:docs/late.md");
+    st.locations.insert("file:docs-root".into(), "docs".into());
+    st.locations
+        .insert("file:late-root".into(), "docs/late.md".into());
+    st.tags.insert(
+        "file:docs-root".into(),
+        BTreeSet::from(["spec".to_string()]),
+    );
+    let got = omd::relations::tags::resolve_tags(&st, "file:late-root");
     assert!(got.contains("spec"), "late member must inherit dir tag");
 }
 
@@ -88,6 +111,7 @@ fn commit_tag_and_rule_persist() {
     let t = T::new();
     t.write("docs/s.md", "s");
     t.write("code/i.rs", "i");
+    t.run(&["init", "docs/s.md"]);
     t.run(&["import", "docs"]);
     t.run(&["import", "code"]);
     let (c, _, _) = t.run(&["commit", "tag", "docs", "--tag", "spec"]);
@@ -111,6 +135,7 @@ fn uncovered_rule_fails_check_at_fail_level() {
     let t = T::new();
     t.write("docs/s.md", "s");
     t.write("code/i.rs", "i");
+    t.run(&["init", "docs/s.md"]);
     t.run(&["import", "docs"]);
     t.run(&["import", "code"]);
     t.run(&["commit", "tag", "docs", "--tag", "spec"]);
@@ -136,6 +161,7 @@ fn warn_level_reports_gap_without_failing() {
     let t = T::new();
     t.write("docs/s.md", "s");
     t.write("code/i.rs", "i");
+    t.run(&["init", "docs/s.md"]);
     t.run(&["import", "docs"]);
     t.run(&["import", "code"]);
     t.run(&["commit", "tag", "docs", "--tag", "spec"]);
@@ -164,10 +190,10 @@ fn one_way_allows_extra_reverse_links() {
     let t = T::new();
     t.write("docs/s.md", "spec-content");
     t.write("code/i.rs", "impl");
-    t.run(&["import", "docs"]);
-    t.run(&["import", "code"]);
     t.run(&["init", "docs/s.md"]);
     t.run(&["init", "code/i.rs"]);
+    t.run(&["import", "docs"]);
+    t.run(&["import", "code"]);
     t.run(&["commit", "tag", "docs", "--tag", "spec"]);
     t.run(&["commit", "tag", "code", "--tag", "code"]);
     t.run(&[
@@ -185,7 +211,8 @@ fn one_way_allows_extra_reverse_links() {
         "commit",
         "docs/s.md",
         "--range",
-        "0-4",
+        "0",
+        "4",
         "--link-to",
         "range:code/i.rs@text:0-4",
     ]);
@@ -194,7 +221,8 @@ fn one_way_allows_extra_reverse_links() {
         "commit",
         "code/i.rs",
         "--range",
-        "0-4",
+        "0",
+        "4",
         "--link-to",
         "range:docs/s.md@text:0-4",
     ]);
@@ -208,6 +236,7 @@ fn coverage_gap_but_verify_can_pass() {
     // 7.3: link coverage <100% does NOT make verify fail by itself.
     let t = T::new();
     t.write("docs/s.md", "spec");
+    t.run(&["init", "docs/s.md"]);
     t.run(&["import", "docs"]);
     t.run(&["commit", "tag", "docs", "--tag", "spec"]);
     t.run(&[
@@ -237,6 +266,7 @@ fn skip_does_not_confirm_content() {
     let t = T::new();
     t.write("docs/s.md", "s");
     t.write("code/i.rs", "i");
+    t.run(&["init", "docs/s.md"]);
     t.run(&["import", "docs"]);
     t.run(&["import", "code"]);
     t.run(&["commit", "tag", "docs", "--tag", "spec"]);

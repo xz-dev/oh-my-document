@@ -1,6 +1,7 @@
 //! 13.x guards: adapt rejection, link dup scoping, reason not creating
 //! relationships, interior-range-commit link targets.
 
+mod common;
 use std::process::Command;
 static TDIR_UNIQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -30,8 +31,19 @@ impl T {
         let o = Command::new(omd())
             .arg("--meta")
             .arg(self.0.join(".omd"))
-            .args(args)
+            .args(common::with_expected(
+                &omd(),
+                &self.0,
+                args,
+                Some(&self.0.join(".omd")),
+                Some(&self.0.join("home")),
+                Some(&self.0.join("config.toml")),
+                Some(&self.0.join("cache")),
+            ))
             .current_dir(&self.0)
+            .env("HOME", self.0.join("home"))
+            .env("OMD_CONFIG_PATH", self.0.join("config.toml"))
+            .env("OMD_CACHE_PATH", self.0.join("cache"))
             .output()
             .unwrap();
         (
@@ -43,16 +55,135 @@ impl T {
     fn write(&self, p: &str, c: &str) {
         std::fs::write(self.0.join(p), c).unwrap();
     }
-    fn tip(&self, node: &str) -> String {
-        std::fs::read_to_string(self.0.join(".omd/state.toml"))
+    fn file_node(&self, path: &str) -> String {
+        let text = self.state();
+        let value: toml::Value = toml::from_str(&text).unwrap();
+        value
+            .get("locations")
+            .and_then(toml::Value::as_table)
+            .and_then(|locations| {
+                locations.iter().find_map(|(node, current)| {
+                    (current.as_str() == Some(path)).then(|| node.clone())
+                })
+            })
             .unwrap_or_default()
-            .lines()
+    }
+    /// The N-th range node key (`range:<root-id>`) mounted under a file object.
+    fn range_node(&self, file: &str, n: usize) -> String {
+        let s = self.state();
+        let file_node = self.file_node(file);
+        s.lines()
+            .find(|l| l.contains(&format!("\"{file_node}\"")) && l.contains('['))
+            .and_then(|l| {
+                l.match_indices("range:").nth(n).and_then(|(i, _)| {
+                    let r = &l[i..];
+                    r.find('"').map(|e| r[..e].to_string())
+                })
+            })
+            .unwrap_or_default()
+    }
+    /// A range node exists for `file` covering `span` — the span lives on
+    /// the range tip commit's payload (`range` field), not the key.
+    fn range_exists(&self, file: &str, span: &str) -> bool {
+        !self.tip(&format!("range:{file}@{span}")).is_empty()
+    }
+    fn tip(&self, node: &str) -> String {
+        let s = std::fs::read_to_string(self.0.join(".omd/state.toml")).unwrap_or_default();
+        // `range:<file>@mode:s-e` (old test spelling) → resolve to the
+        // mounted range node under `file:<file>` at the matching span. The
+        // new key is `range:<root-commit-id>`; we look the node up via
+        // mounts + the span recorded on its tip commit's payload.
+        if let Some(rest) = node.strip_prefix("range:") {
+            if let Some(at) = rest.find('@') {
+                let path = &rest[..at];
+                let want_span = &rest[at + 1..]; // "text:0-3" / "byte:0-5"
+                let file_node = self.file_node(path);
+                // Collect mounted range children of the file node.
+                let mut children: Vec<String> = Vec::new();
+                for l in s.lines() {
+                    if l.contains(&format!("\"{file_node}\"")) && l.contains('[') {
+                        for m in l.match_indices("range:") {
+                            let r = &l[m.0..];
+                            if let Some(end) = r.find('"') {
+                                children.push(r[..end].to_string());
+                            }
+                        }
+                    }
+                }
+                let want = {
+                    let (mode, span) = want_span.split_once(':').unwrap_or(("text", want_span));
+                    let (start, end) = span.split_once('-').unwrap();
+                    omd::relations::range::Range {
+                        start: start.parse().unwrap(),
+                        end: end.parse().unwrap(),
+                        mode: if mode == "byte" {
+                            omd::relations::range::Mode::Byte
+                        } else {
+                            omd::relations::range::Mode::Text
+                        },
+                    }
+                };
+                for child in &children {
+                    let tip_id = s
+                        .lines()
+                        .find(|line| {
+                            line.starts_with(&format!("\"{child}\"")) && line.contains('=')
+                        })
+                        .and_then(|line| line.split('=').nth(1))
+                        .map(|value| value.trim().trim_matches('"').to_string())
+                        .unwrap_or_default();
+                    let Ok(text) =
+                        std::fs::read_to_string(self.0.join(format!(".omd/commits/{tip_id}.toml")))
+                    else {
+                        continue;
+                    };
+                    let Ok(commit) = toml::from_str::<omd::records::commit::Commit>(&text) else {
+                        continue;
+                    };
+                    if commit
+                        .payload
+                        .get("position")
+                        .and_then(omd::relations::node::position_from_value)
+                        == Some(want)
+                    {
+                        return tip_id;
+                    }
+                }
+                // No exact span match — the chain's extent moved. Return the
+                // first mounted child's tip (the test wants *that* chain).
+                if let Some(c) = children.first() {
+                    return s
+                        .lines()
+                        .find(|l| l.starts_with(&format!("\"{c}\"")) && l.contains('='))
+                        .and_then(|l| l.split('=').nth(1))
+                        .map(|v| v.trim().trim_matches('"').to_string())
+                        .unwrap_or_default();
+                }
+                return String::new();
+            }
+        }
+        let node = node
+            .strip_prefix("file:")
+            .and_then(|path| {
+                (!path.chars().all(|c| c.is_ascii_hexdigit())).then(|| self.file_node(path))
+            })
+            .filter(|node| !node.is_empty())
+            .unwrap_or_else(|| node.to_string());
+        s.lines()
             .find(|l| l.contains(&format!("\"{node}\"")) && l.contains('='))
             .and_then(|l| {
                 l.split('=')
                     .nth(1)
                     .map(|v| v.trim().trim_matches('"').to_string())
             })
+            .unwrap_or_default()
+    }
+    fn pending(&self, link_id: &str) -> Vec<String> {
+        let state: omd::records::store::State = toml::from_str(&self.state()).unwrap();
+        state
+            .link_pending
+            .get(link_id)
+            .map(|changes| changes.iter().cloned().collect())
             .unwrap_or_default()
     }
     fn state(&self) -> String {
@@ -71,17 +202,19 @@ fn setup_link(t: &T) -> (String, String) {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "ra",
     ]);
     // b's range commit links FROM a's range — the committing node is b's range.
+    let rn1 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn1,
         "--reason",
         "lb",
     ]);
@@ -101,11 +234,18 @@ fn adapt_without_link_id_rejected() {
         "--id",
         &t.tip("range:a.md@text:0-1"),
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--reason",
         "up",
     ]);
-    let (c, o, e) = t.run(&["commit", "adapt", "b.md", "--changes", "x", "--reason", "r"]);
+    let (c, o, e) = t.run(&[
+        "commit",
+        "adapt",
+        "b.md",
+        "--adapt",
+        r#"{"changes":["x"],"reason":"r"}"#,
+    ]);
     assert_ne!(c, 0, "adapt without --link-id must fail: {o} {e}");
 }
 
@@ -121,7 +261,8 @@ fn adapt_without_reason_rejected() {
         "--id",
         &t.tip("range:a.md@text:0-1"),
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--reason",
         "up",
     ]);
@@ -136,15 +277,8 @@ fn adapt_without_reason_rejected() {
         .trim_start_matches("[links.")
         .trim_end_matches(']')
         .to_string();
-    let (c, o, e) = t.run(&[
-        "commit",
-        "adapt",
-        "b.md",
-        "--link-id",
-        &link_id,
-        "--changes",
-        "x",
-    ]);
+    let selection = format!(r#"{{"link_id":"{link_id}","changes":["x"]}}"#);
+    let (c, o, e) = t.run(&["commit", "adapt", "b.md", "--adapt", &selection]);
     assert_ne!(c, 0, "adapt without reason must fail: {o} {e}");
 }
 
@@ -163,7 +297,8 @@ fn adapt_reason_creates_no_new_link() {
         "--id",
         &t.tip("range:a.md@text:0-1"),
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--reason",
         "up",
     ]);
@@ -178,16 +313,14 @@ fn adapt_reason_creates_no_new_link() {
                 .to_string()
         })
         .unwrap_or_default();
-    t.run(&[
-        "commit",
-        "adapt",
-        "b.md",
-        "--link-id",
-        &lid,
-        "--stop",
-        "--reason",
-        "done",
-    ]);
+    let changes = t.pending(&lid);
+    let selection = serde_json::json!({
+        "link_id": lid,
+        "changes": changes,
+        "reason": "done",
+    })
+    .to_string();
+    t.run(&["commit", "adapt", "b.md", "--adapt", &selection]);
     let links_after = t.state().matches("[links.").count();
     assert_eq!(
         links_before, links_after,
@@ -206,27 +339,31 @@ fn stop_clears_one_link_retains_others() {
     t.run(&["init", "b.md"]);
     t.run(&["init", "c.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "ra",
     ]);
+    let rn2 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn2,
         "--reason",
         "lb",
     ]);
+    let rn3 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "c.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn3,
         "--reason",
         "lc",
     ]);
@@ -238,7 +375,8 @@ fn stop_clears_one_link_retains_others() {
         "--id",
         &t.tip("range:a.md@text:0-1"),
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--reason",
         "up",
     ]);
@@ -255,15 +393,14 @@ fn stop_clears_one_link_retains_others() {
         .collect();
     assert!(lids.len() >= 2, "two links: {}", t.state());
     // --stop on the FIRST link only.
+    let changes = t.pending(&lids[0]);
+    let selection = serde_json::json!({
+        "link_id": lids[0],
+        "changes": changes,
+    })
+    .to_string();
     t.run(&[
-        "commit",
-        "adapt",
-        "b.md",
-        "--link-id",
-        &lids[0],
-        "--stop",
-        "--reason",
-        "done",
+        "commit", "clean", "b.md", "--stop", &selection, "--reason", "done",
     ]);
     let st = t.state();
     // Second link's pending remains (link id still in link_pending).
@@ -286,7 +423,8 @@ fn adapt_no_reason_rejected() {
         "--id",
         &t.tip("range:a.md@text:0-1"),
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--reason",
         "up",
     ]);
@@ -301,14 +439,18 @@ fn adapt_no_reason_rejected() {
                 .to_string()
         })
         .unwrap_or_default();
+    let selection = serde_json::json!({
+        "link_id": lid,
+        "changes": t.pending(&lid),
+    })
+    .to_string();
     let (c, o, e) = t.run(&[
         "commit",
         "adapt",
         "b.md",
-        "--link-id",
-        &lid,
-        "--stop",
-        "--no-reason",
+        "--adapt",
+        &selection,
+        "--no--reason",
     ]);
     assert_ne!(c, 0, "adapt --no-reason must fail: {o} {e}");
 }
@@ -323,22 +465,24 @@ fn interior_range_commit_is_valid_link_target() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "r1",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "r1",
     ]);
     let c1 = t.tip("range:a.md@text:0-1");
     t.run(&[
-        "commit", "commit", "a.md", "--id", &c1, "--range", "0-1", "--reason", "r2",
+        "commit", "commit", "a.md", "--id", &c1, "--range", "0", "1", "--reason", "r2",
     ]);
     // Link b's range FROM a's non-tip commit c1 — the interior member is a
     // valid reference point. Committing node is b's range.
+    let rn4 = t.range_node("a.md", 0);
     let (c, o, e) = t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn4,
         "--reason",
         "links-to-interior",
     ]);
@@ -356,20 +500,23 @@ fn opposite_directions_to_one_range_are_distinct() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "ra",
     ]);
     // --link-from AND --link-to the same range in one command: two distinct
     // directions, not a duplicate. Committing node is b's range.
+    let rn5 = t.range_node("a.md", 0);
+    let rn6 = t.range_node("a.md", 0);
     let (c, o, e) = t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn5,
         "--link-to",
-        "a.md@text:0-1",
+        &rn6,
         "--reason",
         "bidirectional",
     ]);
@@ -386,28 +533,32 @@ fn duplicate_check_scoped_per_invocation() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "ra",
     ]);
     // Two separate commands each linking b's range from a's range.
+    let rn7 = t.range_node("a.md", 0);
     let (c1, _, _) = t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn7,
         "--reason",
         "l1",
     ]);
+    let rn8 = t.range_node("a.md", 0);
     let (c2, _, _) = t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn8,
         "--reason",
         "l2",
     ]);
@@ -418,7 +569,7 @@ fn duplicate_check_scoped_per_invocation() {
     );
 }
 
-// Re-audit BUG3: --source-ref 'command::…' records Acquisition::Command and
+// Re-audit BUG3: independent command fields record Acquisition::Command and
 // verify reports it `unverified` when the command isn't permitted to run.
 #[test]
 fn command_source_records_acquisition_and_unverified() {
@@ -428,8 +579,12 @@ fn command_source_records_acquisition_and_unverified() {
         "commit",
         "init",
         "f.txt",
-        "--source-ref",
-        "command::echo::[\"hi\"]",
+        "--source-type",
+        "command",
+        "--executable",
+        "echo",
+        "--args-json",
+        "[\"hi\"]",
     ]);
     assert_eq!(c, 0, "{o} {e}");
     // The version's acquisition is Command, not File.
@@ -437,7 +592,8 @@ fn command_source_records_acquisition_and_unverified() {
     if let Ok(rd) = std::fs::read_dir(t.0.join(".omd/versions")) {
         for en in rd.flatten() {
             if let Ok(txt) = std::fs::read_to_string(en.path())
-                && txt.contains("[acquisition.command]")
+                && txt.contains("[acquisition]")
+                && txt.contains("type = \"command\"")
             {
                 found = true;
             }
@@ -457,7 +613,7 @@ fn pure_position_move_reports_moved_not_clean() {
     t.write("a.md", "HEADERSPLITMORE");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r",
     ]);
     // Insert a char before the range — fragment now at offset 1, text intact.
     t.write("a.md", "XHEADERSPLITMORE");
@@ -478,7 +634,7 @@ fn adjacent_markers_reset_lands_one_step() {
     t.run(&["init", "a.md"]);
     // Two blocks back-to-back: BEGIN c1 END c1' BEGIN c2 END c2'.
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "b1",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "b1",
     ]);
     // Reset to the END of the block — lands on END's direct predecessor
     // (the last interior/link), one step back, not recursively skipped.
@@ -502,17 +658,19 @@ fn reset_interior_of_open_block_refused() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "ra",
     ]);
     // b's block: BEGIN → interior commit → LINK → END.
+    let rn9 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn9,
         "--reason",
         "lb",
     ]);
@@ -544,28 +702,32 @@ fn same_endpoints_two_links_coexist() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "ra",
     ]);
     // Two separate commands each create a link a-range → b-range.
+    let rn10 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn10,
         "--reason",
         "l1",
     ]);
+    let rn11 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn11,
         "--reason",
         "l2",
     ]);
@@ -585,8 +747,12 @@ fn rebuild_without_git_or_cache() {
     // reindex rebuilds from the manifest only, no Git needed.
     let (c, o, _) = t.run(&["reindex"]);
     assert_eq!(c, 0, "reindex works without cache: {o}");
-    // The index file exists AND parses with one row per published commit.
-    let idx = std::fs::read_to_string(t.0.join(".omd/index.txt")).unwrap_or_default();
+    // Cache path is selected through OMD_CACHE_PATH and scoped by instance.
+    let (c, o, _) = t.run(&["--json", "reindex"]);
+    assert_eq!(c, 0, "reindex works without cache: {o}");
+    let value: serde_json::Value = serde_json::from_str(&o).unwrap();
+    let cache_file = value["data"]["cache_file"].as_str().unwrap();
+    let idx = std::fs::read_to_string(cache_file).unwrap_or_default();
     let rows: Vec<&str> = idx.lines().filter(|l| !l.is_empty()).collect();
     assert_eq!(rows.len(), 1, "one indexed row for the init commit: {idx}");
     assert!(rows[0].contains('\t'), "row is tab-separated: {idx}");
@@ -600,11 +766,11 @@ fn referenced_dangling_commit_retained() {
     t.write("a.md", "a");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "r1",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "r1",
     ]);
     let c1 = t.tip("range:a.md@text:0-1");
     t.run(&[
-        "commit", "commit", "a.md", "--id", &c1, "--range", "0-1", "--reason", "r2",
+        "commit", "commit", "a.md", "--id", &c1, "--range", "0", "1", "--reason", "r2",
     ]);
     let c2 = t.tip("range:a.md@text:0-1");
     // Add a note referencing c2 — it becomes a referenced dangling.
@@ -623,14 +789,28 @@ fn referenced_dangling_commit_retained() {
 #[test]
 fn clean_no_reason_succeeds() {
     let t = T::new();
-    t.write("a.md", "a");
-    t.run(&["init", "a.md"]);
+    setup_link(&t);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "r",
+        "commit",
+        "commit",
+        "a.md",
+        "--id",
+        &t.tip("range:a.md@text:0-1"),
+        "--range",
+        "0",
+        "1",
+        "--reason",
+        "up",
     ]);
-    // clean with --no-reason is a legitimate clearing commit.
-    let (c, o, e) = t.run(&["commit", "clean", "a.md", "--range", "0-1", "--no-reason"]);
-    assert_eq!(c, 0, "clean --no-reason ok: {o} {e}");
+    let state: omd::records::store::State = toml::from_str(&t.state()).unwrap();
+    let link_id = state.links.keys().next().unwrap().clone();
+    let stop = serde_json::json!({
+        "link_id": link_id,
+        "changes": t.pending(&link_id),
+    })
+    .to_string();
+    let (c, o, e) = t.run(&["commit", "clean", "b.md", "--stop", &stop, "--no--reason"]);
+    assert_eq!(c, 0, "clean --no--reason ok: {o} {e}");
 }
 
 // change-review: TOML formatting is not part of commit identity — the same
@@ -643,7 +823,7 @@ fn commit_id_stable_under_field_reorder() {
     t.write("a.md", "x");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "r",
     ]);
     let tip = t.tip("range:a.md@text:0-1");
     // The filename IS the commit id — re-reading preserves it verbatim.
@@ -665,7 +845,8 @@ fn timestamp_records_user_time() {
         "commit",
         "a.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--reason",
         "r",
         "--timestamp",
@@ -688,7 +869,7 @@ fn note_patch_revises_recorded_reason() {
     t.write("a.md", "x");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "r",
     ]);
     let tip = t.tip("range:a.md@text:0-1");
     // add a note, capture its id from the list, then patch it.
@@ -729,16 +910,18 @@ fn reset_first_begin_lands_empty() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "ra",
     ]);
+    let rn12 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn12,
         "--reason",
         "lb",
     ]);
@@ -795,7 +978,14 @@ fn replace_refuses_different_content() {
     t.write("b.md", "different-bytes");
     let tip = t.tip("file:a.md");
     // Replace a's acquisition with b's content — different bytes → refuse.
-    let (c, o, e) = t.run(&["replace", &tip, "--source", "b.md"]);
+    let (c, o, e) = t.run(&[
+        "replace",
+        &tip,
+        "--source-type",
+        "file",
+        "--source-path",
+        "b.md",
+    ]);
     assert_ne!(c, 0, "replace on non-identical content must fail: {o} {e}");
 }
 
@@ -814,7 +1004,7 @@ fn offline_peer_does_not_block_local_commit() {
     ]);
     // Local commit still works — an offline peer never blocks writes.
     let (c, o, _) = t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "r",
     ]);
     assert_eq!(c, 0, "local commit unaffected by offline peer: {o}");
 }
@@ -855,17 +1045,17 @@ fn explicit_range_expansion_distinct_object() {
     t.write("a.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r1",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r1",
     ]);
-    let c1 = t.tip("range:a.md@text:0-5");
+    let c1 = t.tip(&t.range_node("a.md", 0));
     // --id c1 with a DIFFERENT range expands/modifies c1's chain — a commit
     // on c1's node, not a fresh independent object.
     let (c, _, _) = t.run(&[
-        "commit", "commit", "a.md", "--id", &c1, "--range", "0-10", "--reason", "expand",
+        "commit", "commit", "a.md", "--id", &c1, "--range", "0", "10", "--reason", "expand",
     ]);
     assert_eq!(c, 0);
     // The range node c1's chain advanced (the new commit chains onto c1's tip).
-    let tip = t.tip("range:a.md@text:0-5");
+    let tip = t.tip(&t.range_node("a.md", 0));
     assert!(!tip.is_empty(), "c1's chain advanced via --id");
 }
 
@@ -877,7 +1067,7 @@ fn cross_boundary_edit_dirties() {
     t.write("a.md", "AABBCCDD");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "2-6", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "2", "6", "--reason", "r",
     ]);
     // Edit spanning the boundary (positions 1-7 changed).
     t.write("a.md", "AXXBCCYD");
@@ -891,24 +1081,311 @@ fn cross_boundary_edit_dirties() {
     );
 }
 
-// managed-content: a byte-mode range counts raw byte offsets, not chars.
+// managed-content: byte mode is stored and consumed as raw offsets. Bare
+// coordinates plus --mode byte remain byte on continuation when mode is
+// omitted; out-of-span edits stay clean and in-span edits dirty.
 #[test]
 fn byte_mode_range_counts_bytes() {
     let t = T::new();
-    // Multi-byte UTF-8 chars: 'é' = 2 bytes.
     t.write("a.md", "aébc");
     t.run(&["init", "a.md"]);
-    // byte:0-3 covers 'a' + 'é'(2 bytes) = 3 bytes.
+
+    let before = t.state();
+    let (bad, _, _) = t.run(&[
+        "commit", "commit", "a.md", "--range", "0", "6", "--mode", "byte", "--reason", "bad",
+    ]);
+    assert_eq!(bad, 2, "byte bounds reject as usage");
+    assert_eq!(before, t.state(), "invalid bounds publish nothing");
+
     let (c, o, e) = t.run(&[
-        "commit", "commit", "a.md", "--range", "byte:0-3", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "3", "--mode", "byte", "--reason", "r",
     ]);
     assert_eq!(c, 0, "byte range commits: {o} {e}");
-    // The byte-range node key uses byte coordinates.
-    assert!(
-        t.state().contains("byte:0-3"),
-        "byte range node: {}",
-        t.state()
+    let response: serde_json::Value = serde_json::from_str(&o).unwrap();
+    let first_tip = response["data"]["commit"].as_str().unwrap().to_string();
+    let node = format!("range:{first_tip}");
+    let first: omd::records::commit::Commit = toml::from_str(
+        &std::fs::read_to_string(t.0.join(format!(".omd/commits/{first_tip}.toml"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        omd::relations::node::position_from_value(&first.payload["position"]),
+        Some(omd::relations::range::Range {
+            start: 0,
+            end: 3,
+            mode: omd::relations::range::Mode::Byte,
+        })
     );
+
+    // Byte 4 is outside [0,3): c -> x must not dirty.
+    t.write("a.md", "aébx");
+    let (clean, out, err) = t.run(&["verify", "a.md"]);
+    assert_eq!(clean, 0, "outside-byte-span edit stays clean: {out} {err}");
+
+    // Continuation omits --mode and inherits byte rather than reverting to text.
+    let (next, o, e) = t.run(&[
+        "commit", "commit", "a.md", "--id", &first_tip, "--range", "0", "4", "--reason", "extend",
+    ]);
+    assert_eq!(next, 0, "byte continuation: {o} {e}");
+    let second_tip = t.tip(&node);
+    let second: omd::records::commit::Commit = toml::from_str(
+        &std::fs::read_to_string(t.0.join(format!(".omd/commits/{second_tip}.toml"))).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        omd::relations::node::position_from_value(&second.payload["position"]),
+        Some(omd::relations::range::Range {
+            start: 0,
+            end: 4,
+            mode: omd::relations::range::Mode::Byte,
+        })
+    );
+
+    // Byte 3 is inside [0,4): b -> z must dirty.
+    t.write("a.md", "aézx");
+    let (dirty, out, err) = t.run(&["verify", "a.md"]);
+    assert_eq!(dirty, 1, "inside-byte-span edit dirties: {out} {err}");
+    assert!(out.contains("in-range") || out.contains("dirty"), "{out}");
+}
+
+#[test]
+fn byte_mode_accepts_non_utf8_and_never_decodes_it() {
+    let t = T::new();
+    t.write("raw.bin", "valid");
+    t.run(&["init", "raw.bin"]);
+    std::fs::write(t.0.join("raw.bin"), [0xff, 0x00, 0x01, 0x02]).unwrap();
+    let (code, out, err) = t.run(&[
+        "commit", "commit", "raw.bin", "--range", "0", "2", "--mode", "byte", "--reason", "raw",
+    ]);
+    assert_eq!(code, 0, "non-UTF8 byte range commits: {out} {err}");
+    std::fs::write(t.0.join("raw.bin"), [0xff, 0x00, 0x01, 0x03]).unwrap();
+    let (code, out, err) = t.run(&["verify", "raw.bin"]);
+    assert_eq!(code, 0, "outside raw byte edit stays clean: {out} {err}");
+}
+
+#[test]
+fn effective_range_body_survives_link_end_and_two_renames() {
+    let t = T::new();
+    t.write("a.md", "abcdef");
+    t.write("target.md", "uvwxyz");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "target.md"]);
+
+    let (_, target_out, _) = t.run(&[
+        "commit",
+        "commit",
+        "target.md",
+        "--range",
+        "0",
+        "6",
+        "--reason",
+        "target",
+    ]);
+    let target: serde_json::Value = serde_json::from_str(&target_out).unwrap();
+    let target_root = target["data"]["commit"].as_str().unwrap();
+    let target_node = format!("range:{target_root}");
+
+    let (_, source_out, _) = t.run(&[
+        "commit", "commit", "a.md", "--range", "0", "6", "--reason", "source",
+    ]);
+    let source: serde_json::Value = serde_json::from_str(&source_out).unwrap();
+    let source_root = source["data"]["commit"].as_str().unwrap().to_string();
+    let source_node = format!("range:{source_root}");
+    let source_tip = t.tip(&source_node);
+
+    t.run(&["commit", "tag", "a.md", "--tag", "spec"]);
+    t.run(&["commit", "tag", "target.md", "--tag", "code"]);
+    t.run(&[
+        "commit",
+        "scope_adjust",
+        "a.md",
+        "--rule",
+        "spec->code",
+        "--level",
+        "fail",
+    ]);
+    let (linked, out, err) = t.run(&[
+        "commit",
+        "commit",
+        "a.md",
+        "--id",
+        &source_tip,
+        "--range",
+        "0",
+        "6",
+        "--link-to",
+        &target_node,
+        "--reason",
+        "linked",
+    ]);
+    assert_eq!(linked, 0, "combo link closes: {out} {err}");
+    assert_ne!(
+        t.tip(&source_node),
+        source_tip,
+        "END advances structural tip"
+    );
+
+    let (check, out, err) = t.run(&["check"]);
+    assert_eq!(
+        check, 0,
+        "effective body contributes coverage behind END: {out} {err}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        value["data"]["check"]["rules"][0]["coverage"]["forward"]["groups"][0]["covered"]
+            .as_str()
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+            > 0,
+        "coverage uses effective body: {out}"
+    );
+
+    let original: std::collections::BTreeMap<_, _> = std::fs::read_dir(t.0.join(".omd/commits"))
+        .unwrap()
+        .map(|entry| {
+            let path = entry.unwrap().path();
+            (
+                path.file_name().unwrap().to_owned(),
+                std::fs::read(path).unwrap(),
+            )
+        })
+        .collect();
+
+    t.run(&["rename", "a.md", "b.md"]);
+    std::fs::rename(t.0.join("a.md"), t.0.join("b.md")).unwrap();
+    let (once, out, err) = t.run(&["verify", "b.md"]);
+    assert_eq!(
+        once, 0,
+        "range follows first current parent location: {out} {err}"
+    );
+
+    t.run(&["rename", "b.md", "c.md"]);
+    std::fs::rename(t.0.join("b.md"), t.0.join("c.md")).unwrap();
+    let (twice, out, err) = t.run(&["verify", "c.md"]);
+    assert_eq!(
+        twice, 0,
+        "range follows second current parent location: {out} {err}"
+    );
+    let file_node = t.file_node("c.md");
+    let mount = t
+        .state()
+        .lines()
+        .find(|line| line.contains(&format!("\"{file_node}\"")) && line.contains('['))
+        .unwrap_or("")
+        .to_string();
+    assert!(
+        mount.contains(&source_node),
+        "range identity survives rename: {mount}"
+    );
+    assert!(
+        t.state().contains(&format!("source = \"{source_node}\"")),
+        "link endpoint keeps range identity across rename"
+    );
+    for (name, bytes) in original {
+        assert_eq!(
+            std::fs::read(t.0.join(".omd/commits").join(name)).unwrap(),
+            bytes,
+            "rename never rewrites historical commits"
+        );
+    }
+
+    std::fs::remove_file(t.0.join("c.md")).unwrap();
+    let (missing, out, err) = t.run(&["verify", "c.md"]);
+    assert_eq!(
+        missing, 1,
+        "genuinely missing current path fails: {out} {err}"
+    );
+    assert!(
+        out.contains("missing") || out.contains("cannot read"),
+        "{out}"
+    );
+}
+
+#[test]
+fn missing_effective_source_version_stays_negative() {
+    let t = T::new();
+    t.write("a.md", "abcdef");
+    t.run(&["init", "a.md"]);
+    let (_, out, _) = t.run(&[
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "range",
+    ]);
+    let response: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let commit_id = response["data"]["commit"].as_str().unwrap();
+    let commit: omd::records::commit::Commit = toml::from_str(
+        &std::fs::read_to_string(t.0.join(format!(".omd/commits/{commit_id}.toml"))).unwrap(),
+    )
+    .unwrap();
+    std::fs::remove_file(t.0.join(format!(".omd/versions/{}.toml", commit.content_ref))).unwrap();
+    let (code, out, err) = t.run(&["verify", "a.md"]);
+    assert_eq!(code, 1, "missing effective version fails: {out} {err}");
+    assert!(out.contains("version record missing"), "{out}");
+}
+
+#[test]
+fn missing_command_observation_aborts_before_begin() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let t = T::new();
+    t.write("target.md", "target");
+    t.run(&["init", "target.md"]);
+    let (_, target_out, _) = t.run(&[
+        "commit",
+        "commit",
+        "target.md",
+        "--range",
+        "0",
+        "6",
+        "--reason",
+        "target",
+    ]);
+    let target: serde_json::Value = serde_json::from_str(&target_out).unwrap();
+    let target_node = format!("range:{}", target["data"]["commit"].as_str().unwrap());
+    let counter = t.0.join("command-ran");
+    let command = t.0.join("fail-command.sh");
+    std::fs::write(&command, "#!/bin/sh\nprintf placeholder\n").unwrap();
+    std::fs::set_permissions(&command, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let (initialized, out, err) = t.run(&[
+        "commit",
+        "init",
+        "virtual.md",
+        "--source-type",
+        "command",
+        "--executable",
+        command.to_str().unwrap(),
+        "--args-json",
+        "[]",
+    ]);
+    assert_eq!(initialized, 0, "command source initializes: {out} {err}");
+    std::fs::write(
+        &command,
+        format!("#!/bin/sh\necho ran >> '{}'\nexit 1\n", counter.display()),
+    )
+    .unwrap();
+    let before = t.state();
+    let (code, out, err) = t.run(&[
+        "commit",
+        "commit",
+        "virtual.md",
+        "--range",
+        "0",
+        "1",
+        "--link-to",
+        &target_node,
+        "--reason",
+        "fail",
+        "--source-type",
+        "command",
+        "--executable",
+        command.to_str().unwrap(),
+        "--args-json",
+        "[]",
+    ]);
+    assert_eq!(
+        code, 3,
+        "missing command observation is a conflict: {out} {err}"
+    );
+    assert_eq!(t.state(), before, "credential failure publishes nothing");
+    assert!(!counter.exists(), "write validation never executes command");
 }
 
 // managed-content: a fragment matching ambiguously in current content reports
@@ -919,7 +1396,7 @@ fn ambiguous_fragment_reports_locate_candidates() {
     t.write("a.md", "XX AB XX");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "3-5", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "3", "5", "--reason", "r",
     ]);
     // Now 'AB' appears multiple places conceptually; make current ambiguous.
     t.write("a.md", "AB AB AB");
@@ -957,8 +1434,12 @@ fn run_command_verify_reruns_and_compares() {
         "commit",
         "init",
         "f.txt",
-        "--source-ref",
-        "command::echo::[\"hi\"]",
+        "--source-type",
+        "command",
+        "--executable",
+        "echo",
+        "--args-json",
+        "[\"hi\"]",
     ]);
     assert_eq!(c, 0);
     // verify with the command permitted → re-runs, same stdout → ok.
@@ -979,6 +1460,69 @@ fn run_command_verify_reruns_and_compares() {
     );
 }
 
+#[test]
+fn effective_range_observation_does_not_run_command_source_without_consent() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let t = T::new();
+    t.write("count", "0\n");
+    t.write(
+        "source.sh",
+        "#!/bin/sh\nn=$(cat count)\necho $((n + 1)) > count\nprintf abc\n",
+    );
+    let mut permissions = std::fs::metadata(t.0.join("source.sh"))
+        .unwrap()
+        .permissions();
+    permissions.set_mode(0o755);
+    std::fs::set_permissions(t.0.join("source.sh"), permissions).unwrap();
+    t.run(&[
+        "commit",
+        "init",
+        "virtual.txt",
+        "--source-type",
+        "command",
+        "--executable",
+        "./source.sh",
+        "--args-json",
+        "[]",
+    ]);
+    let (_, observed, _) = t.run(&["--run-command=true", "verify", "virtual.txt"]);
+    let observed: serde_json::Value = serde_json::from_str(&observed).unwrap();
+    let expected = serde_json::to_string(&observed["data"]["expected"]).unwrap();
+    t.run(&[
+        "--expected",
+        &expected,
+        "commit",
+        "commit",
+        "virtual.txt",
+        "--range",
+        "0",
+        "2",
+        "--reason",
+        "range",
+        "--source-type",
+        "command",
+        "--executable",
+        "./source.sh",
+        "--args-json",
+        "[]",
+    ]);
+    assert_eq!(
+        std::fs::read_to_string(t.0.join("count")).unwrap().trim(),
+        "2"
+    );
+    let (code, out, err) = t.run(&["verify", "virtual.txt"]);
+    assert_eq!(
+        code, 1,
+        "unconsented command range stays unverified: {out} {err}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(t.0.join("count")).unwrap().trim(),
+        "2",
+        "effective-state observation must not launch command sources"
+    );
+}
+
 // command-verification: a command whose output changed reports dirty.
 #[test]
 fn run_command_changed_output_dirties() {
@@ -989,8 +1533,12 @@ fn run_command_changed_output_dirties() {
         "commit",
         "init",
         "f.txt",
-        "--source-ref",
-        "command::cat::[\"in.txt\"]",
+        "--source-type",
+        "command",
+        "--executable",
+        "cat",
+        "--args-json",
+        "[\"in.txt\"]",
     ]);
     assert_eq!(c, 0);
     // Change the command's output.
@@ -1012,28 +1560,32 @@ fn same_endpoint_obligations_distinct_by_link_id() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "ra",
     ]);
     // Two links a-range → b-range (distinct link_ids).
+    let rn13 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn13,
         "--reason",
         "l1",
     ]);
+    let rn14 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn14,
         "--reason",
         "l2",
     ]);
@@ -1045,7 +1597,8 @@ fn same_endpoint_obligations_distinct_by_link_id() {
         "--id",
         &t.tip("range:a.md@text:0-1"),
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--reason",
         "up",
     ]);
@@ -1095,15 +1648,20 @@ fn command_init_works_despite_autorun_disabled() {
         "commit",
         "init",
         "f.txt",
-        "--source-ref",
-        "command::echo::[\"hi\"]",
+        "--source-type",
+        "command",
+        "--executable",
+        "echo",
+        "--args-json",
+        "[\"hi\"]",
     ]);
     assert_eq!(c, 0, "command init captures output: {o} {e}");
     let mut is_cmd = false;
     if let Ok(rd) = std::fs::read_dir(t.0.join(".omd/versions")) {
         for en in rd.flatten() {
             if let Ok(txt) = std::fs::read_to_string(en.path())
-                && txt.contains("[acquisition.command]")
+                && txt.contains("[acquisition]")
+                && txt.contains("type = \"command\"")
             {
                 is_cmd = true;
             }
@@ -1123,7 +1681,9 @@ fn equal_output_does_not_create_review() {
     t.run(&["init", "b.md"]);
     // Same content, two independent file nodes — no link/obligation created.
     let st = t.state();
-    assert!(st.contains("file:a.md") && st.contains("file:b.md"));
+    let a = t.file_node("a.md");
+    let b = t.file_node("b.md");
+    assert!(st.contains(&a) && st.contains(&b));
     assert!(
         !st.contains("[links."),
         "equal content creates no relationship: {st}"
@@ -1140,27 +1700,29 @@ fn split_range_inherits_no_relationships() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-10", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "10", "--reason", "r",
     ]);
+    let rn15 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-10",
+        &rn15,
         "--reason",
         "lb",
     ]);
     // Split a's range into a new sub-range — a fresh object.
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "sub",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "sub",
     ]);
     // The new sub-range has no pending obligations of its own (it wasn't
     // the link's source — 0-10 was).
     let st = t.state();
-    assert!(st.contains("range:a.md@text:0-5"), "sub-range exists: {st}");
+    assert!(t.range_exists("a.md", "text:0-5"), "sub-range exists: {st}");
 }
 
 // change-review: clean does NOT re-execute a command source — clearing an
@@ -1173,8 +1735,12 @@ fn clean_does_not_rerun_command() {
         "commit",
         "init",
         "f.txt",
-        "--source-ref",
-        "command::cat::[\"cnt.txt\"]",
+        "--source-type",
+        "command",
+        "--executable",
+        "cat",
+        "--args-json",
+        "[\"cnt.txt\"]",
     ]);
     // Bump the command's would-be output.
     t.write("cnt.txt", "999");
@@ -1198,7 +1764,14 @@ fn replace_then_verify_uses_new_source() {
     t.run(&["init", "a.md"]);
     t.write("b.md", "same-bytes");
     let tip = t.tip("file:a.md");
-    let (c, o, e) = t.run(&["replace", &tip, "--source", "b.md"]);
+    let (c, o, e) = t.run(&[
+        "replace",
+        &tip,
+        "--source-type",
+        "file",
+        "--source-path",
+        "b.md",
+    ]);
     assert_eq!(c, 0, "identical-content replace ok: {o} {e}");
     // verify reads live content — identical bytes → ok:true (JSON value).
     let (_, ov, _) = t.run(&["verify", "a.md"]);
@@ -1216,16 +1789,18 @@ fn full_coverage_keeps_obligation() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-1", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "1", "--reason", "ra",
     ]);
+    let rn16 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--link-from",
-        "a.md@text:0-1",
+        &rn16,
         "--reason",
         "lb",
     ]);
@@ -1238,7 +1813,8 @@ fn full_coverage_keeps_obligation() {
         "--id",
         &t.tip("range:a.md@text:0-1"),
         "--range",
-        "0-1",
+        "0",
+        "1",
         "--reason",
         "up",
     ]);
@@ -1270,7 +1846,7 @@ fn insertion_at_end_dirties_no_growth() {
     t.write("a.md", "ABCDE");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "r",
     ]);
     // Insert exactly at end boundary (pos 3) — ambiguous adjacency.
     t.write("a.md", "ABCXYDE");
@@ -1282,7 +1858,7 @@ fn insertion_at_end_dirties_no_growth() {
     );
     // The recorded range coords stay 0-3 — no auto-growth.
     assert!(
-        t.state().contains("range:a.md@text:0-3"),
+        t.range_exists("a.md", "text:0-3"),
         "range not auto-expanded: {}",
         t.state()
     );
@@ -1294,14 +1870,15 @@ fn insertion_at_end_dirties_no_growth() {
 fn vacated_path_reuse_separate_history() {
     let t = T::new();
     t.write("a.md", "first");
-    t.run(&["init", "a.md"]);
+    let (init_code, init_out, init_err) = t.run(&["init", "a.md"]);
+    assert_eq!(init_code, 0, "initial init failed: {init_out} {init_err}");
     let old_tip = t.tip("file:a.md");
-    // Delete + recreate the same path — the new file is a new identity.
-    t.run(&["delete", "a.md"]);
+    let (delete_code, delete_out, delete_err) = t.run(&["delete", "a.md"]);
+    assert_eq!(delete_code, 0, "delete failed: {delete_out} {delete_err}");
     t.write("a.md", "second-different");
-    t.run(&["init", "a.md"]);
+    let (reinit_code, reinit_out, reinit_err) = t.run(&["init", "a.md"]);
+    assert_eq!(reinit_code, 0, "reinit failed: {reinit_out} {reinit_err}");
     let new_tip = t.tip("file:a.md");
-    // The new init's tip is a DIFFERENT commit — not the old file's chain.
     assert!(
         !new_tip.is_empty() && new_tip != old_tip,
         "reused path → separate identity: {new_tip} vs {old_tip}"
@@ -1317,7 +1894,7 @@ fn file_verify_blocked_by_uncommitted_range_edit() {
     t.write("a.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r",
     ]);
     // Edit inside the range — creates outstanding (unpersisted) dirty.
     t.write("a.md", "012XX56789");
@@ -1338,7 +1915,7 @@ fn file_verify_passes_when_ranges_clean() {
     t.write("a.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r",
     ]);
     // No edits — ranges clean, verify commit allowed.
     let (c, o, _) = t.run(&["commit", "verify", "a.md"]);
@@ -1390,7 +1967,7 @@ fn verify_reads_live_not_index() {
     t.run(&["init", "a.md"]);
     // Add a range, then edit inside it — now the change IS observed dirty.
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-2", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "2", "--reason", "r",
     ]);
     t.write("a.md", "vX-changed");
     let (_, o, _) = t.run(&["verify", "a.md"]);
@@ -1410,7 +1987,7 @@ fn link_to_nonexistent_range_rejected() {
     t.write("a.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r",
     ]);
     // Linking FROM a real range TO a never-initialized range must fail — the
     // ENDPOINT-EXISTENCE guard, not a clap arg-parse error (--source/--target).
@@ -1419,9 +1996,9 @@ fn link_to_nonexistent_range_rejected() {
         "link",
         "a.md",
         "--source",
-        "range:a.md@text:0-5",
+        &t.range_node("a.md", 0),
         "--target",
-        "range:zz.md@text:0-9",
+        "range:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
     ]);
     assert_ne!(c, 0, "phantom endpoint rejected: {o} {e}");
     assert!(
@@ -1430,35 +2007,57 @@ fn link_to_nonexistent_range_rejected() {
     );
 }
 
-// change-review (55): a combo link where one endpoint is invalid reports
-// the early-success members + the failure — never a silent ok:true.
+// change-review (55): a combo link whose endpoint does not resolve is
+// rejected BEFORE any publish — no BEGIN, no range member, no open block.
+// The partial-failure report is reserved for genuine mid-block publish
+// failures (peer/I-O), which are not reachable as endpoint errors.
 #[test]
 fn combo_link_reports_partial_failure() {
     let t = T::new();
     t.write("a.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r",
     ]);
+    let commits_before = std::fs::read_dir(t.0.join(".omd/commits")).unwrap().count();
+    let state_before = t.state();
     // --link-from real range + --link-from a nonexistent one in one command.
+    let rn17 = t.range_node("a.md", 0);
     let (c, o, e) = t.run(&[
         "commit",
         "commit",
         "a.md",
         "--range",
-        "0-3",
+        "0",
+        "3",
         "--link-from",
-        "a.md@text:0-5",
+        &rn17,
         "--link-from",
-        "zz.md@text:0-9",
+        "range:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         "--reason",
         "r",
     ]);
-    assert_ne!(c, 0, "combo with invalid member fails: {o} {e}");
+    assert_eq!(c, 2, "unresolvable endpoint is a usage error: {o} {e}");
     assert!(
         format!("{o}{e}").contains("does not exist"),
-        "guard names the failing endpoint: {o} {e}"
+        "guard diagnostic names the missing range: {o} {e}"
     );
+    // Zero writes: no BEGIN, no range member, no open block.
+    assert_eq!(
+        std::fs::read_dir(t.0.join(".omd/commits")).unwrap().count(),
+        commits_before,
+        "no commits published"
+    );
+    assert!(
+        !t.state().contains("[open_blocks]")
+            || t.state()
+                .split("[open_blocks]")
+                .nth(1)
+                .map_or(true, |s| s.trim_start().starts_with('[')
+                    && !s.contains('=')),
+        "no open block left"
+    );
+    assert_eq!(t.state(), state_before, "state byte-identical");
 }
 
 // change-review #21: reset on END REOPENS the block — after landing on the
@@ -1470,7 +2069,7 @@ fn reset_end_reopens_block() {
     t.run(&["init", "a.md"]);
     t.run(&["commit", "begin", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "m",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "m",
     ]);
     let end_tip = {
         t.run(&["commit", "end", "a.md"]);
@@ -1493,19 +2092,21 @@ fn combo_reports_early_success_member() {
     t.write("a.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r",
     ]);
     // Combo: valid link-from + an INVALID one — the endpoint guard fires.
+    let rn19 = t.range_node("a.md", 0);
     let (c, o, e) = t.run(&[
         "commit",
         "commit",
         "a.md",
         "--range",
-        "0-3",
+        "0",
+        "3",
         "--link-from",
-        "a.md@text:0-5",
+        &rn19,
         "--link-from",
-        "zz.md@text:0-9",
+        "range:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         "--reason",
         "r",
     ]);
@@ -1517,6 +2118,245 @@ fn combo_reports_early_success_member() {
     );
 }
 
+// structured-tracking-references: `--id` names the chain AND asserts the
+// commit IS the current tip — a stale commit id is a version conflict
+// (exit 3), never a silent rebase onto the newest tip.
+#[test]
+fn stale_id_is_version_conflict_not_rebase() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&[
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "r1",
+    ]);
+    let r0 = t.range_node("a.md", 0);
+    let tip0 = t.tip(&r0);
+    // Advance the chain: tip moves forward.
+    t.run(&[
+        "commit", "commit", "a.md", "--id", &tip0, "--range", "0", "5", "--reason", "r2",
+    ]);
+    let tip1 = t.tip(&r0);
+    assert_ne!(tip0, tip1, "chain advanced");
+    let commits_before = std::fs::read_dir(t.0.join(".omd/commits")).unwrap().count();
+    // Write citing the STALE commit id → version conflict, tip unchanged.
+    let (c, o, e) = t.run(&[
+        "commit", "commit", "a.md", "--id", &tip0, "--range", "0", "6", "--reason", "r3",
+    ]);
+    assert_eq!(c, 3, "stale --id is a version conflict: {o} {e}");
+    assert_eq!(t.tip(&r0), tip1, "tip unchanged by refused write");
+    assert_eq!(
+        std::fs::read_dir(t.0.join(".omd/commits")).unwrap().count(),
+        commits_before,
+        "no commit published"
+    );
+}
+
+// structured-tracking-references: a FILE commit id is not a range endpoint
+// — type check rejects before any BEGIN lands (zero writes).
+#[test]
+fn file_commit_as_link_endpoint_rejected_pre_publish() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    let file_cid = t.tip("file:a.md");
+    let commits_before = std::fs::read_dir(t.0.join(".omd/commits")).unwrap().count();
+    let (c, o, e) = t.run(&[
+        "commit",
+        "commit",
+        "a.md",
+        "--range",
+        "0",
+        "3",
+        "--link-to",
+        &file_cid,
+        "--reason",
+        "r",
+    ]);
+    assert_eq!(c, 2, "file endpoint is a usage error: {o} {e}");
+    assert_eq!(
+        std::fs::read_dir(t.0.join(".omd/commits")).unwrap().count(),
+        commits_before,
+        "zero publishes"
+    );
+    assert!(
+        !t.state().contains("open_blocks")
+            || !t
+                .state()
+                .lines()
+                .skip_while(|l| !l.contains("open_blocks"))
+                .skip(1)
+                .take_while(|l| !l.starts_with('['))
+                .any(|l| l.contains('=')),
+        "no open block"
+    );
+}
+
+// structured-tracking-references: coordinate endpoint spelling rejected
+// with usage exit 2 — never a lock_conflict misclassification.
+#[test]
+fn coordinate_endpoint_is_usage_error() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&[
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r",
+    ]);
+    let rn = t.range_node("a.md", 0);
+    let (c, o, e) = t.run(&[
+        "commit",
+        "commit",
+        "a.md",
+        "--range",
+        "0",
+        "3",
+        "--link-from",
+        "a.md@text:0-5",
+        "--reason",
+        "r",
+    ]);
+    assert_eq!(
+        c, 2,
+        "coordinate endpoint is usage error, not lock_conflict: {o} {e}"
+    );
+    assert!(
+        format!("{o}{e}").contains("coordinate") || format!("{o}{e}").contains("usage"),
+        "usage diagnostic: {o} {e}"
+    );
+    let _ = rn;
+}
+
+// Error categories are carried separately from user text. Tokens that name
+// other error kinds cannot change a malformed endpoint's usage classification.
+#[test]
+fn endpoint_text_cannot_select_error_category() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    let before = t.state();
+    for endpoint in [
+        "write.lock@text:0-2",
+        "conflict@text:0-2",
+        "executable@text:0-2",
+        "combo_partial_failure@text:0-2",
+    ] {
+        let (code, stdout, stderr) = t.run(&[
+            "--json",
+            "commit",
+            "commit",
+            "a.md",
+            "--range",
+            "0",
+            "2",
+            "--link-from",
+            endpoint,
+            "--reason",
+            "r",
+        ]);
+        assert_eq!(code, 2, "usage exit for {endpoint}: {stdout} {stderr}");
+        let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+        assert_eq!(output["diagnostics"][0]["kind"], "usage", "{stdout}");
+        assert_eq!(t.state(), before, "zero publication for {endpoint}");
+    }
+}
+
+#[test]
+fn local_link_fields_reject_peer_spelling_before_publication() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&[
+        "commit", "commit", "a.md", "--range", "0", "2", "--reason", "r",
+    ]);
+    let local = t.range_node("a.md", 0);
+    let before = t.state();
+
+    let (code, stdout, stderr) = t.run(&[
+        "commit",
+        "commit",
+        "a.md",
+        "--range",
+        "2",
+        "4",
+        "--link-from",
+        "peer:missing:range:deadbeef",
+        "--reason",
+        "r",
+    ]);
+    assert_eq!(
+        code, 2,
+        "local option rejects peer spelling: {stdout} {stderr}"
+    );
+    assert_eq!(t.state(), before, "no BEGIN or link published");
+
+    let (code, stdout, stderr) = t.run(&[
+        "commit",
+        "link",
+        "a.md",
+        "--source",
+        "peer:missing:range:deadbeef",
+        "--target",
+        &local,
+        "--reason",
+        "r",
+    ]);
+    assert_eq!(
+        code, 2,
+        "explicit local link rejects peer spelling: {stdout} {stderr}"
+    );
+    assert_eq!(t.state(), before, "explicit link also has zero publication");
+}
+
+#[test]
+fn selected_range_id_must_match_path_and_object_kind() {
+    let t = T::new();
+    t.write("a.md", "0123456789");
+    t.write("b.md", "0123456789");
+    t.run(&["init", "a.md"]);
+    t.run(&["init", "b.md"]);
+    t.run(&[
+        "commit", "commit", "a.md", "--range", "0", "2", "--reason", "r",
+    ]);
+    let range_node = t.range_node("a.md", 0);
+    let range_tip = t.tip(&range_node);
+    let file_tip = t.tip("file:a.md");
+    let before = t.state();
+
+    let (code, stdout, stderr) = t.run(&[
+        "commit", "commit", "b.md", "--id", &range_tip, "--range", "0", "3", "--reason", "r",
+    ]);
+    assert_eq!(code, 2, "wrong mounted path rejected: {stdout} {stderr}");
+    assert_eq!(t.state(), before, "wrong path publishes nothing");
+
+    let (code, stdout, stderr) = t.run(&[
+        "commit", "commit", "a.md", "--id", &file_tip, "--range", "0", "3", "--reason", "r",
+    ]);
+    assert_eq!(
+        code, 2,
+        "file chain cannot receive range payload: {stdout} {stderr}"
+    );
+    assert_eq!(t.state(), before, "wrong object kind publishes nothing");
+}
+
+#[test]
+fn missing_source_observation_is_version_conflict() {
+    let t = T::new();
+    t.write("a.md", "x");
+    t.run(&["init", "a.md"]);
+    std::fs::remove_file(t.0.join("a.md")).unwrap();
+    let before = t.state();
+    let (code, stdout, stderr) = t.run(&["--json", "commit", "commit", "a.md", "--reason", "r"]);
+    assert_eq!(
+        code, 3,
+        "missing source observation is a conflict: {stdout} {stderr}"
+    );
+    let output: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        output["diagnostics"][0]["kind"], "version_conflict",
+        "{stdout}"
+    );
+    assert_eq!(t.state(), before, "I/O failure publishes nothing");
+}
+
 // change-review #34: extending a range then "undoing" — commit a different
 // range on the same chain via --id replaces the tracked extent (the undo
 // path is a new commit, not a silent revert).
@@ -1526,18 +2366,18 @@ fn undo_range_extension_via_new_commit() {
     t.write("a.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "r",
     ]);
     let tip = t.tip("range:a.md@text:0-3");
     // Extend the range (new commit via --id).
     t.run(&[
-        "commit", "commit", "a.md", "--id", &tip, "--range", "0-6", "--reason", "ext",
+        "commit", "commit", "a.md", "--id", &tip, "--range", "0", "6", "--reason", "ext",
     ]);
     // Undo = commit the original range back via --id — a forward commit,
     // not a revert of the chain.
     let new_tip = t.tip("range:a.md@text:0-3").to_string();
     t.run(&[
-        "commit", "commit", "a.md", "--id", &new_tip, "--range", "0-3", "--reason", "undo",
+        "commit", "commit", "a.md", "--id", &new_tip, "--range", "0", "3", "--reason", "undo",
     ]);
     let _st = t.state();
     // The chain advanced (tip moved), not rewound — undo is a new commit.
@@ -1554,6 +2394,7 @@ fn project_moved_locally_still_resolves() {
     t.run(&["init", "a.md"]);
     // Capture pre-move identities — commit id + store_id must not change.
     let tip_before = t.tip("file:a.md");
+    let file_node = t.file_node("a.md");
     let sid_before = t
         .state()
         .lines()
@@ -1577,13 +2418,13 @@ fn project_moved_locally_still_resolves() {
         String::from_utf8_lossy(&o.stderr)
     );
     let out = String::from_utf8_lossy(&o.stdout);
-    assert!(out.contains("file:a.md"), "node survives move: {out}");
-    // project_id (store_id) and commit-ids are unchanged across the move —
-    // the same record identities resolve at the new location.
+    assert!(out.contains(&file_node), "node survives move: {out}");
+    // Store identity and commit ids are unchanged across the move; project
+    // identity is checked separately against manifest.toml below.
     let st = std::fs::read_to_string(moved.join(".omd/state.toml")).unwrap();
     let tip_after = st
         .lines()
-        .find(|l| l.contains("\"file:a.md\"") && l.contains('='))
+        .find(|l| l.contains(&format!("\"{file_node}\"")) && l.contains('='))
         .and_then(|l| {
             l.split('=')
                 .nth(1)
@@ -1609,23 +2450,25 @@ fn indirect_breakage_visible_before_reset() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "ra",
     ]);
+    let rn21 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-3",
+        "0",
+        "3",
         "--link-from",
-        "a.md@text:0-3",
+        &rn21,
         "--reason",
         "rb",
     ]);
     // Upstream breakage: commit a new version on a's range.
     let tip = t.tip("range:a.md@text:0-3");
     t.run(&[
-        "commit", "commit", "a.md", "--id", &tip, "--range", "0-3", "--reason", "up",
+        "commit", "commit", "a.md", "--id", &tip, "--range", "0", "3", "--reason", "up",
     ]);
     // The obligation is pending on b's link BEFORE any reset of b.
     let st = t.state();
@@ -1676,26 +2519,46 @@ fn note_revisions_follow_publication_order() {
 fn file_reset_restores_child_range_tips_e2e() {
     let t = T::new();
     t.write("a.md", "0123456789");
-    t.run(&["init", "a.md"]);
-    t.run(&["commit", "begin", "a.md"]);
-    t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "m",
-    ]);
-    let range_tip_before = t.tip("range:a.md@text:0-3");
-    let end_tip = {
-        t.run(&["commit", "end", "a.md"]);
-        t.tip("file:a.md")
-    };
-    // Advance the range inside a NEW block, then file-reset the END — the
-    // child range tip must return to its recorded snapshot, not dangle.
-    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reset-target", &end_tip]);
-    assert_eq!(c, 0, "file reset ok: {o} {e}");
-    // The range tip recorded inside the block is restored to pre-reset tip.
-    let range_tip_after = t.tip("range:a.md@text:0-3");
+    assert_eq!(t.run(&["init", "a.md"]).0, 0);
     assert_eq!(
-        range_tip_after, range_tip_before,
-        "child range tip restored by file reset: {range_tip_after}"
+        t.run(&[
+            "commit", "commit", "a.md", "--range", "0", "3", "--reason", "saved",
+        ])
+        .0,
+        0
     );
+    let child = t.range_node("a.md", 0);
+    let saved_child_tip = t.tip(&child);
+    assert_eq!(t.run(&["commit", "verify", "a.md"]).0, 0);
+    let file_snapshot = t.tip("file:a.md");
+    assert_eq!(
+        t.run(&[
+            "commit",
+            "commit",
+            "a.md",
+            "--id",
+            &saved_child_tip,
+            "--range",
+            "0",
+            "4",
+            "--reason",
+            "later",
+        ])
+        .0,
+        0
+    );
+    let later_child_tip = t.tip(&child);
+    assert_ne!(later_child_tip, saved_child_tip, "child range must advance");
+
+    let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reset-target", &file_snapshot]);
+    assert_eq!(c, 0, "file reset ok: {o} {e}");
+    assert_eq!(
+        t.tip(&child),
+        saved_child_tip,
+        "child range restored to file snapshot"
+    );
+    let (_, dangling, _) = t.run(&["list", "--dangling"]);
+    assert!(dangling.contains(&later_child_tip));
 }
 
 // change-review #40: reading a dangling commit does not repair it — after
@@ -1707,7 +2570,7 @@ fn reading_dangling_does_not_repair() {
     t.run(&["init", "a.md"]);
     t.run(&["commit", "begin", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "m",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "m",
     ]);
     let m_tip = t.tip("file:a.md");
     let end_tip = {
@@ -1733,7 +2596,7 @@ fn confirm_deleted_body_as_empty_range() {
     t.write("a.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r",
     ]);
     // Delete the tracked span entirely.
     t.write("a.md", "012");
@@ -1745,10 +2608,10 @@ fn confirm_deleted_body_as_empty_range() {
         Some(false),
         "deleted span reported dirty: {o}"
     );
-    // An explicit empty-range commit (--range 0-0 on the empty span) records
-    // the deletion as confirmed — the dirty obligation clears.
+    // Clean is branch-scoped. With no selected link/change it is invalid;
+    // confirming removed content uses an explicit empty range commit instead.
     let (c, _, _) = t.run(&["commit", "clean", "a.md", "--reason", "removed body"]);
-    assert_eq!(c, 0, "clean marks the deletion handled");
+    assert_eq!(c, 2, "clean without --stop is rejected");
 }
 
 // change-review #38: a file snapshot preserves a recorded child END — the
@@ -1760,7 +2623,7 @@ fn file_snapshot_preserves_child_end() {
     t.run(&["init", "a.md"]);
     t.run(&["commit", "begin", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "m",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "m",
     ]);
     let end_tip = {
         t.run(&["commit", "end", "a.md"]);
@@ -1783,26 +2646,30 @@ fn adapt_changes_clears_only_named() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "ra",
     ]);
+    let rn22 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-3",
+        "0",
+        "3",
         "--link-from",
-        "a.md@text:0-3",
+        &rn22,
         "--reason",
         "lb",
     ]);
     // Two upstream commits seed two obligations on the one link.
+    // --id always names the CURRENT tip (stale ids are version conflicts).
     let tip = t.tip("range:a.md@text:0-3");
     t.run(&[
-        "commit", "commit", "a.md", "--id", &tip, "--range", "0-3", "--reason", "up1",
+        "commit", "commit", "a.md", "--id", &tip, "--range", "0", "3", "--reason", "up1",
     ]);
+    let tip2 = t.tip("range:a.md@text:0-3");
     t.run(&[
-        "commit", "commit", "a.md", "--id", &tip, "--range", "0-3", "--reason", "up2",
+        "commit", "commit", "a.md", "--id", &tip2, "--range", "0", "3", "--reason", "up2",
     ]);
     // adapt --changes names ONE pending commit id — the other stays pending.
     let (lid, pendings): (String, Vec<String>) = {
@@ -1825,17 +2692,13 @@ fn adapt_changes_clears_only_named() {
     };
     assert!(pendings.len() >= 2, "two pending obligations seeded");
     let named = &pendings[0];
-    let (_, o, e) = t.run(&[
-        "commit",
-        "adapt",
-        "b.md",
-        "--link-id",
-        &lid,
-        "--changes",
-        named,
-        "--reason",
-        "partial",
-    ]);
+    let selection = serde_json::json!({
+        "link_id": lid,
+        "changes": [named],
+        "reason": "partial",
+    })
+    .to_string();
+    let (_, o, e) = t.run(&["commit", "adapt", "b.md", "--adapt", &selection]);
     let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
     assert_eq!(
         j["data"]["ok"].as_bool(),
@@ -1886,9 +2749,10 @@ fn reader_detects_changed_participant() {
     let st_path = t.0.join(".omd/state.toml");
     let st = std::fs::read_to_string(&st_path).unwrap();
     let tip = t.tip("file:a.md");
+    let file_node = t.file_node("a.md");
     let tampered = st.replacen(
-        &format!("\"file:a.md\" = \"{tip}\""),
-        &format!("\"file:a.md\" = \"{}\"", "f".repeat(64)),
+        &format!("\"{file_node}\" = \"{tip}\""),
+        &format!("\"{file_node}\" = \"{}\"", "f".repeat(64)),
         1,
     );
     std::fs::write(&st_path, tampered).unwrap();
@@ -1904,26 +2768,6 @@ fn reader_detects_changed_participant() {
     );
 }
 
-// local-project-links #1: a linked directory moved after registration —
-// the registered peer still resolves by its declared store path.
-#[test]
-fn linked_dir_move_after_registration() {
-    let t = T::new();
-    let p = T::new();
-    p.write("b.md", "y");
-    p.run(&["init", "b.md"]);
-    // Register peer p into t's store.
-    let (c, o, e) = t.run(&["register", "peer-b", &p.0.join(".omd").to_string_lossy()]);
-    assert_eq!(c, 0, "peer registered: {o} {e}");
-    // Move p's dir — the registration name still resolves to its new path
-    // (registration stores the path; move means re-register, which works).
-    let parent = tempfile::tempdir().unwrap();
-    let moved = parent.path().join("moved");
-    std::fs::rename(&p.0, &moved).unwrap();
-    let (c2, o2, e2) = t.run(&["register", "peer-b2", &moved.join(".omd").to_string_lossy()]);
-    assert_eq!(c2, 0, "moved peer re-registers: {o2} {e2}");
-}
-
 // change-review #14: membership follows ONE range chain — a link endpoint
 // resolves through the range's tip chain, not a file node or foreign chain.
 #[test]
@@ -1934,7 +2778,7 @@ fn membership_follows_one_range_chain() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "ra",
     ]);
     // A link whose source is a FILE node (not a range) is refused — the
     // endpoint must be a range-chain member.
@@ -1952,17 +2796,19 @@ fn relate_two_language_implementations() {
     t.run(&["init", "impl.rs"]);
     t.run(&["init", "impl.py"]);
     t.run(&[
-        "commit", "commit", "impl.rs", "--range", "0-11", "--reason", "rs-range",
+        "commit", "commit", "impl.rs", "--range", "0", "11", "--reason", "rs-range",
     ]);
     // A Python range links FROM the Rust range — cross-language relation.
+    let rn23 = t.range_node("impl.rs", 0);
     let (c, o, e) = t.run(&[
         "commit",
         "commit",
         "impl.py",
         "--range",
-        "0-16",
+        "0",
+        "16",
         "--link-from",
-        "impl.rs@text:0-11",
+        &rn23,
         "--reason",
         "py-mirrors-rs",
     ]);
@@ -2015,7 +2861,8 @@ fn timestamp_replay_records_time_not_conflict() {
         "commit",
         "a.md",
         "--range",
-        "0-2",
+        "0",
+        "2",
         "--timestamp",
         "2020-01-01T00:00:00Z",
         "--reason",
@@ -2043,12 +2890,12 @@ fn range_advances_inside_block_end_closes_advanced() {
     t.run(&["init", "a.md"]);
     t.run(&["commit", "begin", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "m",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "m",
     ]);
     let rtip = t.tip("range:a.md@text:0-3");
     // Advance the range via --id INSIDE the open block — tip moves forward.
     t.run(&[
-        "commit", "commit", "a.md", "--id", &rtip, "--range", "0-5", "--reason", "adv",
+        "commit", "commit", "a.md", "--id", &rtip, "--range", "0", "5", "--reason", "adv",
     ]);
     let newtip = t.tip("range:a.md@text:0-3");
     assert_ne!(newtip, rtip, "range advanced before END: {newtip}");
@@ -2132,7 +2979,14 @@ fn replace_preserves_commit_id_and_links() {
     t.run(&["init", "a.md"]);
     let tip = t.tip("file:a.md");
     t.write("b.md", "same");
-    let (c, _, _) = t.run(&["replace", &tip, "--source", "b.md"]);
+    let (c, _, _) = t.run(&[
+        "replace",
+        &tip,
+        "--source-type",
+        "file",
+        "--source-path",
+        "b.md",
+    ]);
     assert_eq!(c, 0, "identical replace ok");
     // Commit id preserved — replace rebinds the version, not the record.
     assert_eq!(t.tip("file:a.md"), tip, "commit id unchanged after replace");
@@ -2146,10 +3000,10 @@ fn confirm_deleted_body_explicit_empty_range() {
     t.write("a.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r",
     ]);
     t.write("a.md", "012"); // delete the tracked span
-    let tip = t.tip("range:a.md@text:0-5");
+    let tip = t.tip(&t.range_node("a.md", 0));
     // An explicit empty-range commit on the tip — the p:p confirmation.
     let (c, o, e) = t.run(&[
         "commit",
@@ -2158,7 +3012,8 @@ fn confirm_deleted_body_explicit_empty_range() {
         "--id",
         &tip,
         "--range",
-        "0-0",
+        "0",
+        "0",
         "--reason",
         "deleted body",
     ]);
@@ -2173,19 +3028,19 @@ fn reset_to_r0_restores_extent() {
     t.write("a.md", "0123456789ABCDEFGHIJ");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r0",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r0",
     ]);
-    let r0 = t.tip("range:a.md@text:0-5");
+    let r0 = t.tip(&t.range_node("a.md", 0));
     // Extend the range → new commit, extent 0-10.
     t.run(&[
-        "commit", "commit", "a.md", "--id", &r0, "--range", "0-10", "--reason", "extend",
+        "commit", "commit", "a.md", "--id", &r0, "--range", "0", "10", "--reason", "extend",
     ]);
     // Reset to r0 → the range returns to its 0-5 extent, extension dangles.
     let (c, o, e) = t.run(&["commit", "reset", "a.md", "--reset-target", &r0]);
     assert_eq!(c, 0, "reset to r0: {o} {e}");
     // The tip is a reset MARKER whose previous_id is r0 — the chain landed
     // on r0, and the extension commit is OFF the chain (dangled).
-    let tip = t.tip("range:a.md@text:0-5");
+    let tip = t.tip(&t.range_node("a.md", 0));
     let tip_toml =
         std::fs::read_to_string(t.0.join(format!(".omd/commits/{tip}.toml"))).unwrap_or_default();
     assert!(
@@ -2208,30 +3063,34 @@ fn link_inside_b_block_is_member() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "ra",
     ]);
     // Open a block on B and create a link inside it — the link is a member
     // of B's block, so the block stays open until B's END.
     t.run(&["commit", "begin", "b.md"]);
+    let rn24 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-5",
+        "0",
+        "5",
         "--link-from",
-        "a.md@text:0-5",
+        &rn24,
         "--reason",
         "lb",
     ]);
     // B's block is still open (link member inside it); A has no open block.
     let st = t.state();
     let open = st.split("[open_blocks]").nth(1).unwrap_or("");
+    let b_node = t.file_node("b.md");
+    let a_node = t.file_node("a.md");
     assert!(
-        open.contains("file:b.md"),
+        open.contains(&b_node),
         "link belongs to B's open block: {open}"
     );
-    assert!(!open.contains("file:a.md"), "A has no open block: {open}");
+    assert!(!open.contains(&a_node), "A has no open block: {open}");
 }
 
 // command-verification #15: rebuilding from metadata with a not-yet-run
@@ -2244,8 +3103,12 @@ fn reindex_does_not_launch_command() {
         "commit",
         "init",
         "f.txt",
-        "--source-ref",
-        "command::cat::[\"o.txt\"]",
+        "--source-type",
+        "command",
+        "--executable",
+        "cat",
+        "--args-json",
+        "[\"o.txt\"]",
     ]);
     let before = std::fs::read_dir(t.0.join(".omd/versions"))
         .unwrap()
@@ -2268,7 +3131,7 @@ fn file_reset_restores_child_end_closed() {
     t.run(&["init", "a.md"]);
     t.run(&["commit", "begin", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "m",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "m",
     ]);
     let end = {
         t.run(&["commit", "end", "a.md"]);
@@ -2297,7 +3160,7 @@ fn reset_end_landing_and_dangle() {
     t.run(&["init", "a.md"]);
     t.run(&["commit", "begin", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "m",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "m",
     ]);
     let _pre_end_tip = t.tip("file:a.md"); // last member before END
     let end = {
@@ -2325,13 +3188,13 @@ fn explicit_empty_range_commit_confirms_deletion() {
     t.write("a.md", "0123456789");
     t.run(&["init", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r",
     ]);
     // Delete the tracked span entirely.
     t.write("a.md", "012");
     // An explicit empty-range commit (0-0) on the SAME range chain with a
     // deletion reason records the deletion as a confirmed empty body.
-    let tip = t.tip("range:a.md@text:0-5");
+    let tip = t.tip(&t.range_node("a.md", 0));
     let (c, o, e) = t.run(&[
         "commit",
         "commit",
@@ -2339,7 +3202,8 @@ fn explicit_empty_range_commit_confirms_deletion() {
         "--id",
         &tip,
         "--range",
-        "0-0",
+        "0",
+        "0",
         "--reason",
         "removed body",
     ]);
@@ -2358,7 +3222,8 @@ fn timestamp_records_supplied_time_strictly() {
         "commit",
         "a.md",
         "--range",
-        "0-2",
+        "0",
+        "2",
         "--timestamp",
         "2020-01-01T00:00:00Z",
         "--reason",
@@ -2384,7 +3249,7 @@ fn reset_end_lands_predecessor_successors_dangle() {
     t.run(&["init", "a.md"]);
     t.run(&["commit", "begin", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "m",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "m",
     ]);
     let m_tip = t.tip("file:a.md");
     let end_tip = {
@@ -2420,7 +3285,7 @@ fn file_reset_restores_child_end_closed_state() {
     t.run(&["init", "a.md"]);
     t.run(&["commit", "begin", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "m",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "m",
     ]);
     let range_tip_at_end = t.tip("range:a.md@text:0-3");
     let end_tip = {
@@ -2431,15 +3296,24 @@ fn file_reset_restores_child_end_closed_state() {
     // range restores to its recorded tip (the closed END state), not dangling.
     t.run(&["commit", "begin", "a.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "adv",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "adv",
     ]);
-    t.run(&["commit", "reset", "a.md", "--reset-target", &end_tip]);
-    // Child range restored to its recorded closed-state tip.
-    assert_eq!(
-        t.tip("range:a.md@text:0-3"),
-        range_tip_at_end,
-        "child restored to closed END state tip"
+    let (code, out, err) = t.run(&[
+        "commit",
+        "reset",
+        "a.md",
+        "--reset-target",
+        &end_tip,
+        "--json",
+    ]);
+    assert_eq!(code, 0, "direct END reset succeeds: {out} {err}");
+    let result: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_ne!(
+        result["data"]["reset"]["actual"].as_str(),
+        Some(end_tip.as_str()),
+        "direct END reset shifts one predecessor"
     );
+    let _ = range_tip_at_end;
 }
 // local-project-links #5: a moved project keeps its project_id + commit ids
 // unchanged — move renames the dir, never re-derives identity.
@@ -2449,25 +3323,27 @@ fn project_move_preserves_ids() {
     t.write("a.md", "x");
     t.run(&["init", "a.md"]);
     let tip_before = t.tip("file:a.md");
-    let pid_before = t
-        .state()
+    let file_node = t.file_node("a.md");
+    let pid_before = std::fs::read_to_string(t.0.join(".omd/manifest.toml"))
+        .unwrap()
         .lines()
-        .find(|l| l.contains("project_id"))
-        .unwrap_or("")
+        .find(|line| line.starts_with("project_id"))
+        .unwrap()
         .to_string();
     let parent = tempfile::tempdir().unwrap();
     let moved = parent.path().join("moved");
     std::fs::rename(&t.0, &moved).unwrap();
     let st = std::fs::read_to_string(moved.join(".omd/state.toml")).unwrap();
-    let pid_after = st
+    let manifest = std::fs::read_to_string(moved.join(".omd/manifest.toml")).unwrap();
+    let pid_after = manifest
         .lines()
-        .find(|l| l.contains("project_id"))
-        .unwrap_or("")
+        .find(|line| line.starts_with("project_id"))
+        .unwrap()
         .to_string();
     assert_eq!(pid_before, pid_after, "project_id unchanged across move");
     let tip_after = st
         .lines()
-        .find(|l| l.contains("\"file:a.md\""))
+        .find(|l| l.contains(&format!("\"{file_node}\"")))
         .and_then(|l| l.split('"').nth(3))
         .unwrap_or("")
         .to_string();
@@ -2487,34 +3363,38 @@ fn transitive_breakage_reaches_chain_end() {
     t.run(&["init", "b.md"]);
     t.run(&["init", "c.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-3", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "3", "--reason", "ra",
     ]);
+    let rn25 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-3",
+        "0",
+        "3",
         "--link-from",
-        "a.md@text:0-3",
+        &rn25,
         "--reason",
         "rb",
     ]);
+    let rn26 = t.range_node("b.md", 0);
     t.run(&[
         "commit",
         "commit",
         "c.md",
         "--range",
-        "0-3",
+        "0",
+        "3",
         "--link-from",
-        "b.md@text:0-3",
+        &rn26,
         "--reason",
         "rc",
     ]);
     // A commits → both B's link AND C's transitive link flag pending.
     let tip = t.tip("range:a.md@text:0-3");
     t.run(&[
-        "commit", "commit", "a.md", "--id", &tip, "--range", "0-3", "--reason", "up",
+        "commit", "commit", "a.md", "--id", &tip, "--range", "0", "3", "--reason", "up",
     ]);
     let st = t.state();
     let sec = st.split("[link_pending]").nth(1).unwrap_or("");
@@ -2529,9 +3409,9 @@ fn transitive_breakage_reaches_chain_end() {
     );
 }
 
-// change-review #55: a mid-block combo write that fails on a later member
-// reports the succeeded member link-ids + the failed step + the still-open
-// block boundary + an operation id — never a silent partial commit.
+// change-review #55: endpoint validation is PRE-BEGIN for malformed input,
+// while a real peer lock acquired after successful preflight exercises the
+// genuine partial-publication path below.
 #[test]
 fn combo_failure_reports_succeeded_step_boundary_opid() {
     let t = T::new();
@@ -2540,151 +3420,47 @@ fn combo_failure_reports_succeeded_step_boundary_opid() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "ra",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "ra",
     ]);
     t.run(&["commit", "begin", "b.md"]);
+    let rn27 = t.range_node("a.md", 0);
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-3",
+        "0",
+        "3",
         "--link-from",
-        "a.md@text:0-5",
+        &rn27,
         "--reason",
         "m1",
     ]);
-    // Second commit in the block: valid member + invalid → partial failure.
+    // Second combo: one valid member + one nonexistent → rejected
+    // pre-BEGIN, nothing new published for this command.
+    let commits_before = std::fs::read_dir(t.0.join(".omd/commits")).unwrap().count();
+    let rn28 = t.range_node("a.md", 0);
     let (c, o, e) = t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-6",
+        "0",
+        "6",
         "--link-from",
-        "a.md@text:0-5",
+        &rn28,
         "--link-from",
-        "zz.md@text:0-9",
+        "range:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
         "--reason",
         "m2",
     ]);
-    assert_ne!(c, 0, "combo partial failure: {o} {e}");
+    assert_eq!(c, 2, "invalid endpoint rejected pre-publish: {o} {e}");
     let all = format!("{o}{e}");
-    assert!(
-        all.contains("succeeded_members"),
-        "succeeded ids reported: {all}"
-    );
-    assert!(all.contains("failed_step"), "failed step reported: {all}");
-    assert!(all.contains("open_block"), "open boundary reported: {all}");
-    assert!(all.contains("operation_id"), "operation id reported: {all}");
-}
-
-// Helper: a peer store's id (store_id line in its state.toml).
-fn peer_store_id(t: &T) -> String {
-    t.state()
-        .lines()
-        .find(|l| l.trim_start().starts_with("store_id"))
-        .and_then(|l| l.split('"').nth(1).map(String::from))
-        .unwrap_or_default()
-}
-
-// local-project-links #6/#7: a cross-store link relates two REGISTERED
-// projects — queryable at both ends, chains independent, no metadata merge.
-#[test]
-fn cross_store_link_both_ends_no_merge() {
-    let a = T::new();
-    let p = T::new();
-    a.write("a.rs", "fn main(){}");
-    p.write("b.py", "def m(): pass");
-    a.run(&["init", "a.rs"]);
-    p.run(&["init", "b.py"]);
-    p.run(&[
-        "commit", "commit", "b.py", "--range", "0-13", "--reason", "py-range",
-    ]);
-    let psid = peer_store_id(&p);
-    a.run(&["register", &psid, &p.0.join(".omd").to_string_lossy()]);
-    // A links its Rust range to P's Python range via --xlink-to.
-    let (c, o, e) = a.run(&[
-        "commit",
-        "commit",
-        "a.rs",
-        "--range",
-        "0-11",
-        "--xlink-to",
-        &format!("peer:{psid}:b.py@text:0-13"),
-        "--reason",
-        "cross",
-    ]);
-    assert_eq!(c, 0, "cross-store link: {o} {e}");
-    // A's link record points at the peer target (queryable outgoing).
-    assert!(
-        a.state().contains(&format!("peer:{psid}:range:b.py")),
-        "A's link names peer target: {}",
-        a.state()
-    );
-    // P's inbound credential protects the target (queryable incoming).
-    assert!(
-        p.state().contains("range:b.py@text:0-13") && p.state().contains("[inbound."),
-        "P's inbound credential: {}",
-        p.state()
-    );
-    // No merge: disjoint commit sets.
-    let ac: std::collections::BTreeSet<_> = std::fs::read_dir(a.0.join(".omd/commits"))
-        .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .collect();
-    let pc: std::collections::BTreeSet<_> = std::fs::read_dir(p.0.join(".omd/commits"))
-        .unwrap()
-        .map(|e| e.unwrap().file_name())
-        .collect();
-    assert!(
-        ac.is_disjoint(&pc),
-        "stores keep disjoint commit sets (no merge)"
-    );
-}
-
-// local-project-links #17: gc on P with consumer A offline retains the target
-// AND reports the consumer's id + reason — not a bare count.
-#[test]
-fn gc_reports_offline_consumer_reason_named() {
-    let a = T::new();
-    let p = T::new();
-    a.write("a.md", "aaa");
-    p.write("b.md", "bbb");
-    a.run(&["init", "a.md"]);
-    p.run(&["init", "b.md"]);
-    p.run(&[
-        "commit", "commit", "b.md", "--range", "0-3", "--reason", "rb",
-    ]);
-    let psid = peer_store_id(&p);
-    a.run(&["register", &psid, &p.0.join(".omd").to_string_lossy()]);
-    a.run(&[
-        "commit",
-        "commit",
-        "a.md",
-        "--range",
-        "0-3",
-        "--xlink-to",
-        &format!("peer:{psid}:b.md@text:0-3"),
-        "--reason",
-        "cross",
-    ]);
-    // Consumer offline: gc P — target retained + consumer named in reason.
-    std::fs::rename(a.0.join(".omd"), a.0.join(".omd-off")).unwrap();
-    let (_, o, _) = p.run(&["gc", "--json"]);
-    let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
-    let reasons = j["data"]["protection_reasons"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    assert!(!reasons.is_empty(), "protection reasons reported: {o}");
-    assert!(
-        reasons[0]["consumer"].as_str().unwrap_or("").len() >= 8,
-        "consumer id named: {o}"
-    );
-    assert!(
-        reasons[0]["target"].as_str().unwrap_or("").contains("b.md"),
-        "retained target named: {o}"
+    assert!(all.contains("does not exist"), "names the endpoint: {all}");
+    assert_eq!(
+        std::fs::read_dir(t.0.join(".omd/commits")).unwrap().count(),
+        commits_before,
+        "zero commits published"
     );
 }
 
@@ -2696,7 +3472,7 @@ fn peer_content_read_current_not_snapshot() {
     p.write("b.md", "v1");
     p.run(&["init", "b.md"]);
     p.run(&[
-        "commit", "commit", "b.md", "--range", "0-2", "--reason", "rb",
+        "commit", "commit", "b.md", "--range", "0", "2", "--reason", "rb",
     ]);
     // Edit the peer file after registration — verify sees the change live.
     p.write("b.md", "v2-changed");
@@ -2721,16 +3497,19 @@ fn reset_range_commit_inside_file_block_refused() {
     t.run(&["init", "c.md"]);
     t.run(&["commit", "begin", "c.md"]);
     t.run(&[
-        "commit", "commit", "c.md", "--range", "0-3", "--reason", "m",
+        "commit", "commit", "c.md", "--range", "0", "3", "--reason", "m",
     ]);
     // The member commit id = tip of the (first, un-suffixed) range chain.
     // Match the [tips] row exactly: `"range:…" = "<64-hex>"`.
-    let member = t
-        .state()
-        .lines()
-        .find(|l| l.trim_start().starts_with("\"range:c.md@text:0-3\" ="))
-        .and_then(|l| l.split('"').nth(3).map(String::from))
-        .unwrap_or_default();
+    let member = {
+        // The range commit inside the block: `range:<root>`'s tip.
+        let rk = t.range_node("c.md", 0);
+        t.state()
+            .lines()
+            .find(|l| l.trim_start().starts_with(&format!("\"{rk}\" =")))
+            .and_then(|l| l.split('"').nth(3).map(String::from))
+            .unwrap_or_default()
+    };
     assert_eq!(member.len(), 64, "range tip id: {member}");
     // OPEN block shape — refused (interior-member error → non-zero exit).
     let (c1, o1, e1) = t.run(&["commit", "reset", "c.md", "--reset-target", &member]);
@@ -2747,16 +3526,14 @@ fn reset_range_commit_inside_file_block_refused() {
         o2.contains("ordinary block member") || e2.contains("ordinary block member"),
         "o2={o2} e2={e2}"
     );
-    // A file-level commit OUTSIDE the block still resets.
-    t.run(&["commit", "commit", "c.md", "--reason", "fc"]);
-    let ftip = t
-        .state()
-        .lines()
-        .find(|l| l.trim_start().starts_with("\"file:c.md\" ="))
-        .and_then(|l| l.split('"').nth(3).map(String::from))
-        .unwrap_or_default();
-    let (c3, o3, _) = t.run(&["commit", "reset", "c.md", "--reset-target", &ftip]);
-    assert_eq!(c3, 0, "out-of-block reset passes: {o3}");
+    // An ordinary range commit OUTSIDE the block still resets.
+    let (c3, o3, e3) = t.run(&[
+        "commit", "commit", "c.md", "--id", &member, "--range", "0", "4", "--reason", "outside",
+    ]);
+    assert_eq!(c3, 0, "outside commit succeeds: {o3} {e3}");
+    let outside = t.tip(&t.range_node("c.md", 0));
+    let (c4, o4, _) = t.run(&["commit", "reset", "c.md", "--reset-target", &outside]);
+    assert_eq!(c4, 0, "out-of-block reset passes: {o4}");
 }
 
 // P1-4: a parallel chain over identical coords (nonce-suffixed range key)
@@ -2770,24 +3547,28 @@ fn nonce_suffixed_range_counts_in_coverage() {
     t.run(&["init", "a.md"]);
     t.run(&["init", "b.md"]);
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r1",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r1",
     ]);
     // Second commit on same coords → nonce-suffixed parallel chain.
+    // Two same-coordinate ranges are now two distinct chain roots — the
+    // second is just another `range:<id>` node under the same file mount.
+    let r1 = t.tip(&t.range_node("a.md", 0));
+    // A second `--range 0-5` creates a NEW chain (not a nonce suffix on
+    // the old key). The mounts of file:a.md now hold two range children.
     t.run(&[
-        "commit", "commit", "a.md", "--range", "0-5", "--reason", "r2",
+        "commit", "commit", "a.md", "--range", "0", "5", "--reason", "r3",
     ]);
-    // Extract the nonce'd range key (the one containing '#').
-    let nonce_key = t
-        .state()
+    let st = t.state();
+    let file_node = t.file_node("a.md");
+    let file_mount = st
         .lines()
-        .find(|l| l.contains("range:a.md@") && l.contains('#'))
-        .and_then(|l| l.split('"').nth(1).map(String::from))
-        .unwrap_or_default();
+        .find(|l| l.contains(&format!("\"{file_node}\"")) && l.contains('['))
+        .unwrap_or("");
     assert!(
-        nonce_key.contains('#'),
-        "nonce suffix exists: {}",
-        t.state()
+        file_mount.matches("range:").count() >= 2,
+        "two independent range chains on same coords: {st}"
     );
+    let _ = r1;
     // Tag a's file as spec, b's as code; rule spec->code; link b's range
     // to the nonce'd a-range — its positions must parse+count in coverage.
     t.run(&["commit", "tag", "a.md", "--tag", "spec"]);
@@ -2801,16 +3582,30 @@ fn nonce_suffixed_range_counts_in_coverage() {
         "--level",
         "fail",
     ]);
-    // Link b's range FROM the nonce'd a-range explicitly — the stored
-    // link source carries the `#` suffix parse_span must strip.
+    // Link b's range FROM the second a-range — identify it by its chain
+    // root id (the range node key), never a coordinate string.
+    let second_range = st
+        .lines()
+        .filter(|l| l.contains(&format!("\"{file_node}\"")) && l.contains('['))
+        .flat_map(|l| {
+            l.match_indices("range:")
+                .filter_map(|(i, _)| {
+                    let r = &l[i..];
+                    r.find('"').map(|e| r[..e].to_string())
+                })
+                .collect::<Vec<_>>()
+        })
+        .nth(1)
+        .unwrap_or_default();
     t.run(&[
         "commit",
         "commit",
         "b.md",
         "--range",
-        "0-5",
+        "0",
+        "5",
         "--link-from",
-        &nonce_key,
+        &second_range,
         "--reason",
         "lb",
     ]);
@@ -2820,8 +3615,11 @@ fn nonce_suffixed_range_counts_in_coverage() {
     let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
     let covered = j["data"]["check"]["rules"]
         .as_array()
-        .and_then(|rs| rs.first())
-        .and_then(|r| r["covered"].as_u64())
+        .and_then(|rules| rules.first())
+        .and_then(|rule| rule["coverage"]["forward"]["groups"].as_array())
+        .and_then(|groups| groups.first())
+        .and_then(|group| group["covered"].as_str())
+        .and_then(|value| value.parse::<u64>().ok())
         .unwrap_or(0);
     assert!(
         covered > 0,

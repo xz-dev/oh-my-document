@@ -1,103 +1,190 @@
-//! git:: sources — read exact-commit blobs from a local repository (E-10).
+//! Exact local Git object recovery.
 //!
-//! `git::<JSON>` references carry `{repo, commit, path}`: the repo location,
-//! a full exact Git commit ID (a floating ref name never substitutes), and
-//! the in-commit file path. We read the complete raw blob via `git cat-file`
-//! — read-only plumbing, never textconv/filter, never diff/index/status,
-//! never an implicit fetch, clone, commit, or worktree switch.
-//!
-//! In-commit symlinks resolve within the same commit: a link's blob holds
-//! its target path; we follow it (bounded) and report broken links / cycles
-//! as diagnostics — never fall back to the worktree.
+//! Only a complete hexadecimal commit object id plus literal in-commit path
+//! is accepted. Plumbing runs with lazy fetching disabled and never consults
+//! worktree, index, textconv, filters, refs, or remotes.
 
-use std::path::PathBuf;
+use std::collections::BTreeSet;
+use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 
 use super::SourceError;
 
-/// A parsed `git::{repo,commit,path}` reference.
 #[derive(Debug, Clone)]
 pub struct GitRef {
     pub repo: PathBuf,
-    /// Full exact commit id (40-hex). Floating ref names are rejected.
     pub commit: String,
-    /// Path inside that commit's tree.
     pub path: String,
 }
 
-/// Parse `git::<JSON>` — `{"repo": "...", "commit": "<40-hex>", "path": "..."}`.
-pub fn parse_git_ref(s: &str) -> Result<GitRef, SourceError> {
-    let json = s.strip_prefix("git::").ok_or(SourceError::Command)?;
-    let v: serde_json::Value = serde_json::from_str(json).map_err(|_| SourceError::Command)?;
-    let repo = v
-        .get("repo")
-        .and_then(|x| x.as_str())
-        .ok_or(SourceError::Command)?;
-    let commit = v
-        .get("commit")
-        .and_then(|x| x.as_str())
-        .ok_or(SourceError::Command)?;
-    let path = v
-        .get("path")
-        .and_then(|x| x.as_str())
-        .ok_or(SourceError::Command)?;
-    // Exact commit id: 40-hex only — no branch/tag/short/ref name.
-    if commit.len() != 40 || !commit.chars().all(|c| c.is_ascii_hexdigit()) {
-        return Err(SourceError::Command);
-    }
-    Ok(GitRef {
-        repo: PathBuf::from(repo),
-        commit: commit.into(),
-        path: path.into(),
-    })
-}
-
-/// Read the raw blob for `gitref` at the exact commit. `git cat-file blob
-/// <commit>:<path>` — the complete raw object, no filtering. In-commit
-/// symlinks resolve within the commit (bounded depth); a broken link or
-/// cycle is a diagnostic, never a worktree fallback.
 pub fn read_blob(gitref: &GitRef) -> Result<Vec<u8>, SourceError> {
-    read_blob_depth(gitref, 0)
+    if !matches!(gitref.commit.len(), 40 | 64)
+        || !gitref.commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(SourceError::Invalid(
+            "Git commit must be a complete 40- or 64-hex object id".into(),
+        ));
+    }
+    let kind = git(gitref, &["cat-file", "-t", &gitref.commit])?;
+    if kind != b"commit\n" {
+        return Err(SourceError::Unavailable(
+            "Git object is missing or is not a commit".into(),
+        ));
+    }
+    let mut active_links = BTreeSet::new();
+    let path = normalize_repo_path(Path::new(&gitref.path))?;
+    let components: Vec<String> = path.split('/').map(str::to_string).collect();
+    let (_, object_type, bytes) = resolve_path(gitref, Vec::new(), &components, &mut active_links)?;
+    if object_type != "blob" {
+        return Err(SourceError::Unavailable(format!(
+            "Git path is not a blob: {path}"
+        )));
+    }
+    Ok(bytes)
 }
 
-fn read_blob_depth(gitref: &GitRef, depth: usize) -> Result<Vec<u8>, SourceError> {
-    if depth > 8 {
-        return Err(SourceError::Command); // symlink cycle / too deep
+fn resolve_path(
+    gitref: &GitRef,
+    mut resolved: Vec<String>,
+    remaining: &[String],
+    active_links: &mut BTreeSet<String>,
+) -> Result<(Vec<String>, String, Vec<u8>), SourceError> {
+    let Some((component, rest)) = remaining.split_first() else {
+        return Ok((resolved, "tree".into(), Vec::new()));
+    };
+    resolved.push(component.clone());
+    let path = resolved.join("/");
+    let (mode, object_type, bytes) = read_entry(gitref, &path)?;
+    if mode != "120000" {
+        if rest.is_empty() {
+            return Ok((resolved, object_type, bytes));
+        }
+        if object_type != "tree" {
+            return Err(SourceError::Unavailable(format!(
+                "Git path is not a tree: {path}"
+            )));
+        }
+        return resolve_path(gitref, resolved, rest, active_links);
     }
-    let out = Command::new("git")
-        .args(["-C"])
-        .arg(&gitref.repo)
-        .args([
-            "cat-file",
-            "blob",
-            &format!("{}:{}", gitref.commit, gitref.path),
-        ])
-        .output()
-        .map_err(|_| SourceError::Command)?;
-    if !out.status.success() {
-        // Object/path missing at that commit — report unobtainable, never
-        // substitute worktree content or another commit.
-        return Err(SourceError::Command);
+    if !active_links.insert(path.clone()) {
+        return Err(SourceError::Unavailable(
+            "historical Git symlink cycle".into(),
+        ));
     }
-    // If the entry is a symlink, its blob is the target path — follow it
-    // within the same commit.
-    if is_symlink_entry(gitref)? {
-        let target = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        let mut nxt = gitref.clone();
-        nxt.path = target;
-        return read_blob_depth(&nxt, depth + 1);
+    let target = std::str::from_utf8(&bytes)
+        .map_err(|_| SourceError::Unavailable("Git symlink target is not UTF-8".into()))?;
+    if target.contains('\0') || Path::new(target).is_absolute() {
+        return Err(SourceError::Unavailable(
+            "historical Git symlink escapes commit tree".into(),
+        ));
     }
-    Ok(out.stdout)
+    resolved.pop();
+    let parent = resolved.join("/");
+    let target = normalize_repo_path_allow_root(&Path::new(&parent).join(target), true)?;
+    let target_components: Vec<String> = if target.is_empty() {
+        Vec::new()
+    } else {
+        target.split('/').map(str::to_string).collect()
+    };
+    // A link stays active only while its target is resolved. The caller's
+    // suffix may legitimately traverse that same link again afterwards.
+    let entry = resolve_path(gitref, Vec::new(), &target_components, active_links)?;
+    active_links.remove(&path);
+    if rest.is_empty() {
+        return Ok(entry);
+    }
+    let (target_path, object_type, _) = entry;
+    if object_type != "tree" {
+        return Err(SourceError::Unavailable(format!(
+            "Git path is not a tree: {path}"
+        )));
+    }
+    resolve_path(gitref, target_path, rest, active_links)
 }
 
-/// Is `<commit>:<path>` a symlink entry (mode 120000)?
-fn is_symlink_entry(gitref: &GitRef) -> Result<bool, SourceError> {
-    let out = Command::new("git")
-        .args(["-C"])
+fn read_entry(gitref: &GitRef, path: &str) -> Result<(String, String, Vec<u8>), SourceError> {
+    let literal = format!(":(literal){path}");
+    let tree = git(
+        gitref,
+        &[
+            "ls-tree",
+            "--full-tree",
+            "-z",
+            &gitref.commit,
+            "--",
+            &literal,
+        ],
+    )?;
+    let entry = tree
+        .split(|byte| *byte == 0)
+        .find(|entry| !entry.is_empty())
+        .ok_or_else(|| SourceError::Unavailable(format!("Git path is missing: {path}")))?;
+    let tab = entry
+        .iter()
+        .position(|byte| *byte == b'\t')
+        .ok_or_else(|| SourceError::Unavailable("invalid git ls-tree output".into()))?;
+    let header = std::str::from_utf8(&entry[..tab])
+        .map_err(|_| SourceError::Unavailable("invalid git ls-tree output".into()))?;
+    let mut fields = header.split_whitespace();
+    let mode = fields.next().unwrap_or("").to_string();
+    let object_type = fields.next().unwrap_or("").to_string();
+    if !matches!(object_type.as_str(), "blob" | "tree") {
+        return Err(SourceError::Unavailable(format!(
+            "Git path has unsupported object type: {path}"
+        )));
+    }
+    let bytes = if object_type == "blob" {
+        let spec = format!("{}:{path}", gitref.commit);
+        git(gitref, &["cat-file", "blob", &spec])?
+    } else {
+        Vec::new()
+    };
+    Ok((mode, object_type, bytes))
+}
+
+pub(crate) fn normalize_repo_path(path: &Path) -> Result<String, SourceError> {
+    normalize_repo_path_allow_root(path, false)
+}
+
+fn normalize_repo_path_allow_root(path: &Path, allow_root: bool) -> Result<String, SourceError> {
+    let mut parts: Vec<String> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::Normal(part) => parts.push(part.to_string_lossy().into_owned()),
+            Component::ParentDir => {
+                if parts.pop().is_none() {
+                    return Err(SourceError::Unavailable(
+                        "historical Git symlink escapes commit tree".into(),
+                    ));
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(SourceError::Unavailable(
+                    "Git path must be repository-relative".into(),
+                ));
+            }
+        }
+    }
+    if parts.is_empty() && !allow_root {
+        return Err(SourceError::Unavailable("Git path is empty".into()));
+    }
+    Ok(parts.join("/"))
+}
+
+fn git(gitref: &GitRef, args: &[&str]) -> Result<Vec<u8>, SourceError> {
+    let output = Command::new("git")
+        .arg("-C")
         .arg(&gitref.repo)
-        .args(["ls-tree", &gitref.commit, "--", &gitref.path])
+        .args(args)
+        .env("GIT_NO_LAZY_FETCH", "1")
+        .stdin(std::process::Stdio::null())
         .output()
-        .map_err(|_| SourceError::Command)?;
-    let line = String::from_utf8_lossy(&out.stdout);
-    Ok(line.starts_with("120000"))
+        .map_err(SourceError::Io)?;
+    if output.status.success() {
+        Ok(output.stdout)
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        Err(SourceError::Unavailable(stderr.trim_end().to_string()))
+    }
 }

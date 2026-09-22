@@ -2,7 +2,9 @@
 
 use omd::records::commit::CommitKind;
 use omd::relations::atomic::{AtomicStack, ResetLanding, resolve_reset};
-use omd::relations::coverage::{coverage, coverage_percent, effective_link_span};
+use omd::relations::coverage::{
+    byte_coverage, coverage, coverage_percent, effective_link_span, text_coverage,
+};
 use omd::relations::range::{Mode, Range};
 
 #[test]
@@ -55,6 +57,35 @@ fn byte_mode_does_not_filter_whitespace() {
     let (covered, denom) = coverage(&[r], content, Mode::Byte);
     assert_eq!(denom, 3); // space byte counts
     assert_eq!(covered, 3);
+}
+
+#[test]
+fn detailed_text_gaps_keep_original_scalar_coordinates() {
+    let content = "\u{feff}A \u{2003}中\nB";
+    let range = Range::new(0, 5, Mode::Text, 7).unwrap();
+    let stats = text_coverage(&[range], content);
+    assert_eq!((stats.covered, stats.total), (3, 4));
+    assert_eq!(
+        stats.gaps,
+        vec![Range {
+            start: 6,
+            end: 7,
+            mode: Mode::Text,
+        }]
+    );
+}
+
+#[test]
+fn detailed_byte_gaps_count_invalid_utf8_whitespace_and_nul() {
+    let ranges = [Range {
+        start: 0,
+        end: 3,
+        mode: Mode::Byte,
+    }];
+    let stats = byte_coverage(&ranges, 4);
+    assert_eq!((stats.covered, stats.total), (3, 4));
+    assert_eq!(stats.gaps[0].start, 3);
+    assert_eq!(stats.gaps[0].end, 4);
 }
 
 #[test]

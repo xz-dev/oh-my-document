@@ -26,7 +26,7 @@ Feature: change review and coverage
       @wip
   Scenario: Confirm without reason resolves the dirty obligation
       Given a dirty range on "docs/o.md"
-      When I run "omd commit confirm docs/o.md --no-reason"
+      When I run "omd commit confirm docs/o.md --no--reason"
       Then the obligation is cleared
 
       @wip

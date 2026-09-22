@@ -20,8 +20,8 @@ Feature: managed content tracking
     Scenario: Identical coordinates have independent records
       Given a file "docs/r.md" containing "content"
       And I run "omd init docs/r.md"
-      When I run "omd commit commit docs/r.md --range 0-3"
-      And I run "omd commit commit docs/r.md --range 0-3"
+      When I run "omd commit commit docs/r.md --range 0 3"
+      And I run "omd commit commit docs/r.md --range 0 3"
       Then two distinct range chains exist for "docs/r.md"
 
   Rule: Full source versions survive cache loss

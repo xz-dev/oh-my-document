@@ -1,5 +1,7 @@
 # 待决事项与工程规格清单
 
+> **当前覆盖说明：** 本文件是历史问题清单，不是当前 CLI 指南。除前序 `define-tracking-contracts` 的收敛外，`separate-range-identity-and-location` 又取代了复合来源/坐标语言，并落地结构化来源、本机映射、remote identity、调用方凭据和配置先行 init；当前行为见 [source-model.md](source-model.md)、[storage.md](storage.md) 与该 change 的 delta specs。
+
 > **状态（2026-09-18）：** Q-01 至 Q-12 已全部在 [openspec/changes/define-tracking-contracts](../openspec/changes/define-tracking-contracts/design.md) 中解决或收窄为工程默认。本文件保留为历史问题清单，各条的最终决定以 design.md 的 D-01 至 D-21 与 ED-01 至 ED-19 为准。实施期待定清单集中记录在 design.md 的"当前收敛程度"一节。
 
 这些问题保留给本机后续设计/实现工具，不是本次代替所有者做出的选择。主逻辑已收敛，不需要重新讨论 Rust、三态、Git 独立性、JSON args 或 stdout/exit 0。

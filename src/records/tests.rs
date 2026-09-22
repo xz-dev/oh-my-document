@@ -16,7 +16,7 @@ fn base_commit(kind: CommitKind) -> Commit {
         salt: "abcdefghijklmnop".into(),
         previous_id: "".into(),
         timestamp: "2026-09-20T03:00:00.000000000Z".into(),
-        schema: "omd.commit/1".into(),
+        schema: "omd.commit/3".into(),
         kind,
         content_ref: "empty".into(),
         payload: serde_json::Map::new(),
@@ -29,7 +29,7 @@ fn payload() -> OperationPayload {
     fields.insert("path".into(), serde_json::Value::String("docs/a.md".into()));
     OperationPayload {
         kind: "init".into(),
-        schema: "omd.commit/1".into(),
+        schema: "omd.commit/3".into(),
         content_ref: ContentRef::Empty,
         fields,
     }
@@ -40,7 +40,7 @@ fn golden_commit_id_vector() {
     // Python reference:
     // salt="abcdefghijklmnop", prev="", ts="2026-09-20T03:00:00.000000000Z",
     // content=b"hello",
-    // payload='{"content_ref":"empty","kind":"init","path":"docs/a.md","schema":"omd.commit/1"}'
+    // payload='{"content_ref":"empty","kind":"init","path":"docs/a.md","schema":"omd.commit/3"}'
     let salt = *b"abcdefghijklmnop";
     let id = derive_commit_id(
         &salt,
@@ -51,7 +51,7 @@ fn golden_commit_id_vector() {
     );
     assert_eq!(
         id.to_hex(),
-        "7a7c80614f5d9a30bba24ac4c282a2d4949b72e0fcd76d0fe694df8e6b57ca52"
+        "cdff856c4db560e6e6749e1fc789a7f23ed062de90e15fe0f5167548cd4fe614"
     );
 }
 
@@ -104,7 +104,7 @@ fn version_content_ref_is_not_empty() {
     fields.insert("x".into(), 1.into());
     let p = OperationPayload {
         kind: "commit".into(),
-        schema: "omd.commit/1".into(),
+        schema: "omd.commit/3".into(),
         content_ref: ContentRef::Version(v),
         fields,
     };
@@ -195,8 +195,8 @@ fn version_created_before_commit_no_self_reference() {
         ver_id,
         b"content",
         Acquisition::File {
+            project: "root".into(),
             path: "docs/a.md".into(),
-            encoding: "utf-8".into(),
         },
         Some("utf-8".into()),
     );
@@ -214,8 +214,8 @@ fn equal_observations_reuse_version_identity() {
         id,
         b"same bytes",
         Acquisition::File {
+            project: "root".into(),
             path: "f".into(),
-            encoding: "utf-8".into(),
         },
         Some("utf-8".into()),
     );
@@ -223,8 +223,8 @@ fn equal_observations_reuse_version_identity() {
         id,
         b"same bytes",
         Acquisition::File {
+            project: "root".into(),
             path: "f".into(),
-            encoding: "utf-8".into(),
         },
         Some("utf-8".into()),
     );
@@ -238,8 +238,8 @@ fn different_content_gives_different_hash() {
         id,
         b"x",
         Acquisition::File {
+            project: "root".into(),
             path: "f".into(),
-            encoding: "utf-8".into(),
         },
         None,
     );
@@ -247,8 +247,8 @@ fn different_content_gives_different_hash() {
         id,
         b"y",
         Acquisition::File {
+            project: "root".into(),
             path: "f".into(),
-            encoding: "utf-8".into(),
         },
         None,
     );

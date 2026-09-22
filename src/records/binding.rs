@@ -1,47 +1,55 @@
-//! Source replacement: rebind a recorded version to a new source that
-//! provides the *same complete content* (E-10.2/10.3).
-//!
-//! `replace <commit-id> --source <ref>` selects the full source version the
-//! commit references. The new source must deliver byte-identical *complete*
-//! content — an equal range fragment is never enough. On match we write an
-//! immutable binding revision (separate from the commit's original inputs)
-//! that changes how that version's content is fetched, never the content
-//! itself, never the commit id/inputs/links/notes. All records sharing the
-//! version id rebind together; a *different* version with equal content hash
-//! never rebatches.
+//! Immutable recovery-binding revisions for complete source versions.
 
 use serde::{Deserialize, Serialize};
 
-/// A binding revision: version_id → new acquisition. Immutable, appended —
-/// the original binding is never edited in place.
+use crate::sources::reference::SourceDescriptor;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Binding {
-    /// Independent binding record id.
+    pub format: String,
     pub id: String,
-    /// The source-version id being rebound.
     pub version_id: String,
-    /// Serialized new acquisition descriptor (source ref).
-    pub acquisition: serde_json::Value,
-    /// Publication seq — revision order, not wall-clock.
+    pub recovery: SourceDescriptor,
     pub seq: u64,
-    /// Records sharing this version that were rebound (impact report).
     pub affected: Vec<String>,
+}
+
+impl Binding {
+    pub fn validate(&self, expected_id: &str, expected_version: &str) -> Result<(), String> {
+        if self.format != "omd.binding/2" {
+            return Err(format!(
+                "unsupported binding format '{}' — this build reads omd.binding/2",
+                self.format
+            ));
+        }
+        if self.id != expected_id
+            || self.version_id != expected_version
+            || self.seq == 0
+            || self.id.len() != 32
+            || self.version_id.len() != 32
+            || !self.id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || !self.version_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+            || self.affected.is_empty()
+            || self.affected.iter().any(|commit| {
+                commit.len() != 64 || !commit.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })
+        {
+            return Err("binding identity/version/sequence is inconsistent".into());
+        }
+        self.recovery
+            .validate_portable()
+            .map_err(|error| error.to_string())?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
 pub enum ReplaceError {
     #[error("content mismatch: new source differs from recorded full content")]
     Mismatch,
-    #[error("recorded version has no recoverable full content")]
+    #[error("recorded commit has no complete source version")]
     NoBasis,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
-}
-
-/// Write a binding revision into `bindings/<id>.toml`.
-pub fn write_binding(root: &std::path::Path, b: &Binding) -> Result<String, std::io::Error> {
-    let txt =
-        toml::to_string(b).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
-    std::fs::write(root.join(format!("bindings/{}.toml", b.id)), txt)?;
-    Ok(b.id.clone())
 }
