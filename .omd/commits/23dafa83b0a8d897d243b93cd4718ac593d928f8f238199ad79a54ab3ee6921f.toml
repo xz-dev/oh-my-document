@@ -1,0 +1,16 @@
+salt = "5kFi2DQiVSmViG64"
+previous_id = ""
+timestamp = "2026-09-23T10:02:12.360504143Z"
+schema = "omd.commit/3"
+kind = "commit"
+content_ref = "38bafde7c795af9a3adcbeae630e4168"
+
+[payload]
+mount = "file:d8b51f30be203316276700a80bb8c7e4bf91fc306987b52eec2b1509a9ca221f"
+path = "openspec/changes/separate-range-identity-and-location/specs/managed-content-tracking/spec.md"
+reason = "复核多字节文本场景：text 按 Unicode scalar 而非 UTF-8 字节；仅确认此场景。"
+
+[payload.position]
+end = "3291"
+mode = "text"
+start = "3083"

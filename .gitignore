@@ -1,3 +1,4 @@
 .pi/
 .serena/
 target/
+.omd/write.lock

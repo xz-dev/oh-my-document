@@ -1,0 +1,16 @@
+format = "omd.version/2"
+id = [149, 118, 61, 206, 69, 85, 255, 25, 38, 230, 71, 124, 72, 92, 199, 186]
+len = 9898
+sha256 = "2c755d5313b6e13a545cef280ddba87be46aeef811614d94eac45033984ff1af"
+encoding = "utf-8"
+content_file = "content/2c755d5313b6e13a545cef280ddba87be46aeef811614d94eac45033984ff1af"
+
+[acquisition]
+type = "file"
+project = "root"
+path = "openspec/changes/separate-range-identity-and-location/specs/managed-content-tracking/spec.md"
+
+[recovery]
+type = "file"
+project = "root"
+path = "openspec/changes/separate-range-identity-and-location/specs/managed-content-tracking/spec.md"

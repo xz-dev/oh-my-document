@@ -1,0 +1,9 @@
+salt = "zN6W5j9qNgPGnm00"
+previous_id = ""
+timestamp = "2026-09-23T10:02:12.284365465Z"
+schema = "omd.commit/3"
+kind = "init"
+content_ref = "9c1fff887c82c438093282509dcf5ee4"
+
+[payload]
+path = "tests/ranges.rs"

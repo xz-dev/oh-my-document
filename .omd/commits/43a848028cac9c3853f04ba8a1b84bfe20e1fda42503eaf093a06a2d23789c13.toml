@@ -1,0 +1,9 @@
+salt = "XkwPRqxpScfAIUUR"
+previous_id = "15b85e70c7723d7b5e0978bd87a47e04944cb6d2d2190d5bb27bae1fd912aae9"
+timestamp = "2026-09-23T12:17:09.774890367Z"
+schema = "omd.commit/3"
+kind = "atomic_end"
+content_ref = "empty"
+
+[payload]
+path = "tests/query_coverage.rs"

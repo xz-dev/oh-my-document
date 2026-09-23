@@ -2,7 +2,7 @@
 
 ## 当前状态与阅读顺序
 
-仓库已有 Rust 核心、`omd` CLI、BDD/集成测试和 OpenSpec change；整体 change 仍待最终独立验收。尚未交付可安装的产品 skills，也未建立或运行 Lean 产品证明。
+仓库已有 Rust 核心、`omd` CLI、BDD/集成测试和 OpenSpec change；整体 change 仍待最终独立验收。已有仓库内 OMD skill 首版及真实自管理存储，尚未全局安装或完成全部功能实践；未建立或运行 Lean 产品证明。
 
 接手顺序：
 
@@ -13,9 +13,13 @@
 5. [需求基线](docs/requirements.md)、[待决事项](docs/open-questions.md)：历史决定；其中复合来源语法已被当前 change 取代。
 6. [programming-thinking 契约](docs/programming-thinking.md)：可选 Lean skill 的使用边界，不是已交付 skill。
 
+## 本仓库的 OMD 自管理
+
+修改已跟踪内容、创建关联或检查覆盖时，先读 [OMD skill](skills/omd/SKILL.md) 和 [当前纳管范围与实践限制](docs/omd-self-management.md)。沿用现有 `.omd/`；串行写入，每次取得新的调用方凭据。缺口如实保留，不重新初始化权威或批量确认全仓库。
+
 ## 保持当前产品边界
 
-- 产品是 Rust 核心 + CLI + 未来指导 AI 的 skills。人和 AI 使用同一套规则，不设宽松通道。
+- 产品是 Rust 核心 + CLI + 指导 AI 的 skills。人和 AI 使用同一套规则，不设宽松通道。
 - 核心用内容 hash 检测变化，在 Rust 内用 Myers 定位差异；当前文件观察不依赖 Git diff、changed-files、HEAD、index 或 blob。
 - 标记只有空、脏、已确认三态；执行失败、无法定位和跳过是诊断/检查结果，不是第四种标记状态。
 - 只有显式 import 的范围纳入统计；允许显式 import `.omd/`。跟随符号链接并报告断链/循环。

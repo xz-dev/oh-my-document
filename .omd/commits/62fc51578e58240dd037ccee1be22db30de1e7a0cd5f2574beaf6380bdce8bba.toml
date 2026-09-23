@@ -1,0 +1,10 @@
+salt = "gTj4uyVzH5E4GiSN"
+previous_id = ""
+timestamp = "2026-09-23T12:17:09.496469718Z"
+schema = "omd.commit/3"
+kind = "atomic_begin"
+content_ref = "empty"
+
+[payload]
+mount = "file:f1898289cb0731ec1bd55a437dfac68db15d06d2c67b608c14c08383bd8c9c0f"
+path = "src/records/store.rs"

@@ -1,0 +1,16 @@
+salt = "XrFKlfLJwIcRx10h"
+previous_id = "a1eeeddd1494fa431babe7c4f61ec8cc63d1ebb03c52bf631b4ab116157041c0"
+timestamp = "2026-09-23T12:17:09.71624649Z"
+schema = "omd.commit/3"
+kind = "commit"
+content_ref = "b3784251badb00b145e09f29804f25b6"
+
+[payload]
+mount = "file:eb74d32044f647c37845f76fd99068151a9de3bc37b5f7b38dcadf4671640b7e"
+path = "tests/query_coverage.rs"
+reason = "黑盒回归覆盖两种初始化顺序、remove/rename、歧义选择和缺失诊断；386 Rust 与18 BDD场景通过。修复后补建。"
+
+[payload.position]
+end = "7031"
+mode = "text"
+start = "4382"

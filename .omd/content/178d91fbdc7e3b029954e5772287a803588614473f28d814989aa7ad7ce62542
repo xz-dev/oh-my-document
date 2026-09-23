@@ -1,39 +1,5 @@
 ## MODIFIED Requirements
 
-### Requirement: Import statistics are separate from file tracking
-
-系统 SHALL 支持显式 import 文件或目录：文件仅纳管所选文件，目录持续递归发现成员，并按显式 include/exclude 筛选。import/remove SHALL 只改变统计范围及其 tag 记录，不自动 init、创建 range、确认正文或删除磁盘内容。统计对象与正文对象 SHALL 具有独立链首身份，允许同一路径共存；无论先 import 还是先 init，后续正文跟踪都不被统计对象阻止。
-
-查询 SHALL 采用有效历史中最近的 import/remove 决定当前范围，后续 tag/rule 记录不遮蔽筛选；remove 不改正文或 range 历史。缺失、断链或遍历失败 SHALL 明确报告 incomplete 并使 check 失败，不能因空清单而报告完整成功。同路径有多种对象时，通用操作 SHALL 要求明确对象选择，不任取一个；import/remove 选择统计对象，正文操作选择正文对象。
-
-#### Scenario: Import a file before initializing its content
-- **GIVEN** README.md 存在但尚未 init
-- **WHEN** 用户 import README.md，随后显式 init 并建立正文范围
-- **THEN** import 后文件已进入统计但未被确认为正文跟踪；init 与统计对象拥有不同链首，范围挂在正文对象下
-- **AND** remove README.md 只撤统计，不删除正文、范围或磁盘文件；重新 import 可恢复统计
-
-#### Scenario: Updated directory selection is effective through later metadata
-- **GIVEN** 一个目录已 import，用户随后修改其筛选，再添加 tag/rule
-- **WHEN** 用户执行 check
-- **THEN** 文件清单和 tag 覆盖使用最新有效筛选；根目录成员路径保持项目相对路径
-
-#### Scenario: Missing imported file remains an incomplete check
-- **GIVEN** 已 import 的文件被外部删除
-- **WHEN** 用户执行 check
-- **THEN** 返回失败并给出缺失或不可读诊断，不以空文件清单掩盖统计缺口
-
-#### Scenario: New document enters the imported statistics
-- **GIVEN** 用户已 import `docs/`，目录中尚无 `intro.md`
-- **WHEN** 用户在磁盘新增 `docs/intro.md` 并检查覆盖
-- **THEN** 新文件进入该范围统计，其未标记内容显示为缺口
-- **AND** OMD 不自动创建它的文件 init 或 range commit
-
-#### Scenario: Remove does not erase tracking
-- **GIVEN** `docs/` 在统计范围内，`docs/spec.md` 已有文件与 range 提交
-- **WHEN** 用户显式 remove `docs/`
-- **THEN** 该 import 范围退出统计
-- **AND** 已有文件、range、历史和磁盘内容不被删除
-
 ### Requirement: Range identity is independent of coordinates
 
 系统 SHALL 在 `commit --range` 未指定 `--id` 时创建独立的范围跟踪首个 commit；指定既有范围当前有效 tip 的 `--id` 时，在该跟踪上提交范围变更，不原地覆盖历史。重叠范围和完全相同坐标的独立跟踪 SHALL 都被允许；系统 MUST NOT 仅按坐标合并其身份。

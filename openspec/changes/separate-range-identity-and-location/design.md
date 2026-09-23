@@ -8,6 +8,14 @@
 
 契约依据：前序 design D-17、D-24、D-29～D-33、E-2～E-6；[调研笔记](../../../docs/research/traceability-identities.md) 只提供对照，不替代这些决定。早期 `docs/` 与 AGENTS 中的复合来源语法是旧契约，实施本 change 时须同步相关说明；不将早期“尚无实现”的状态描述当作当前事实。
 
+## 自管理使用中的补充决定
+
+用户确认 import 可直接指定文件或目录。统计对象和正文对象沿用各自不可变 Import/Init 链首，在同一路径独立定位；不新增 range 身份、不改既有 ID、不迁移历史。路径查找按用途选择，旧的纯 State 查询遇到多对象不得任取。通用 tag/rule 命令遇到同路径歧义要求显式 tip；import/remove 与正文操作分别选择对应对象。
+
+当前有效统计条件取 tip 向前最近的 Import/Remove，不被后续 tag/rule 遮蔽。文件只统计自身，目录递归；缺失或遍历错误使 check incomplete/失败。没有新序列化字段，但旧程序会拒绝同路径双对象，使用方必须升级二进制，不把同版本号视为可互换。既有旧 init→import 记录原样保留；新统计操作另建独立链。
+
+这是原 24 项审查之后的补充，证据见根目录 traceability；不改变 5.1 未完成状态。
+
 ## Goals / Non-Goals
 
 **Goals:**

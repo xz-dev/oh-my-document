@@ -1,0 +1,16 @@
+format = "omd.version/2"
+id = [188, 89, 1, 181, 184, 236, 119, 8, 183, 52, 245, 163, 91, 110, 195, 26]
+len = 3492
+sha256 = "3888c6bc875cd6fd069e46cbc7a550e34944cedb02ddcf79580ae1e259d414e5"
+encoding = "utf-8"
+content_file = "content/3888c6bc875cd6fd069e46cbc7a550e34944cedb02ddcf79580ae1e259d414e5"
+
+[acquisition]
+type = "file"
+project = "root"
+path = "src/relations/range.rs"
+
+[recovery]
+type = "file"
+project = "root"
+path = "src/relations/range.rs"

@@ -132,14 +132,6 @@ printf 'spec_range=%s\ncode_range=%s\nlink_id=%s\n' \
 
 Ranges are zero-based and half-open: `[start, end)`. Text mode counts decoded Unicode scalar values; byte mode counts raw bytes. IDs in the script are chain-root commit IDs returned by OMD, not path-and-span labels. JSON v2 reports chain root, current tip, effective range commit, source version, location, and link identity separately.
 
-## Manage files and directories
-
-`omd import README.md` includes one file in statistics; `omd import docs` includes a directory and discovers new members recursively. Import is independent of `init`: neither import nor initialization confirms a content range. `remove` withdraws statistics without deleting the source or its content history. Each write to an existing store still needs fresh `--expected` evidence.
-
-File lists and tag coverage use the latest effective import selection. Missing files or incomplete traversal fail `check`; a successful check without configured rules does not imply full coverage. Use the current build: older binaries reject stores containing separate import and content objects at the same path.
-
-Start with the repository's [OMD skill](skills/omd/SKILL.md); see [actual self-management and limits](docs/omd-self-management.md).
-
 ## Source fields
 
 Source kind and coordinates are separate:
@@ -182,7 +174,7 @@ Moving one authoritative store can keep its store ID after explicit remapping. C
 - [Implementation handoff](docs/handoff.md)
 - [Spec-to-task evidence](spec-traceability.md)
 
-Current Rust core and CLI exist, but overall change acceptance still depends on independent review. An initial repository-local OMD skill is available; it is not globally installed and not every workflow has been exercised. The optional Lean workflow has not been delivered or validated. OMD does not claim semantic equivalence, document sufficiency, or all-platform support.
+Current Rust core and CLI exist, but overall change acceptance still depends on independent review. Product skills and the optional Lean workflow have not been delivered or validated. OMD does not claim semantic equivalence, document sufficiency, or all-platform support.
 
 ## Contributing
 

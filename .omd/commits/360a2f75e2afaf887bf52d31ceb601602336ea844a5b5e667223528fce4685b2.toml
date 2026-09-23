@@ -1,0 +1,12 @@
+salt = "sKoDegNSFRh9lPmo"
+previous_id = "c922bab4a9174095695533de8c90f6c21cd0e94951c2bd6b7ebf00581aa27d12"
+timestamp = "2026-09-23T10:02:11.954939365Z"
+schema = "omd.commit/3"
+kind = "import"
+content_ref = "f04adde13a5d5b40c43657ac032ff138"
+
+[payload]
+exclude = []
+include = []
+path = "README.md"
+scope = []

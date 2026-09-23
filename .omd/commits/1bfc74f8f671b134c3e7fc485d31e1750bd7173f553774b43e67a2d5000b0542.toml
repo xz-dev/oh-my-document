@@ -1,0 +1,14 @@
+salt = "Ex0Rjniw8WRQHNpp"
+previous_id = "fc18b4e91b5a0eed4ea69bf87269d2910e9c7ae7455bf7ee8f340dfc4ab6347c"
+timestamp = "2026-09-23T12:17:09.558735043Z"
+schema = "omd.commit/3"
+kind = "link"
+content_ref = "empty"
+
+[payload]
+link_id = "53d62576eaac8b3fabd561e73f11b777"
+reason = "按不可变 Import/Init 链首定位统计与正文；此范围只覆盖定位职责，完整实现还涉及 CLI/pipeline/scope。修复后补建。"
+source = "range:9e34593586578322acbfbf2a45aa96778ac27acff9f01e1d2535ac3acc953ad2"
+source_version = "9e34593586578322acbfbf2a45aa96778ac27acff9f01e1d2535ac3acc953ad2"
+target = "range:62fc51578e58240dd037ccee1be22db30de1e7a0cd5f2574beaf6380bdce8bba"
+target_version = "fc18b4e91b5a0eed4ea69bf87269d2910e9c7ae7455bf7ee8f340dfc4ab6347c"

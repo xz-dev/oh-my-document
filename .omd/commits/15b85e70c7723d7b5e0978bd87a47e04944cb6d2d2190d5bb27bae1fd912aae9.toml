@@ -1,0 +1,14 @@
+salt = "1PpfYZbCBHNgXYPr"
+previous_id = "64d3c409d626140b0713144adddb42ad1c83ba593ea3ae8a653933c1e84a595c"
+timestamp = "2026-09-23T12:17:09.746059402Z"
+schema = "omd.commit/3"
+kind = "link"
+content_ref = "empty"
+
+[payload]
+link_id = "61dd61152d7a5d9452040ab7d45a2faa"
+reason = "黑盒回归覆盖两种初始化顺序、remove/rename、歧义选择和缺失诊断；386 Rust 与18 BDD场景通过。修复后补建。"
+source = "range:62fc51578e58240dd037ccee1be22db30de1e7a0cd5f2574beaf6380bdce8bba"
+source_version = "62fc51578e58240dd037ccee1be22db30de1e7a0cd5f2574beaf6380bdce8bba"
+target = "range:a1eeeddd1494fa431babe7c4f61ec8cc63d1ebb03c52bf631b4ab116157041c0"
+target_version = "64d3c409d626140b0713144adddb42ad1c83ba593ea3ae8a653933c1e84a595c"

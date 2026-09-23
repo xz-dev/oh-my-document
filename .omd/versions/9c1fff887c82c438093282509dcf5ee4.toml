@@ -1,0 +1,16 @@
+format = "omd.version/2"
+id = [156, 31, 255, 136, 124, 130, 196, 56, 9, 50, 130, 80, 157, 207, 94, 228]
+len = 4419
+sha256 = "90f8c6b8e5cbc025b012fb693ef43723304c5230b3182dcab2ba5d562f1a79ed"
+encoding = "utf-8"
+content_file = "content/90f8c6b8e5cbc025b012fb693ef43723304c5230b3182dcab2ba5d562f1a79ed"
+
+[acquisition]
+type = "file"
+project = "root"
+path = "tests/ranges.rs"
+
+[recovery]
+type = "file"
+project = "root"
+path = "tests/ranges.rs"

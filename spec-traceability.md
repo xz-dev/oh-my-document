@@ -9,6 +9,17 @@ This ledger maps each of the change's 24 tasks to source, can-fail assertions, a
 
 A green suite, a handoff statement, or an existing checkbox is not proof by itself. After independent review and parent reconciliation, the OpenSpec tasks file is **23/24**; task 5.1 remains PARTIAL. Current implementation review found no required repair. Whole-change completion remains **BLOCKED on historical evidence**, not accepted as 24/24.
 
+## Self-management follow-up (after the 24-task review)
+
+The owner approved file-or-directory import and independent same-path statistics/content objects during actual repository use. This is supplemental work, not a waiver of 5.1 or a retroactive claim about the frozen candidate below.
+
+- `Store::object_at_path`, its identity-index validation, pipeline publication guards and CLI selection distinguish immutable Import versus Init chain roots; IDs and prior records stay unchanged.
+- `src/sources/scope.rs` accepts file roots; check reports missing scopes as incomplete/failure. Effective import selection is shared by file listing and tag coverage.
+- `tests/query_coverage.rs::{file_import_is_independent_of_content_tracking,missing_imported_file_fails_without_silent_scope_loss,revised_root_import_updates_listing_and_tag_coverage}` provide CLI assertions; the first and third were run RED before fixes. `tests/lifecycle.rs::broken_link_scope_does_not_report_clean_coverage` now requires exit 1 and incomplete.
+- Latest `cargo test --offline --locked`: **386 Rust tests**, plus **18 BDD scenarios / 79 steps**, passed; offline build passed. No fresh independent review of this follow-up is claimed.
+- Old-binary init→import records were retained byte-for-byte in an isolated continuation probe. Old binary rejects the new same-path dual-object state; use the new build. No format migration or historical rewriting was performed.
+- Actual self-management and current unresolved checks: [self-management record](docs/omd-self-management.md). The historical sections below remain evidence for their original review, not the current working-tree status.
+
 ## Current change and baseline coverage
 
 | Spec | Current role | Task coverage |

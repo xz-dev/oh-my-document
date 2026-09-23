@@ -1,0 +1,16 @@
+salt = "cuNAKBHdzlbMcozA"
+previous_id = ""
+timestamp = "2026-09-23T12:17:09.407051903Z"
+schema = "omd.commit/3"
+kind = "commit"
+content_ref = "90ce53b4f38e05d9777b422e77616e23"
+
+[payload]
+mount = "file:d8b51f30be203316276700a80bb8c7e4bf91fc306987b52eec2b1509a9ca221f"
+path = "openspec/changes/separate-range-identity-and-location/specs/managed-content-tracking/spec.md"
+reason = "自管理中由用户确认的文件/目录 import 与正文独立契约。修复后补建关联，不冒称事前跟踪。"
+
+[payload.position]
+end = "1144"
+mode = "text"
+start = "26"

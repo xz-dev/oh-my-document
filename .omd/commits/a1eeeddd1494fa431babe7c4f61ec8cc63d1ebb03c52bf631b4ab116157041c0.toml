@@ -1,0 +1,10 @@
+salt = "prijmCWXuDxn40Yg"
+previous_id = ""
+timestamp = "2026-09-23T12:17:09.687059686Z"
+schema = "omd.commit/3"
+kind = "atomic_begin"
+content_ref = "empty"
+
+[payload]
+mount = "file:eb74d32044f647c37845f76fd99068151a9de3bc37b5f7b38dcadf4671640b7e"
+path = "tests/query_coverage.rs"

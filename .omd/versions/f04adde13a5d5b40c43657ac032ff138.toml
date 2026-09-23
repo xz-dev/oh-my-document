@@ -1,0 +1,16 @@
+format = "omd.version/2"
+id = [240, 74, 221, 225, 58, 93, 91, 64, 196, 54, 87, 172, 3, 47, 241, 56]
+len = 8781
+sha256 = "127beb023019ddfc96e082d5c887d3aa290731ff73b4c46eb84ab46ea14a0da3"
+encoding = "utf-8"
+content_file = "content/127beb023019ddfc96e082d5c887d3aa290731ff73b4c46eb84ab46ea14a0da3"
+
+[acquisition]
+type = "file"
+project = "root"
+path = "README.md"
+
+[recovery]
+type = "file"
+project = "root"
+path = "README.md"

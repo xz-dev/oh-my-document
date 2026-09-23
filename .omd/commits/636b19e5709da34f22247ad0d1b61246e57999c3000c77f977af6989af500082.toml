@@ -1,0 +1,15 @@
+salt = "JE4EvgcjVafP22ay"
+previous_id = "23dafa83b0a8d897d243b93cd4718ac593d928f8f238199ad79a54ab3ee6921f"
+timestamp = "2026-09-23T12:16:05.523846047Z"
+schema = "omd.commit/3"
+kind = "commit"
+content_ref = "90ce53b4f38e05d9777b422e77616e23"
+
+[payload]
+path = "openspec/changes/separate-range-identity-and-location/specs/managed-content-tracking/spec.md"
+reason = "已逐字核对：新增 import 契约使本场景移位，原多字节场景正文完全不变；显式更新坐标，不豁免下游关联复核。"
+
+[payload.position]
+end = "4409"
+mode = "text"
+start = "4201"

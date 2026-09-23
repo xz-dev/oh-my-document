@@ -1,0 +1,10 @@
+salt = "FIwTrqCwcw5CXgEE"
+previous_id = ""
+timestamp = "2026-09-23T10:02:12.586668908Z"
+schema = "omd.commit/3"
+kind = "atomic_begin"
+content_ref = "empty"
+
+[payload]
+mount = "file:1e4d8da3b66ade9030a559808363c1b9716ddeacfef02bfafe518420e4f42b41"
+path = "tests/ranges.rs"

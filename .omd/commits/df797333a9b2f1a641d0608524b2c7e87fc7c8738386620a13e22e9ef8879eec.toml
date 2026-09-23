@@ -1,0 +1,16 @@
+salt = "UwHRjiJk0cija3Uk"
+previous_id = "b6943ae51da5dc41d4ab68f879c7e6c40ff02cb4b3239c5a1e5ec7523ce6cff7"
+timestamp = "2026-09-23T10:02:12.458725514Z"
+schema = "omd.commit/3"
+kind = "commit"
+content_ref = "bc5901b5b8ec7708b734f5a35b6ec31a"
+
+[payload]
+mount = "file:3a1a7f90f06b57b25fd56d106a9ef09921928bed670fdd65c49616dd005681c2"
+path = "src/relations/range.rs"
+reason = "text_len 与 text_slice 实现 Unicode scalar 计数和半开字符切片；不宣称验证全部编码配置。"
+
+[payload.position]
+end = "3490"
+mode = "text"
+start = "2323"

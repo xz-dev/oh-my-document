@@ -1,0 +1,12 @@
+salt = "Cxb61NxbUd1kSSBN"
+previous_id = "1074e6b68f9293218a6aeb03d6aac81698134ea5d4af6e41e33b5936bd8b1aa6"
+timestamp = "2026-09-23T10:02:12.11051362Z"
+schema = "omd.commit/3"
+kind = "import"
+content_ref = "078bd34fabd55ab7099e2b9412892ce8"
+
+[payload]
+exclude = []
+include = []
+path = "README.zh-CN.md"
+scope = []

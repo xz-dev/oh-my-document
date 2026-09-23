@@ -1,0 +1,12 @@
+salt = "1KihBgrW1V0tIXz2"
+previous_id = ""
+timestamp = "2026-09-23T10:02:12.164915878Z"
+schema = "omd.commit/3"
+kind = "import"
+content_ref = "empty"
+
+[payload]
+exclude = []
+include = []
+path = "skills/omd"
+scope = []

@@ -132,14 +132,6 @@ printf 'spec_range=%s\ncode_range=%s\nlink_id=%s\n' \
 
 范围使用从 0 开始、左闭右开的 `[start, end)`。text 模式按解码后的 Unicode scalar value 计数，byte 模式按原始字节计数。脚本中的 ID 是 OMD 实际返回的链根 commit ID，不是“路径加坐标”的标签。JSON v2 分别报告链根、当前 tip、有效范围 commit、来源版本、位置和 link 身份。
 
-## 纳管文件与目录
-
-`omd import README.md` 只把该文件纳入统计；`omd import docs` 递归纳管目录并持续发现新成员。import 与 init 独立，两者都不确认正文范围；remove 撤销统计，不删除来源或正文历史。已有 store 的每次写入仍需新的 `--expected` 凭据。
-
-文件清单与 tag 覆盖使用最新有效 import 条件。缺失文件或遍历不完整使 check 失败；未配置规则时，check 成功不等于覆盖完整。使用当前构建：旧二进制会拒绝同路径统计/正文双对象的存储。
-
-操作入口：[OMD skill](skills/omd/SKILL.md)；实际进度与限制：[自管理记录](docs/omd-self-management.md)。
-
 ## 来源字段
 
 来源类型与坐标单位分开表达：
@@ -182,7 +174,7 @@ default_encoding = "windows-1252"
 - [实施交接](docs/handoff.md)
 - [规格与任务证据](spec-traceability.md)
 
-Rust 核心和 CLI 已经存在，但整个 change 是否接受仍需独立审查。已有仓库内 OMD skill 首版，尚未全局安装或完成全部功能实践；可选 Lean 工作流尚未交付或验证。OMD 不承诺证明语义等价、判断文档充分，或已经覆盖所有平台。
+Rust 核心和 CLI 已经存在，但整个 change 是否接受仍需独立审查。产品 skills 与可选 Lean 工作流尚未交付或验证。OMD 不承诺证明语义等价、判断文档充分，或已经覆盖所有平台。
 
 ## 参与开发
 

@@ -1,0 +1,15 @@
+salt = "liTPvAEurljI7lHk"
+previous_id = "636b19e5709da34f22247ad0d1b61246e57999c3000c77f977af6989af500082"
+timestamp = "2026-09-23T12:22:17.573566463Z"
+schema = "omd.commit/3"
+kind = "commit"
+content_ref = "95763dce4555ff1926e6477c485cc7ba"
+
+[payload]
+path = "openspec/changes/separate-range-identity-and-location/specs/managed-content-tracking/spec.md"
+reason = "严格校验要求保留原目录 import 场景；已核对是已有场景恢复，文件契约不变，显式复核范围和位置。"
+
+[payload.position]
+end = "4831"
+mode = "text"
+start = "4623"

@@ -1,0 +1,12 @@
+salt = "7hbUinSuHAdCKY28"
+previous_id = ""
+timestamp = "2026-09-23T12:03:58.856284832Z"
+schema = "omd.commit/3"
+kind = "import"
+content_ref = "empty"
+
+[payload]
+exclude = []
+include = []
+path = "README.zh-CN.md"
+scope = []

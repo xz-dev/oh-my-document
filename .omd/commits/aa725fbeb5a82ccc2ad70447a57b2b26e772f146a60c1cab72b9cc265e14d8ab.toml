@@ -1,0 +1,16 @@
+salt = "fD1sGoIz3NZBZmpm"
+previous_id = "34c396b1a678950659a548dcf0fa948b102d72ec946b8d3cabaadb435d37ea5b"
+timestamp = "2026-09-23T10:02:12.614898044Z"
+schema = "omd.commit/3"
+kind = "commit"
+content_ref = "9c1fff887c82c438093282509dcf5ee4"
+
+[payload]
+mount = "file:1e4d8da3b66ade9030a559808363c1b9716ddeacfef02bfafe518420e4f42b41"
+path = "tests/ranges.rs"
+reason = "héllo 的 5 scalar 和 [1,2) 提取 é 断言直接检验上述实现；cargo test --test ranges 本次 12 项通过。"
+
+[payload.position]
+end = "597"
+mode = "text"
+start = "296"

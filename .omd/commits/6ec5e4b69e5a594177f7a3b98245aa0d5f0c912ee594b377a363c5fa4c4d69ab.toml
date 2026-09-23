@@ -1,0 +1,14 @@
+salt = "ehscywZw1KiFFzgO"
+previous_id = "df797333a9b2f1a641d0608524b2c7e87fc7c8738386620a13e22e9ef8879eec"
+timestamp = "2026-09-23T10:02:12.487067363Z"
+schema = "omd.commit/3"
+kind = "link"
+content_ref = "empty"
+
+[payload]
+link_id = "016d01f925b45a12b9a8638b987dfab4"
+reason = "text_len 与 text_slice 实现 Unicode scalar 计数和半开字符切片；不宣称验证全部编码配置。"
+source = "range:23dafa83b0a8d897d243b93cd4718ac593d928f8f238199ad79a54ab3ee6921f"
+source_version = "23dafa83b0a8d897d243b93cd4718ac593d928f8f238199ad79a54ab3ee6921f"
+target = "range:b6943ae51da5dc41d4ab68f879c7e6c40ff02cb4b3239c5a1e5ec7523ce6cff7"
+target_version = "df797333a9b2f1a641d0608524b2c7e87fc7c8738386620a13e22e9ef8879eec"

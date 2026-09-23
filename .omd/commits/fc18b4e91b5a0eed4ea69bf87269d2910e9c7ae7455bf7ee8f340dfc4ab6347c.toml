@@ -1,0 +1,16 @@
+salt = "yhdfHnOEWe60YbvY"
+previous_id = "62fc51578e58240dd037ccee1be22db30de1e7a0cd5f2574beaf6380bdce8bba"
+timestamp = "2026-09-23T12:17:09.526190526Z"
+schema = "omd.commit/3"
+kind = "commit"
+content_ref = "7e16e017d239e98ba8da0e0cc86bf18d"
+
+[payload]
+mount = "file:f1898289cb0731ec1bd55a437dfac68db15d06d2c67b608c14c08383bd8c9c0f"
+path = "src/records/store.rs"
+reason = "按不可变 Import/Init 链首定位统计与正文；此范围只覆盖定位职责，完整实现还涉及 CLI/pipeline/scope。修复后补建。"
+
+[payload.position]
+end = "40529"
+mode = "text"
+start = "39690"

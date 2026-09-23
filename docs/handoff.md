@@ -4,11 +4,11 @@
 
 仓库已从设计交接进入 Rust 实现阶段：存在 `omd` CLI、权威文本存储、可重建缓存、file/command/git 来源、对象/link/跨 store 生命周期，以及 Rust/CLI/BDD 测试。
 
-当前活动 change 是 [`separate-range-identity-and-location`](../openspec/changes/separate-range-identity-and-location/)。其规划已完成，独立审查及父侧核对后任务文件为 **23/24**，仅 5.1 保持未勾选。当前实现未发现需继续修复的缺陷；但 5.1 要求的原始失败证据已丢失，**整个 change 的完整验收为 BLOCK（历史证据缺口）**，不宣称 24/24。产品 Rust 代码自 S6 文档收尾起未变。
+当前活动 change 是 [`separate-range-identity-and-location`](../openspec/changes/separate-range-identity-and-location/)。其规划已完成，独立审查及父侧核对后任务文件为 **23/24**，仅 5.1 保持未勾选。当时独立审查未发现需继续修复的缺陷；但 5.1 要求的原始失败证据已丢失，**整个 change 的完整验收为 BLOCK（历史证据缺口）**，不宣称 24/24。此后真实自管理中，经所有者授权新增文件 import/独立统计定位并修复筛选更新；最新回归与未完成检查见 [自管理记录](omd-self-management.md) 和 [补充证据](../spec-traceability.md#self-management-follow-up-after-the-24-task-review)，不沿用旧冻结候选的验收结论。
 
 尚未交付：
 
-- 可安装的 OMD 产品 skills；
+- 完成全部功能实践的 OMD skills（已有 [仓库内首版](../skills/omd/SKILL.md)，未全局安装）；
 - Lean 工程、证明或真实 UML↔Lean↔实现范围 link；
 - 发布版本、hooks、许可证；
 - Windows/macOS 全平台验证；
