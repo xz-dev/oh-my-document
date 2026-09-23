@@ -69,7 +69,7 @@ fn object_key(store: &Store, locator: &str) -> String {
     }
     locator
         .strip_prefix("file:")
-        .and_then(|path| crate::relations::node::file_at_path(store.state(), path))
+        .and_then(|path| store.file_at_path(path))
         .unwrap_or(locator)
         .to_string()
 }
@@ -344,7 +344,7 @@ pub fn commit_source(
             .get("path")
             .and_then(|value| value.as_str())
             .ok_or_else(|| PipelineError::Input("new file object requires path".into()))?;
-        if crate::relations::node::file_at_path(&new_state, location).is_some() {
+        if store.file_at_path(location).is_some() {
             return Err(PipelineError::Input(format!(
                 "location is already tracked: {location}"
             )));
@@ -576,7 +576,10 @@ pub fn commit_marker(
             .get("path")
             .and_then(|value| value.as_str())
             .ok_or_else(|| PipelineError::Input("new file object requires path".into()))?;
-        if crate::relations::node::file_at_path(&new_state, location).is_some() {
+        if store
+            .object_at_path(location, kind == CommitKind::Import)
+            .is_some()
+        {
             return Err(PipelineError::Input(format!(
                 "location is already tracked: {location}"
             )));
@@ -690,13 +693,14 @@ pub fn commit_lifecycle(
     store.require_write_authority()?;
     store.check_expected(expected)?;
 
-    let src_key = crate::relations::node::file_at_path(store.state(), source_path)
+    let src_key = store
+        .file_at_path(source_path)
         .ok_or_else(|| PipelineError::Input(format!("file is not tracked: {source_path}")))?
         .to_string();
     if kind == CommitKind::Rename {
         let target = target_path
             .ok_or_else(|| PipelineError::Input("rename requires target path".into()))?;
-        if crate::relations::node::file_at_path(store.state(), target).is_some() {
+        if store.file_at_path(target).is_some() {
             return Err(PipelineError::Input(format!(
                 "rename target is already tracked: {target}"
             )));

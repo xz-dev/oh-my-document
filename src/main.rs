@@ -519,6 +519,35 @@ fn log_chain(store: &Store, node_or_commit: &str) -> Result<Vec<String>, AppErro
     Ok(out)
 }
 
+/// Resolve the latest effective import/remove through later metadata records.
+fn import_scope(store: &Store, node: &str) -> Result<Option<Vec<String>>, AppError> {
+    let chain = log_chain(store, node)?;
+    for id in chain {
+        let record = store.read_commit(&id).map_err(|error| {
+            AppError::new(ErrorKind::Check, format!("import record {id}: {error}"))
+        })?;
+        match record.kind {
+            CommitKind::Remove => return Ok(None),
+            CommitKind::Import => {
+                let patterns = record
+                    .payload
+                    .get("scope")
+                    .and_then(|value| value.as_array())
+                    .map(|values| {
+                        values
+                            .iter()
+                            .filter_map(|value| value.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                return Ok(Some(patterns));
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
 /// Render the mount tree as nested JSON from `start` (or the implicit root).
 /// Tree shows mount hierarchy: root → file nodes → range children. Only
 /// mounted nodes expand — never unpublished material as history.
@@ -1864,9 +1893,10 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
             } else {
                 open_context_store(&context)?
             };
-            let p = current_path.as_path();
-            let existing =
-                omd::relations::node::file_at_path(store.state(), &path).map(str::to_string);
+            let _ = current_path;
+            let existing = store
+                .object_at_path(&path, kind != CommitKind::Init)
+                .map(str::to_string);
             if matches!(&cli.cmd, Cmd::Init { .. }) && existing.is_some() {
                 return Err(AppError::usage(format!(
                     "init refused: {path} is already tracked (init is not stackable)"
@@ -1892,7 +1922,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                 stream.extend(include.iter().map(|i| format!("!{i}")));
                 payload.insert("scope".into(), stream.into());
             }
-            // A directory import/remove records statistics only. Source init
+            // Import/remove records statistics only, for files and directories. Source init
             // uses the closed descriptor and one pre-collected complete value.
             let cid = if kind == CommitKind::Init {
                 let (acquisition, recovery, collected) = match prepared_before_open {
@@ -1913,7 +1943,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                     payload,
                     &expected,
                 )?
-            } else if p.is_dir() {
+            } else {
                 pipeline::commit_marker(
                     &mut store,
                     &mut NoProbe,
@@ -1923,33 +1953,6 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                     kind,
                     payload,
                     &expected,
-                )?
-            } else {
-                let recorded = store
-                    .source_version_id(&node)?
-                    .and_then(|version| store.read_version(&version).ok())
-                    .and_then(|version| version.encoding);
-                let cwd = store
-                    .config_cwd()
-                    .ok_or_else(|| AppError::usage("source view requires local configuration"))?;
-                let enc = omd::sources::encoding::resolve_runtime(
-                    cli.encoding.as_deref(),
-                    recorded.as_deref(),
-                    cwd,
-                    &root,
-                    &path,
-                )?;
-                pipeline::commit_file(
-                    &mut store,
-                    &mut NoProbe,
-                    &OsRng,
-                    &SystemClock,
-                    &node,
-                    p,
-                    kind,
-                    payload,
-                    &expected,
-                    Some(&enc),
                 )?
             };
             Ok(serde_json::json!({
@@ -2159,10 +2162,27 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
             // chain mounted under the file; bare path targets the file chain.
             // A range node's key is `range:<chain-root-commit-id>` — identity
             // is the chain, never the coordinates.
-            let existing_file =
-                omd::relations::node::file_at_path(store.state(), path).map(str::to_string);
+            if matches!(kind, CommitKind::Tag | CommitKind::ScopeAdjust)
+                && id.is_none()
+                && store.file_at_path(path).is_some()
+                && store.object_at_path(path, true).is_some()
+            {
+                return Err(AppError::usage(
+                    "ambiguous content/import path: select the current object tip with --id",
+                ));
+            }
+            let existing_file = if matches!(kind, CommitKind::Import | CommitKind::Remove) {
+                store.object_at_path(path, true)
+            } else {
+                store.file_at_path(path).or_else(|| {
+                    matches!(kind, CommitKind::Tag | CommitKind::ScopeAdjust)
+                        .then(|| store.object_at_path(path, true))
+                        .flatten()
+                })
+            }
+            .map(str::to_string);
             let file_node = match (kind, existing_file) {
-                (CommitKind::Init, None) => "file:pending".into(),
+                (CommitKind::Init | CommitKind::Import, None) => "file:pending".into(),
                 (CommitKind::Init, Some(_)) => {
                     return Err(AppError::usage(format!(
                         "init refused: {path} is already tracked"
@@ -2391,6 +2411,8 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                     | CommitKind::AtomicEnd
                     | CommitKind::Reset
                     | CommitKind::ScopeAdjust
+                    | CommitKind::Import
+                    | CommitKind::Remove
                     | CommitKind::Tag
             );
             if state_only && source_fields(cli).any() {
@@ -2767,7 +2789,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                                 match authoritative.location {
                                     Some(restored) => {
                                         if let Some(occupied) =
-                                            omd::relations::node::file_at_path(&pre, &restored)
+                                            store.object_at_path_in(&pre, &restored, false)
                                             && occupied != reset_node
                                         {
                                             return Err(AppError::usage(format!(
@@ -3205,7 +3227,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
             // report which in-scope files carry unexpired confirmed coverage.
             // New members auto-enter statistics because scope re-resolves now.
             let mut scopes: Vec<(String, Vec<String>)> = Vec::new();
-            for (node, tip) in &store.state().tips {
+            for node in store.state().tips.keys() {
                 if !omd::relations::node::is_file_key(node) {
                     continue;
                 }
@@ -3216,53 +3238,35 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                 if root_commit.kind != omd::records::commit::CommitKind::Import {
                     continue;
                 }
-                let current = store.read_commit(tip).map_err(|error| {
-                    AppError::new(
-                        ErrorKind::Check,
-                        format!("import tip {tip} is unavailable: {error}"),
-                    )
-                })?;
-                if current.kind == omd::records::commit::CommitKind::Remove {
+                let Some(scope) = import_scope(&store, node)? else {
                     continue;
-                }
+                };
                 let path = omd::relations::node::path_of(store.state(), node)
                     .unwrap_or("")
                     .to_string();
-                let scope: Vec<String> = root_commit
-                    .payload
-                    .get("scope")
-                    .and_then(|value| value.as_array())
-                    .map(|values| {
-                        values
-                            .iter()
-                            .filter_map(|value| value.as_str().map(String::from))
-                            .collect()
-                    })
-                    .unwrap_or_default();
                 scopes.push((path, scope));
             }
             let mut report = serde_json::Map::new();
             let mut all_files = Vec::new();
+            let mut scope_problems = Vec::new();
             let proj_root = project_root.clone();
             // A dir-import enters members into the statistics SCOPE (the
             // denominator) — it does NOT confer confirmed content coverage.
             // `tracked` = the file has its own confirmed tracked node; scope
             // membership only brings it into the check's denominator.
             for (dir, pats) in &scopes {
-                let base = if dir.is_empty() {
-                    proj_root.clone()
-                } else {
-                    proj_root.join(dir)
-                };
+                let base = proj_root.join(dir);
+                let single_file = base.is_file();
                 let scope = omd::sources::scope::resolve(&base, pats);
                 for f in &scope.files {
-                    let path = if dir.is_empty() {
+                    let path = if single_file {
+                        dir.clone()
+                    } else if dir.is_empty() {
                         f.display().to_string()
                     } else {
                         format!("{}/{}", dir.trim_end_matches('/'), f.display())
                     };
-                    let tracked_node = omd::relations::node::file_at_path(store.state(), &path)
-                        .map(str::to_string);
+                    let tracked_node = store.file_at_path(&path).map(str::to_string);
                     let object = tracked_node
                         .as_deref()
                         .and_then(|node| store.state().tips.get(node).map(|tip| (node, tip)))
@@ -3276,15 +3280,21 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                         "object": object,
                     }));
                 }
-                if !scope.problems.is_empty() {
-                    report.insert("problems".into(), scope.problems.clone().into());
-                }
+                scope_problems.extend(scope.problems);
+            }
+            let scope_incomplete = !scope_problems.is_empty();
+            if scope_incomplete {
+                report.insert("problems".into(), scope_problems.into());
+                report.insert("incomplete".into(), true.into());
             }
             // A tracked file node whose source vanished reports `incomplete`
             // — never a silent empty `files:[]` success. This is check's own
             // honesty floor, independent of `verify`'s `missing` diagnostic.
             let mut any_missing = false;
             for (node, path) in &store.state().locations {
+                if store.file_at_path(path) != Some(node.as_str()) {
+                    continue;
+                }
                 let Some(tip) = store.state().tips.get(node) else {
                     continue;
                 };
@@ -3330,18 +3340,20 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                     &capture.successful_observations,
                     &capture.dirty,
                     cli.encoding.as_deref(),
-                );
-                let reverse = two_way.then(|| {
-                    coverage_direction(
-                        &store,
-                        &proj_root,
-                        tgt_tag,
-                        src_tag,
-                        &capture.successful_observations,
-                        &capture.dirty,
-                        cli.encoding.as_deref(),
-                    )
-                });
+                )?;
+                let reverse = two_way
+                    .then(|| {
+                        coverage_direction(
+                            &store,
+                            &proj_root,
+                            tgt_tag,
+                            src_tag,
+                            &capture.successful_observations,
+                            &capture.dirty,
+                            cli.encoding.as_deref(),
+                        )
+                    })
+                    .transpose()?;
                 let forward_status = forward["status"].as_str().unwrap_or("incomplete");
                 let reverse_status = reverse
                     .as_ref()
@@ -3380,7 +3392,9 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
             report.insert("unverified".into(), verification_unverified.into());
             report.insert("diagnostic_issues".into(), diagnostic_issues.into());
             report.insert("expected".into(), serde_json::to_value(expected).unwrap());
-            Ok(serde_json::json!({ "ok": verification_ok && !check_failed, "check": report }))
+            Ok(
+                serde_json::json!({ "ok": verification_ok && !check_failed && !scope_incomplete, "check": report }),
+            )
         }
         Cmd::Rename { source, target } => {
             let (source, _) = omd::sources::projects::project_path(&project_root, source)?;
@@ -3410,7 +3424,7 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
             let (target, current_target) =
                 omd::sources::projects::project_path(&project_root, target)?;
             let mut store = open_context_store(&context)?;
-            if omd::relations::node::file_at_path(store.state(), &target).is_some() {
+            if store.file_at_path(&target).is_some() {
                 return Err(AppError::usage(format!(
                     "copy target is already tracked: {target}"
                 )));
@@ -4320,7 +4334,7 @@ fn tag_member_nodes(
     store: &Store,
     proj_root: &std::path::Path,
     tag: &str,
-) -> Vec<(Option<String>, String)> {
+) -> Result<Vec<(Option<String>, String)>, AppError> {
     let mut members = std::collections::BTreeMap::<String, Option<String>>::new();
     for (node, tags) in &store.state().tags {
         if !tags.contains(tag) {
@@ -4329,47 +4343,39 @@ fn tag_member_nodes(
         let Some(path) = omd::relations::node::path_of(store.state(), node) else {
             continue;
         };
-        members.insert(path.into(), Some(node.clone()));
+        let root_id = node.split_once(':').map(|(_, id)| id).unwrap_or("");
+        let statistics = store.read_commit(root_id)?.kind == CommitKind::Import;
+        let patterns = if statistics {
+            let Some(scope) = import_scope(store, node)? else {
+                continue;
+            };
+            scope
+        } else {
+            Vec::new()
+        };
+        let member = if statistics {
+            store.file_at_path(path).map(str::to_string)
+        } else {
+            Some(node.clone())
+        };
+        members.insert(path.into(), member);
         let dir = proj_root.join(path);
         if dir.is_dir() {
-            let mut patterns = Vec::new();
-            let root_id = node.split_once(':').map(|(_, id)| id).unwrap_or("");
-            if let Ok(root) = store.read_commit(root_id)
-                && root.kind == omd::records::commit::CommitKind::Import
-            {
-                let removed = store
-                    .state()
-                    .tips
-                    .get(node)
-                    .and_then(|tip| store.read_commit(tip).ok())
-                    .is_some_and(|tip| tip.kind == omd::records::commit::CommitKind::Remove);
-                if removed {
-                    continue;
-                }
-                patterns = root
-                    .payload
-                    .get("scope")
-                    .and_then(|value| value.as_array())
-                    .map(|values| {
-                        values
-                            .iter()
-                            .filter_map(|value| value.as_str().map(str::to_string))
-                            .collect()
-                    })
-                    .unwrap_or_default();
-            }
             for relative in omd::sources::scope::resolve(&dir, &patterns).files {
-                let child_path = format!("{}/{}", path.trim_end_matches('/'), relative.display());
-                let child = omd::relations::node::file_at_path(store.state(), &child_path)
-                    .map(str::to_string);
+                let child_path = if path.is_empty() {
+                    relative.display().to_string()
+                } else {
+                    format!("{}/{}", path.trim_end_matches('/'), relative.display())
+                };
+                let child = store.file_at_path(&child_path).map(str::to_string);
                 members.insert(child_path, child);
             }
         }
     }
-    members
+    Ok(members
         .into_iter()
         .map(|(path, node)| (node, path))
-        .collect()
+        .collect())
 }
 
 #[derive(Debug)]
@@ -4666,12 +4672,12 @@ fn coverage_direction(
     observations: &std::collections::BTreeMap<String, pipeline::SuccessfulObservation>,
     dirty: &std::collections::BTreeMap<String, Vec<String>>,
     encoding_override: Option<&str>,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, AppError> {
     let mut totals = std::collections::BTreeMap::<String, (u64, u64)>::new();
     let mut incomplete_units = std::collections::BTreeSet::<String>::new();
     let mut files = Vec::new();
     let mut incomplete = false;
-    for (node, path) in tag_member_nodes(store, proj_root, source_tag) {
+    for (node, path) in tag_member_nodes(store, proj_root, source_tag)? {
         match linked_file_coverage(
             store,
             proj_root,
@@ -4770,11 +4776,11 @@ fn coverage_direction(
         && groups
             .iter()
             .all(|group| group["covered"] == group["total"]);
-    serde_json::json!({
+    Ok(serde_json::json!({
         "status": if incomplete { "incomplete" } else if pass { "pass" } else { "fail" },
         "groups": groups,
         "files": files,
-    })
+    }))
 }
 
 fn json_requested() -> bool {

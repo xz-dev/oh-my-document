@@ -26,6 +26,15 @@ pub fn resolve(root: &Path, patterns: &[String]) -> Scope {
     // `patterns` is the ordered stream: entries prefixed `!` are includes,
     // the rest excludes. Callers pass `--exclude`s then `--include`s as `!x`.
     let mut scope = Scope::default();
+    if root.is_file() {
+        if let Some(name) = root.file_name() {
+            let relative = PathBuf::from(name);
+            if included(&relative, false, patterns) {
+                scope.files.push(relative);
+            }
+        }
+        return scope;
+    }
     let mut visited: HashSet<PathBuf> = HashSet::new();
     walk(root, root, patterns, &mut visited, &mut scope);
     scope

@@ -147,6 +147,150 @@ fn setup_unmarked_scope(fixture: &Fixture) {
 }
 
 #[test]
+fn file_import_is_independent_of_content_tracking() {
+    let fixture = Fixture::new();
+    fixture.write("seed.md", "seed");
+    fixture.write("README.md", "abc");
+    fixture.ok(&["init", "seed.md"]);
+    let imported = fixture.ok(&["import", "README.md"]);
+    let before = fixture.ok(&["check"]);
+    assert_eq!(before["data"]["check"]["files"][0]["tracked"], false);
+    assert_eq!(before["data"]["check"]["files"][0]["file"], "README.md");
+    let initialized = fixture.ok(&["init", "README.md"]);
+    assert_ne!(root_id(&imported), root_id(&initialized));
+    let range = fixture.ok(&[
+        "commit",
+        "commit",
+        "README.md",
+        "--range",
+        "0",
+        "3",
+        "--reason",
+        "review",
+    ]);
+    fixture.ok(&["remove", "README.md"]);
+    let removed = fixture.ok(&["check"]);
+    assert!(
+        removed["data"]["check"]["files"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    fixture.ok(&["log", &root_id(&range)]);
+    assert_eq!(
+        std::fs::read_to_string(fixture.root.join("README.md")).unwrap(),
+        "abc"
+    );
+    fixture.ok(&["import", "README.md"]);
+    let after = fixture.ok(&["check"]);
+    assert_eq!(after["data"]["check"]["files"][0]["tracked"], true);
+    fixture.write("other.md", "other");
+    fixture.ok(&["init", "other.md"]);
+    fixture.ok(&["import", "other.md"]);
+    let (status, _, _) = fixture.run(&["commit", "tag", "other.md", "--tag", "spec"]);
+    assert_eq!(status, 2, "same-path objects require an explicit tip");
+    fixture.ok(&["rename", "other.md", "renamed.md"]);
+    std::fs::rename(
+        fixture.root.join("other.md"),
+        fixture.root.join("renamed.md"),
+    )
+    .unwrap();
+    fixture.ok(&["remove", "other.md"]);
+    fixture.ok(&["import", "renamed.md"]);
+    let final_report = fixture.ok(&["check"]);
+    assert_eq!(
+        final_report["data"]["check"]["files"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2,
+        "{final_report}"
+    );
+}
+
+#[test]
+fn missing_imported_file_fails_without_silent_scope_loss() {
+    let fixture = Fixture::new();
+    fixture.write("seed.md", "seed");
+    fixture.write("README.md", "abc");
+    fixture.ok(&["init", "seed.md"]);
+    fixture.ok(&["import", "README.md"]);
+    std::fs::remove_file(fixture.root.join("README.md")).unwrap();
+    let (code, value, _) = fixture.run_raw(&["check"]);
+    assert_eq!(code, 1, "{value}");
+    assert_eq!(value["data"]["check"]["incomplete"], true);
+    assert!(
+        !value["data"]["check"]["problems"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[test]
+fn revised_root_import_updates_listing_and_tag_coverage() {
+    let fixture = Fixture::new();
+    fixture.write("README.md", "abc");
+    fixture.write("README.zh-CN.md", "de");
+    fixture.write("unrelated.md", "excluded");
+    fixture.write("docs/README.md", "excluded nested readme");
+    fixture.write("target/artifact", "excluded");
+    fixture.write(".git/artifact", "excluded");
+    fixture.ok(&["init", "README.md"]);
+    fixture.ok(&["import", ".", "--exclude", "*"]);
+    fixture.ok(&["commit", "tag", ".", "--tag", "spec"]);
+    fixture.ok(&[
+        "import",
+        ".",
+        "--exclude",
+        "*",
+        "--include",
+        "README.md",
+        "--include",
+        "README.zh-CN.md",
+    ]);
+    // Later tag/rule records must not hide the latest import's scope.
+    fixture.ok(&["commit", "tag", ".", "--tag", "docs"]);
+    fixture.ok(&[
+        "commit",
+        "scope_adjust",
+        ".",
+        "--rule",
+        "spec->code",
+        "--level",
+        "warn",
+    ]);
+    let report = fixture.ok(&["check"]);
+    let files = report["data"]["check"]["files"].as_array().unwrap();
+    let names: std::collections::BTreeSet<_> = files
+        .iter()
+        .map(|file| file["file"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        names,
+        std::collections::BTreeSet::from(["README.md", "README.zh-CN.md"])
+    );
+    assert!(files.iter().all(|file| file["scope"] == ""));
+    assert!(
+        files
+            .iter()
+            .find(|file| file["file"] == "README.md")
+            .unwrap()["tracked"]
+            == true
+    );
+    let rule = &report["data"]["check"]["rules"][0];
+    let text = find_group(rule, "text");
+    assert_eq!(text["total"], "5");
+    assert_eq!(text["covered"], "0");
+    let covered_files = rule["coverage"]["forward"]["files"].as_array().unwrap();
+    let paths: std::collections::BTreeSet<_> = covered_files
+        .iter()
+        .map(|file| file["project_relative_path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, names);
+}
+
+#[test]
 fn json_parser_errors_use_schema_v2_envelope() {
     let fixture = Fixture::new();
     for args in [

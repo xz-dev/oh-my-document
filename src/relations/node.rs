@@ -67,13 +67,14 @@ pub fn range_key(root_commit_id: &str) -> String {
     format!("range:{root_commit_id}")
 }
 
-/// Current file object at a project-relative path. This is a derived locator,
-/// never object identity; duplicate live locations are rejected at store open.
+/// State-only lookup cannot distinguish content from import roots. Return
+/// only a unique match; business callers use Store's typed path lookup.
 pub fn file_at_path<'a>(state: &'a State, path: &str) -> Option<&'a str> {
-    state
-        .locations
-        .iter()
-        .find_map(|(node, current)| (current == path && is_file_key(node)).then_some(node.as_str()))
+    let mut matches = state.locations.iter().filter_map(|(node, current)| {
+        (current == path && is_file_key(node)).then_some(node.as_str())
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 /// Current project-relative path for a file object.

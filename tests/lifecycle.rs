@@ -231,8 +231,9 @@ fn broken_link_scope_does_not_report_clean_coverage() {
     std::os::unix::fs::symlink(t.0.join("docs/gone.md"), t.0.join("docs/dangling.md")).unwrap();
     t.run(&["import", "docs"]);
     let (c, out, _) = t.run(&["check"]);
-    assert_eq!(c, 0);
+    assert_eq!(c, 1);
     assert!(out.contains("broken"), "broken link not diagnosed:\n{out}");
+    assert!(out.contains("\"incomplete\": true"), "{out}");
 }
 
 #[test]

@@ -1015,6 +1015,30 @@ impl Store {
         &self.state
     }
 
+    /// Locate content and statistics independently, using immutable chain roots.
+    pub fn object_at_path(&self, path: &str, statistics: bool) -> Option<&str> {
+        self.object_at_path_in(&self.state, path, statistics)
+    }
+
+    pub fn object_at_path_in<'a>(
+        &self,
+        state: &'a State,
+        path: &str,
+        statistics: bool,
+    ) -> Option<&'a str> {
+        state.locations.iter().find_map(|(node, current)| {
+            let root = node.strip_prefix("file:")?;
+            let record = self.read_commit(root).ok()?;
+            (current == path
+                && (record.kind == crate::records::commit::CommitKind::Import) == statistics)
+                .then_some(node.as_str())
+        })
+    }
+
+    pub fn file_at_path(&self, path: &str) -> Option<&str> {
+        self.object_at_path(path, false)
+    }
+
     /// Read a commit record by id (immutable `commits/<id>.toml`).
     pub fn read_commit(&self, id: &str) -> Result<crate::records::commit::Commit, StoreError> {
         let s = fs::read_to_string(self.root.join(format!("commits/{id}.toml")))?;
@@ -1035,7 +1059,7 @@ impl Store {
                 self.project_registration(alias)?;
             }
         }
-        let mut seen_locations = BTreeMap::<String, String>::new();
+        let mut seen_locations = BTreeMap::<(bool, String), String>::new();
         let mut projected_ranges = BTreeSet::new();
         for children in self.state.mounts.values() {
             for child in children {
@@ -1083,7 +1107,11 @@ impl Store {
                                 self.state.locations.get(node)
                             )));
                         }
-                        if let Some(other) = seen_locations.insert(location.clone(), node.clone()) {
+                        let statistics = self.read_commit(indexed_root)?.kind
+                            == crate::records::commit::CommitKind::Import;
+                        if let Some(other) =
+                            seen_locations.insert((statistics, location.clone()), node.clone())
+                        {
                             return Err(StoreError::Record(format!(
                                 "duplicate current location {location:?} for {other} and {node}"
                             )));
