@@ -27,7 +27,7 @@
 
 ## 已完成的组件收口
 
-`PLAN/separate-range-repair.md` 保留 S1–S6 的修复历史。S1–S5 的具名固定检查已由父会话关闭，但这些组件检查不自动等于整个 task/change 通过：
+后续开发从 [设计与实现边界](../openspec/changes/separate-range-identity-and-location/design.md)、[任务及未完成项](../openspec/changes/separate-range-identity-and-location/tasks.md) 和 [逐项测试证据](../spec-traceability.md) 接手，不依赖执行流水账。以下仅概括已检查的组件范围，不代表整个 change 通过：
 
 - S1：链身份、类型/挂载/位置投影、reset/tombstone/GC。
 - S2：本机项目/实例映射、调用方观察凭据、remote identity。

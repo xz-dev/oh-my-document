@@ -47,6 +47,8 @@
 
 ### 2. 解析 commit、校验可用性、选择版本是三件事
 
+以下实现边界是既有契约在修复中明确的约束，不增加产品要求；对应回归与证据见 [任务证据表](../../../spec-traceability.md)。
+
 统一解析顺序：选 store/alias → 解析完整 ID 或该 store 内唯一前缀 → 校验记录类型/原始输入 → 沿同对象前驱解析 root → 检查本次用途所需的有效性与观察凭据。
 
 - log 可以查看保留的 dangling 记录；解析出 root 不授予写入或复核资格。
@@ -54,6 +56,7 @@
 - link 输入 commit 用于找持久端点，并保留明确选择的版本依据。链推进不重建关系；引用不可达时仍报 broken，不换成最新版本消除责任。
 - 同命令重复检查使用 `(方向, 解析后的实际store_id, root_commit_id)`；local/external 或两个 alias 指向同一 store 时先规范化。不存在或类型错误的端点在 BEGIN、inbound 或业务发布前拒绝。
 - 物理发布/登记/本机实例凭据与业务前驱分别校验，保持 `--expected` 拒绝旧依据及不重试。
+- 写入在锁内校验调用者提交的必需依据及实际映射修订，不以入口现取的快照替代。成功观察的版本记录、声明 hash 与完整实际字节必须一致；不一致时拒绝，不另造版本补救。新鲜采集到的变化内容可作为新正文依据，与复用过期凭据的负例分开；失败或未许可采集不能回填历史成功证据。
 
 **取舍：** 不靠 path+range 选择“唯一看起来匹配的对象”，不把 --id 复用为 link ID，不允许尚未存在的前向端点。
 
@@ -84,7 +87,9 @@ reset 改变有效前缀而非 root：普通块外目标保留本身；BEGIN/END
 
 源端项目与被跟踪对象所属项目可以不同，例如历史内容在另一已登记仓库。来源描述通过既有项目登记引用定位，项目登记身份保存在适当的归属/来源版本元数据中；不将 project_id、本机绝对根或整个 manifest 塞回业务 hash。来源版本先于业务 commit 创建，commit 的 content_ref 固化该版本；重定位不改写原始 descriptor 或已提交 payload。
 
-路径参数表示选定项目内位置。CLI 可把明确属于所选根的绝对输入转换为项目相对路径；词法逃出所选根的输入拒绝并提示选择/登记相应 alias，不偷偷创建新项目。磁盘符号链接仍按既有 follow 规则处理，不把该词法约束偷换成禁止 follow。共享路径使用 `/`，保留文件名字面字符，不做 URL decode。以 `-` 开头的路径使用 CLI 的 `--` 参数边界。
+来源静态字段和适用的文本编码标签在执行 command 前校验；路径规范化、观察完整性和发布资格由 CLI 与库入口共享边界落实，不能只在参数解析层设防。byte 模式不进行文本解码。
+
+路径参数表示选定项目内位置。CLI 与库发布入口均须把接受的、明确属于所选根的绝对输入转换为项目相对路径；词法逃出所选根的输入拒绝并提示选择/登记相应 alias，不偷偷创建新项目。磁盘符号链接仍按既有 follow 规则处理，不把该词法约束偷换成禁止 follow。共享路径使用 `/`，保留文件名字面字符，不做 URL decode。以 `-` 开头的路径使用 CLI 的 `--` 参数边界。
 
 Git 恢复描述保存确切 commit 和该提交内 path，绑定修订可改变恢复方式但不能改完整内容。当前真实文件始终按登记目标路径读现状；Git 历史位置与当前路径可以不同。file/command 保存完整原字节，Git 复用本地对象；不执行 textconv/filter/lazy fetch。command 的授权、一次完整 stdout、exit 0、stderr 分离及失败保留完全沿用基线。
 
@@ -112,7 +117,7 @@ omd commit commit retry.py --id <current-tip> --range 0 15 --link-from-store pee
 omd replace <recorded-commit> --source-type git --source-project upstream --git-commit <exact-git-id> --git-path docs/spec.md --expected <observation>
 ```
 
-每项解析和重复检测在组合任何写入前完成。之后仍是逐次发布的 ATOMIC，I/O 等后续失败报告真实部分结果，不承诺整块回滚。适配仍为 --adapt 的 link_id/changes/reason，源端阻断仍为 --stop；跨命令同端点新关系仍生成新 link_id。
+每项解析和重复检测在组合任何写入前完成。之后仍是逐次发布的 ATOMIC，I/O 等后续失败报告真实部分结果，不承诺整块回滚。成功项按权威发布状态核对具体 commit、link 和保护凭据；失败 creator 的文件可能已存在，但未被权威状态选入不能算发布成功，也不据此新增清理要求。适配仍为 --adapt 的 link_id/changes/reason，源端阻断仍为 --stop；跨命令同端点新关系仍生成新 link_id。
 
 ### 6. 共享逻辑登记与本机实例映射分层，但不增设身份服务
 
@@ -144,6 +149,8 @@ omd replace <recorded-commit> --source-type git --source-project upstream --git-
 | Bob 在 T 取得新观察凭据并续改 r2 | 在 T 的同一范围链追加新 commit，root 仍为 r0，前驱为 r2；已有本地关系延续，不重写 Alice 的 S，也不自动传回新提交 |
 | 访问跨 store 关联 | T 所保留的出向引用仍指向明确的 B；别处原本指向 S:r0 的引用仍指向 S，不改成 T:r0。需要关联 T 时由用户显式创建相应关系；S 不可用则如实报告 |
 
+副本激活须按保留 link 的 source/source_version 和 target/target_version 收集必要外部端点，不能只保护出向关联。保护记录分别保存确切创建 commit ID 与独立 link_id；普通关联先构造待发布 commit，持久化其精确保护后才发布同一记录，副本保护则沿用保留记录的创建 ID。取得保护能力不授予普通业务写权限。GC 按确切消费者记录及其必要保留闭包判断保护，消费者离线或映射不可核实时不能当作孤儿释放。
+
 因此，`S:r0` 与 `T:r0` 的链首字节相同但权威命名空间不同。仅移动同一个权威 store 则不走“激活新副本”，显式更新定位并保留 S。这里解决路径可移植及显式副本续改，不承诺两份可写目录共享一条自动同步的历史。
 
 ### 7. 原有存储布局容纳新字段；所有读取方一起切换
@@ -158,6 +165,8 @@ omd replace <recorded-commit> --source-type git --source-project upstream --git-
 - 来源与发现：将 file/command/git 参数转为同一结构输入，逻辑项目经本机映射取得来源；不得新增命令执行时机。
 - `src/main.rs`、`src/output.rs`：CLI 校验、结构化 JSON、tree/log/check 输出；解析错不包装为 lock_conflict。
 - 现有 Rust/CLI/BDD 测试及双语 README：从真正 CLI 返回的 commit/link ID 取后续输入，不手造路径拼坐标对象 key。
+
+覆盖统计按来源和坐标单位分别计算并集与分母，再做同单位汇总，不平均百分比或混加 text/byte。文本视图失败不能遮蔽仍可计算的 byte 总量；必要分母未知时，相应汇总为 incomplete、percentage=null，已知小计明确标为 partial，不能丢掉未知来源后报告 100%。覆盖完整也不能清除 dirty、link 或开放块责任。
 
 实现可以保留简单的整 state 重写和有限记录遍历；本 change 不顺带建立数据库主数据模型或后台索引服务。
 
