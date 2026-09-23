@@ -10,7 +10,13 @@ OMD 是第二层保障，不是语义证明器。有关联或检查通过，不�
 
 ## 安装
 
-先安装 [Rust 与 Cargo](https://rustup.rs/)，再从源码构建：
+先安装 [Rust 与 Cargo](https://rustup.rs/)，再直接从仓库安装：
+
+```bash
+cargo install --git https://github.com/xz-dev/oh-my-document.git --locked
+```
+
+也可以先克隆再从工作副本安装：
 
 ```bash
 git clone https://github.com/xz-dev/oh-my-document.git

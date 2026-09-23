@@ -10,7 +10,13 @@ OMD is a second layer of assurance, not a semantic verifier. A link or passing c
 
 ## Install
 
-Install [Rust and Cargo](https://rustup.rs/), then build from source:
+Install [Rust and Cargo](https://rustup.rs/), then install directly from the repository:
+
+```bash
+cargo install --git https://github.com/xz-dev/oh-my-document.git --locked
+```
+
+Or clone and install from a checkout:
 
 ```bash
 git clone https://github.com/xz-dev/oh-my-document.git
