@@ -209,6 +209,11 @@ impl Commit {
                 // parent file's open ATOMIC block — records cross-chain
                 // block membership the range's own chain cannot see.
                 "in_block",
+                // Classification evidence attached by `commit cosmetic` —
+                // which tool judged this structure-unchanged, its version,
+                // and the old/new source version ids it compared. Written
+                // only by the cosmetic-finish path, never hand-typed.
+                "classification",
             ]
             .into_iter()
             .collect(),

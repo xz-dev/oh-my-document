@@ -10,7 +10,7 @@
 
 | 场景 | 操作与停止边界 |
 | --- | --- |
-| 修改后续改/适配 | 取得新观察，使用当前 tip 续改。`--adapt` 每项为 `{link_id, changes, reason}`；列明确切变化，不能处理一个 link 顺带清除同端点其他 link。 |
+| 修改后续改/适配/cosmetic 收尾 | 取得新观察，使用当前 tip 续改。`--adapt` 每项为 `{link_id, changes, reason}`；列明确切变化，不能处理一个 link 顺带清除同端点其他 link。`--difftastic` 过滤把 dirty 分桶后，`commit cosmetic <path>` 在锁内对凭据钉住的版本重分类并批量续改结构无变化的范围，证据落库；结构有变化或无法分类的仍走逐条续改。 |
 | clean / unclean | clean 是源端按 link/变化停止传播；unclean 是独立责任，不是缓存或正文未变就能忽略。明确选择并说明理由，不批量消除待办。 |
 | tags / named rules / skip | tag 分类；规则表达 spec→code 等关系及 warn/fail。按内容覆盖核对，不以对象数替代。显式 skip 只跳检查，不确认内容。先与用户确定规则方向和严格程度。 |
 | rename / delete / remove / copy | 区分逻辑改名、工作区移动、tombstone、撤统计、新对象；不要把文件消失自动记成删除，不让新路径复用合并旧身份。 |
@@ -27,6 +27,7 @@
 ## 在本仓库核对契约
 
 - 当前字段、对象身份与写入边界：[活动 change](../../../openspec/changes/separate-range-identity-and-location/design.md)。
+- difftastic 过滤、cosmetic 收尾与证据：[difftastic-cosmetic-filter](../../../openspec/changes/difftastic-cosmetic-filter/design.md)。
 - import、范围、来源、恢复：[managed-content-tracking](../../../openspec/specs/managed-content-tracking/spec.md)。
 - 适配、clean/unclean、ATOMIC、reset、note、GC：[change-review](../../../openspec/specs/change-review/spec.md)。
 - 标签规则、跨项目与副本：[local-project-links](../../../openspec/specs/local-project-links/spec.md)。

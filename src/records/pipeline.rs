@@ -1694,6 +1694,11 @@ pub struct VerifyReport {
     pub obligations: Vec<String>,
     /// Dirty commits keyed by node.
     pub dirty: std::collections::BTreeMap<String, Vec<String>>,
+    /// Cosmetic (structure-unchanged) ranges filtered out of `dirty` by a
+    /// classifier — populated only when a `DiffClassifier` was passed.
+    /// View, not state: these ranges are still dirty in the records.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub cosmetic: std::collections::BTreeMap<String, Vec<serde_json::Value>>,
     /// Locate problems: a range whose recorded fragment is ambiguous in the
     /// current source — reports old coords + candidates, never auto-picks.
     pub locate: std::collections::BTreeMap<String, Vec<String>>,
@@ -1723,6 +1728,7 @@ pub fn verify(
     project_root: &std::path::Path,
     run_cmd: bool,
     encoding_override: Option<&str>,
+    classifier: Option<&dyn crate::relations::classify::DiffClassifier>,
 ) -> VerifyReport {
     let st = store.state();
     let open_blocks: Vec<String> = st
@@ -1749,6 +1755,7 @@ pub fn verify(
             open_blocks,
             obligations,
             dirty,
+            cosmetic: Default::default(),
             locate: Default::default(),
             missing: Vec::new(),
             unverified: identity.clone(),
@@ -1855,6 +1862,14 @@ pub fn verify(
     }
 
     let mut locate = std::collections::BTreeMap::new();
+    let mut cosmetic: std::collections::BTreeMap<String, Vec<serde_json::Value>> =
+        Default::default();
+    // Per-file classification cache — one difft call per changed file,
+    // shared across every dirty range in that file.
+    let mut file_class: std::collections::BTreeMap<
+        String,
+        crate::relations::classify::Classification,
+    > = std::collections::BTreeMap::new();
     for range_key in st
         .tips
         .keys()
@@ -1866,6 +1881,44 @@ pub fn verify(
         match assess_range(store, range_key, bytes) {
             RangeAssessment::Clean | RangeAssessment::NoBody => {}
             RangeAssessment::Dirty(message) => {
+                // Optional structural filter: classify the whole file once,
+                // then route this dirty range by the file-level verdict.
+                if let Some(clf) = classifier {
+                    let file_key =
+                        crate::relations::node::parent_of(&st, range_key).map(str::to_string);
+                    let verdict = file_key.as_ref().map(|fk| {
+                        file_class
+                            .entry(fk.clone())
+                            .or_insert_with(|| classify_file(store, fk, bytes, clf))
+                            .clone()
+                    });
+                    match verdict {
+                        Some(crate::relations::classify::Classification::CosmeticOnly(ev)) => {
+                            cosmetic.entry(range_key.clone()).or_default().push(
+                                serde_json::json!({
+                                    "message": message,
+                                    "evidence": ev,
+                                }),
+                            );
+                            continue;
+                        }
+                        Some(crate::relations::classify::Classification::Changed(ev)) => {
+                            dirty
+                                .entry(range_key.clone())
+                                .or_default()
+                                .push(format!("{message} [structural: {}]", ev.tool));
+                            continue;
+                        }
+                        Some(crate::relations::classify::Classification::Unclassified(why)) => {
+                            dirty
+                                .entry(range_key.clone())
+                                .or_default()
+                                .push(format!("{message} [unclassified: {why}]"));
+                            continue;
+                        }
+                        None => {}
+                    }
+                }
                 dirty.entry(range_key.clone()).or_default().push(message);
             }
             RangeAssessment::Locate(message) => {
@@ -1891,12 +1944,39 @@ pub fn verify(
         open_blocks,
         obligations,
         dirty,
+        cosmetic,
         locate,
         missing,
         unverified,
         identity,
         successful_observations,
     }
+}
+
+/// Classify one file's old-vs-new bytes through the classifier.
+/// `file_key` is the parent file node; old bytes come from the recorded
+/// source version, new bytes are the current observation (already decoded
+/// by `verify`). Byte-mode files return Unclassified without calling out.
+fn classify_file(
+    store: &Store,
+    file_key: &str,
+    new_bytes: &[u8],
+    classifier: &dyn crate::relations::classify::DiffClassifier,
+) -> crate::relations::classify::Classification {
+    use crate::relations::classify::Classification;
+    let Some(version) = node_source_version(store, file_key) else {
+        return Classification::Unclassified("no recorded source version".into());
+    };
+    let old_bytes = match store.recover_version_bytes(&version.id.to_hex()) {
+        Ok(b) => b,
+        Err(e) => return Classification::Unclassified(format!("old bytes: {e}")),
+    };
+    // Byte-mode sources never go through a structural classifier.
+    if version.encoding.is_none() {
+        return Classification::Unclassified("byte mode".into());
+    }
+    let hint = crate::relations::node::path_of(store.state(), file_key).unwrap_or(file_key);
+    classifier.classify(hint, &old_bytes, new_bytes)
 }
 
 /// Recompute whether a range node's effective body still matches the current

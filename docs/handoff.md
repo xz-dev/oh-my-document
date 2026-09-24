@@ -4,7 +4,7 @@
 
 仓库已从设计交接进入 Rust 实现阶段：存在 `omd` CLI、权威文本存储、可重建缓存、file/command/git 来源、对象/link/跨 store 生命周期，以及 Rust/CLI/BDD 测试。
 
-当前活动 change 是 [`separate-range-identity-and-location`](../openspec/changes/separate-range-identity-and-location/)。其规划已完成，独立审查及父侧核对后任务文件为 **23/24**，仅 5.1 保持未勾选。当时独立审查未发现需继续修复的缺陷；但 5.1 要求的原始失败证据已丢失，**整个 change 的完整验收为 BLOCK（历史证据缺口）**，不宣称 24/24。此后真实自管理中，经所有者授权新增文件 import/独立统计定位并修复筛选更新；最新回归与未完成检查见 [自管理记录](omd-self-management.md) 和 [补充证据](../spec-traceability.md#self-management-follow-up-after-the-24-task-review)，不沿用旧冻结候选的验收结论。
+当前活动 change 是 [`separate-range-identity-and-location`](../openspec/changes/separate-range-identity-and-location/)（规划中：[`difftastic-cosmetic-filter`](../openspec/changes/difftastic-cosmetic-filter/)，difftastic 结构过滤与 `commit cosmetic` 收尾）。其规划已完成，独立审查及父侧核对后任务文件为 **23/24**，仅 5.1 保持未勾选。当时独立审查未发现需继续修复的缺陷；但 5.1 要求的原始失败证据已丢失，**整个 change 的完整验收为 BLOCK（历史证据缺口）**，不宣称 24/24。此后真实自管理中，经所有者授权新增文件 import/独立统计定位并修复筛选更新；最新回归与未完成检查见 [自管理记录](omd-self-management.md) 和 [补充证据](../spec-traceability.md#self-management-follow-up-after-the-24-task-review)，不沿用旧冻结候选的验收结论。
 
 尚未交付：
 
@@ -21,6 +21,7 @@
 - 来源输入：`--source-type file|command|git` 与各自具名字段；旧复合来源、URI、`--source-ref`、`--source-json` 和路径拼坐标端点已被取代并拒绝。
 - 本机 alias 映射保存在配置根 `projects.toml`；共享历史不保存个人绝对路径。
 - 写入已有 store/object 前，调用方从 `verify --json` 取得 `data.expected` 并通过 `--expected` 提交。旧依据不自动刷新或重试。
+- `--difftastic` 是对本次调用的一次性外部工具许可：壳调用 `difft` 二进制做结构树比较，把结构无变化的范围从 `dirty` 过滤到 `cosmetic` 桶；不携带到下次调用，读取/查询/重建不触发，工具缺失/失败保守留 dirty。`commit cosmetic <path>` 对凭据钉住的版本重分类后批量续改收尾，分类证据（工具、版本、旧/新版本）随确认提交落库。文本回退文件（`.md` 等无语法）不因过滤减载——这是预期边界。
 - JSON schema version 2 分开报告对象、版本、位置、link、诊断和部分发布结果。
 
 使用入口见双语 README；详细契约见 [来源与坐标](source-model.md)、[存储与路径](storage.md) 和 [任务证据表](../spec-traceability.md)。

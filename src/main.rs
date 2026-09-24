@@ -7,6 +7,8 @@
 
 use clap::{Parser, Subcommand};
 
+mod difftastic;
+
 use omd::output::{Diagnostic, Envelope};
 use omd::records::commit::CommitKind;
 use omd::records::pipeline::{self, PipelineError};
@@ -246,6 +248,15 @@ struct Cli {
     #[arg(long, global = true, default_missing_value = "true",
          num_args = 0..=1, require_equals = true)]
     run_command: Option<bool>,
+
+    /// Shell out to `difft` this call to filter cosmetic (structure-
+    /// unchanged) ranges out of the dirty bucket (`--difftastic` /
+    /// `--difftastic=false`). One call's flag never carries into another;
+    /// built-in default `false`. The flag itself is the one-shot execution
+    /// permission — no config layer may turn it on automatically.
+    #[arg(long, global = true, default_missing_value = "true",
+         num_args = 0..=1, require_equals = true)]
+    difftastic: Option<bool>,
 
     /// Text encoding for this observation (`--encoding utf-16le`, etc.).
     /// Priority: flag > recorded > file config > project default > user
@@ -671,6 +682,197 @@ fn expected_from_cli(cli: &Cli) -> Result<Expected, AppError> {
         AppError::usage("existing-object write requires --expected <JSON_OR_FILE>")
     })?;
     parse_expected_arg(raw)
+}
+
+/// `commit cosmetic <path>` — batch-finish the ranges a `--difftastic`
+/// verify judged structure-unchanged. Re-classifies the file's current
+/// content (the version pinned by `--expected`), maps each cosmetic range's
+/// old coords forward through the Myers hunks, and publishes one
+/// continuation per range inside a single ATOMIC block on the file node.
+///
+/// The credential is the honesty anchor: `require_source_expected` already
+/// guarantees the confirmed bytes are the classified bytes, so the
+/// "reclassify under the lock" spec intent is satisfied by the expected
+/// version pin — no second acquisition. A range whose verdict under the
+/// pinned version is not CosmeticOnly is refused and reported.
+fn cmd_commit_cosmetic(
+    context: &omd::sources::projects::ProjectContext,
+    _project_root: &Path,
+    path: &str,
+    cli: &Cli,
+    expected: &Expected,
+) -> Result<serde_json::Value, AppError> {
+    use omd::relations::classify::Classification;
+    let mut store = open_context_store(context)?;
+    store.require_identity()?;
+    if !omd::records::cross::activated(&store) {
+        return Err("store is an unregistered copy: business writes refused until `omd activate` registers a new store_id".into());
+    }
+    let file_node = store
+        .object_at_path(path, false)
+        .map(str::to_string)
+        .ok_or_else(|| AppError::usage(format!("file is not tracked: {path}")))?;
+
+    // Current observed bytes for this file come from the expected pin —
+    // the same version the `--difftastic` verify classified. Re-derive the
+    // classification against THAT content (not a fresh disk read).
+    let version_id = expected
+        .acquisition_versions
+        .get(&file_node)
+        .cloned()
+        .ok_or_else(|| {
+            AppError::usage(format!(
+                "expected credential carries no observation for {file_node}"
+            ))
+        })?;
+    let new_bytes = store.recover_version_bytes(&version_id)?;
+    let old_bytes = store
+        .source_version_id(&file_node)?
+        .and_then(|v| store.recover_version_bytes(&v).ok())
+        .ok_or_else(|| AppError::usage("no recorded source version for file"))?;
+
+    let clf = difftastic::DifftasticClassifier::probe();
+    let verdict =
+        omd::relations::classify::DiffClassifier::classify(&clf, path, &old_bytes, &new_bytes);
+    let Classification::CosmeticOnly(evidence) = verdict else {
+        return Err(AppError::new(
+            ErrorKind::Check,
+            match verdict {
+                Classification::Changed(_) => format!(
+                    "refused: {path} is structurally changed under the pinned version — review it normally"
+                ),
+                Classification::Unclassified(why) => format!(
+                    "refused: {path} could not be classified ({why}) — stays in the review queue"
+                ),
+                Classification::CosmeticOnly(_) => unreachable!(),
+            },
+        ));
+    };
+
+    // Collect this file's dirty ranges (the ones the filtered verify moved
+    // to the cosmetic bucket) and map each to new coordinates.
+    let st = store.state();
+    let range_keys: Vec<String> = st
+        .mounts
+        .get(&file_node)
+        .into_iter()
+        .flatten()
+        .filter(|k| omd::relations::node::is_range_key(k))
+        .cloned()
+        .collect();
+    if range_keys.is_empty() {
+        return Err(AppError::usage(format!("no ranges under {path}")));
+    }
+    let encoding = store
+        .read_version(&version_id)
+        .ok()
+        .and_then(|v| v.encoding)
+        .unwrap_or_else(|| "utf-8".into());
+    let decode = |b: &[u8]| -> Result<String, AppError> {
+        let enc = encoding_rs::Encoding::for_label(encoding.trim().as_bytes())
+            .ok_or_else(|| AppError::new(ErrorKind::Check, "bad encoding"))?;
+        enc.decode_without_bom_handling_and_without_replacement(b)
+            .map(|c| c.into_owned())
+            .ok_or_else(|| AppError::new(ErrorKind::Check, "undecodable"))
+    };
+    let old_text = decode(&old_bytes)?;
+    let new_text = decode(&new_bytes)?;
+    let hunks = omd::relations::diff::diff_text(&old_text, &new_text);
+
+    let mut finished = Vec::new();
+    let mut refused = Vec::new();
+    let mut succeeded_members = Vec::new();
+    let operation_id = {
+        let mut idb = [0u8; 16];
+        omd::testing::Rng::fill(&OsRng, &mut idb);
+        hex::encode(idb)
+    };
+    // ATOMIC block on the file node groups every per-range continuation.
+    let begin = pipeline::commit_marker(
+        &mut store,
+        &mut NoProbe,
+        &OsRng,
+        &SystemClock,
+        &file_node,
+        CommitKind::AtomicBegin,
+        serde_json::Map::from_iter([("path".into(), path.into())]),
+        expected,
+    );
+    let _begin_cid = match begin {
+        Ok(c) => c,
+        Err(e) => return Err(AppError::from(e)),
+    };
+    for range_key in range_keys {
+        let outcome = (|| -> Result<String, AppError> {
+            let state = omd::relations::identity::effective_range_state(&store, &range_key)
+                .map_err(|e| AppError::new(ErrorKind::Check, e.to_string()))?;
+            let range = state
+                .range
+                .ok_or_else(|| AppError::usage(format!("{range_key}: no effective range")))?;
+            let new_range = omd::relations::diff::map_range(&hunks, range).ok_or_else(|| {
+                AppError::new(
+                    ErrorKind::Check,
+                    format!("{range_key}: coordinate mapping collapsed — review normally"),
+                )
+            })?;
+            let mut payload = serde_json::Map::new();
+            payload.insert("path".into(), path.into());
+            payload.insert(
+                "position".into(),
+                omd::relations::node::position_value(new_range),
+            );
+            // Evidence as a compact JSON *string* — the closed payload +
+            // TOML record format only tolerates scalar leaves; a nested
+            // object fails record serialization ("unsupported unit type").
+            payload.insert(
+                "classification".into(),
+                serde_json::to_string(&evidence).unwrap().into(),
+            );
+            let descriptor = existing_source(cli, &store, &range_key, path)?;
+            let cid = pipeline::commit_source(
+                &mut store,
+                &mut NoProbe,
+                &OsRng,
+                &SystemClock,
+                &range_key,
+                descriptor.clone(),
+                descriptor,
+                None,
+                cli.encoding.as_deref(),
+                CommitKind::Commit,
+                payload,
+                expected,
+            )
+            .map_err(AppError::from)?;
+            Ok(cid)
+        })();
+        match outcome {
+            Ok(cid) => {
+                succeeded_members.push(successful_member("commit", cid.clone()));
+                finished.push(range_key);
+            }
+            Err(e) => refused.push(format!("{range_key}: {e}")),
+        }
+    }
+    // Close the ATOMIC block; partial success is reported honestly.
+    let end = pipeline::commit_marker(
+        &mut store,
+        &mut NoProbe,
+        &OsRng,
+        &SystemClock,
+        &file_node,
+        CommitKind::AtomicEnd,
+        serde_json::Map::from_iter([("path".into(), path.into())]),
+        expected,
+    );
+    let end_cid = end.map_err(AppError::from)?;
+    Ok(serde_json::json!({
+        "cosmetic_finished": finished,
+        "refused": refused,
+        "atomic_block": {"begin": _begin_cid, "end": end_cid},
+        "classification": evidence,
+        "operation_id": operation_id,
+    }))
 }
 
 fn open_context_store(context: &omd::sources::projects::ProjectContext) -> Result<Store, AppError> {
@@ -1988,6 +2190,10 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
             skip,
             expect_version,
         } => {
+            if kind.as_str() == "cosmetic" {
+                let (logical_path, _) = omd::sources::projects::project_path(&project_root, path)?;
+                return cmd_commit_cosmetic(&context, &project_root, &logical_path, cli, &expected);
+            }
             let kind = match kind.as_str() {
                 "init" => CommitKind::Init,
                 "commit" => CommitKind::Commit,
@@ -3169,8 +3375,21 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                 cli: cli.run_command,
                 config: None,
             });
+            // `--difftastic` is itself the one-shot permission to shell out
+            // to `difft` — probe once per process, reused across files.
+            let clf = cli
+                .difftastic
+                .unwrap_or(false)
+                .then(difftastic::DifftasticClassifier::probe);
             store.lock()?;
-            let rep = pipeline::verify(&store, &project_root, run_cmd, cli.encoding.as_deref());
+            let rep = pipeline::verify(
+                &store,
+                &project_root,
+                run_cmd,
+                cli.encoding.as_deref(),
+                clf.as_ref()
+                    .map(|c| c as &dyn omd::relations::classify::DiffClassifier),
+            );
             let expected = persist_successful_observations(
                 &mut store,
                 &context,
@@ -3201,8 +3420,19 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                 cli: cli.run_command,
                 config: None,
             });
+            let clf = cli
+                .difftastic
+                .unwrap_or(false)
+                .then(difftastic::DifftasticClassifier::probe);
             store.lock()?;
-            let capture = pipeline::verify(&store, &project_root, run_cmd, cli.encoding.as_deref());
+            let capture = pipeline::verify(
+                &store,
+                &project_root,
+                run_cmd,
+                cli.encoding.as_deref(),
+                clf.as_ref()
+                    .map(|c| c as &dyn omd::relations::classify::DiffClassifier),
+            );
             let verification_ok = capture.ok;
             let verification_unverified = capture.unverified.clone();
             let diagnostic_issues = verification_issues(&store, &capture);
@@ -3386,6 +3616,12 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
             report.insert("rules".into(), rules_out.into());
             report.insert("objects".into(), current_objects(&store)?.into());
             report.insert("links".into(), current_links(&store).into());
+            if !capture.cosmetic.is_empty() {
+                report.insert(
+                    "cosmetic".into(),
+                    serde_json::to_value(&capture.cosmetic).unwrap(),
+                );
+            }
             if let Some(p) = path {
                 report.insert("query".into(), p.clone().into());
             }

@@ -6,6 +6,7 @@
 //! Reset moves the tip pointer; it never deletes chain entries.
 
 pub mod atomic;
+pub mod classify;
 pub mod coverage;
 pub mod diff;
 pub mod dirty;
