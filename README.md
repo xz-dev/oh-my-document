@@ -10,7 +10,15 @@ OMD (`omd`) links exact ranges in requirements, designs, diagrams, code, and tes
 
 Files stay where they belong; OMD maintains their relationships. Object identity stays stable when ranges move, and content changes reveal which ranges and links need review. People and agents use the same CLI and checks.
 
-OMD is a second layer of assurance, not a semantic verifier. A link or passing check does not prove an implementation is correct.
+## Design: an agent as the interpreter between intent and implementation
+
+OMD is designed **first for agents to use**. It aims to bridge the gap between human algorithm, business, and architecture design and agent-written code. Design decisions need a life beyond a conversation, and generated code needs a traceable connection to the intent behind it.
+
+**People own architecture and process; AI implements the code.** People define goals, constraints, and key decisions. Agents follow the relationships among requirements, designs, implementations, and tests to work out details and review changes. OMD preserves specific ranges, version evidence, and reasons so that people can return to the design and check how it was realized.
+
+The reverse path matters too: people can use agents to **understand an existing project from the ground up, in a structured way**. Start with its purpose and components, then explore workflows, algorithms, and code fragments, establishing and checking relationships as you go. This gives a person a way to ask “why this design, where is it implemented, and what verifies it?” and remain able to change the system.
+
+This direction builds on [Treating LLMs as interpreters: managing context](https://xzos.net/blog/llm-as-interpreter-context-management/): treat context and workflows as the program an agent executes, and use explicit design, relationships, and verification to make that role more reliable. **This is an engineering goal, not a guarantee of determinism or semantic equivalence.** People retain responsibility for design and acceptance. OMD checks relationships and change records; tests and reviews assess implementation. A link or passing check alone does not prove business correctness.
 
 ## Install
 
@@ -32,105 +40,47 @@ Run `omd --help`. Current development and verification focus on Linux; Windows a
 
 ## Run a complete local workflow
 
-Prerequisites: Bash, Python 3, and `omd` on `PATH`. This creates an isolated demo with its own HOME, config, and cache. Every mutation after the first initialization uses a fresh caller observation from `verify`; IDs used later come from actual JSON responses.
+### From “at most 3 retries” to “at most 5”
 
-<!-- readme-workflow:start -->
-```bash
-set -euo pipefail
-OMD_BIN=${OMD_BIN:-omd}
-DEMO=$(mktemp -d)
-cleanup() {
-  if [ "${KEEP_DEMO:-0}" = 1 ]; then
-    printf 'demo_dir=%s\n' "$DEMO"
-  else
-    rm -rf "$DEMO"
-  fi
-}
-trap cleanup EXIT
-export HOME="$DEMO/home"
-export OMD_CONFIG_PATH="$DEMO/config"
-export OMD_CACHE_PATH="$DEMO/cache"
-mkdir -p "$HOME" "$OMD_CONFIG_PATH" "$OMD_CACHE_PATH" "$DEMO/project"
-cd "$DEMO/project"
+Understand the task before deciding whether to run it manually. This is an illustrative collaboration, not a transcript of an agent run. The corresponding CLI steps were checked in an isolated directory; see the [hands-on tutorial](docs/tutorials/retry.md).
 
-json_field() {
-  python3 -c 'import json,sys
-v=json.load(sys.stdin)
-for key in sys.argv[1].split("."):
-    v=v[int(key)] if isinstance(v,list) else v[key]
-print(json.dumps(v,separators=(",",":")) if isinstance(v,(dict,list)) else v)' "$1"
-}
-observe() {
-  local name=$1
-  "$OMD_BIN" verify --json > "$DEMO/observation-$name.json"
-  json_field data.expected < "$DEMO/observation-$name.json" > "$DEMO/expected-$name.json"
-}
+**1. A person defines the design; an agent creates an inspectable relationship.**
 
-printf 'Retry at most 3 times.\n' > spec.md
-printf 'MAX_RETRIES = 3\n' > retry.py
+Start with two fragments:
 
-"$OMD_BIN" init spec.md --json > "$DEMO/init-spec.json"
-observe init-code
-"$OMD_BIN" init retry.py --expected "$DEMO/expected-init-code.json" --json \
-  > "$DEMO/init-code.json"
-
-observe spec-range
-"$OMD_BIN" commit commit spec.md --range 0 22 --mode text \
-  --reason 'Require at most 3 retries' \
-  --expected "$DEMO/expected-spec-range.json" --json > "$DEMO/spec-range.json"
-SPEC_RANGE=$(json_field data.object.chain_root_commit_id < "$DEMO/spec-range.json")
-
-observe code-range
-"$OMD_BIN" commit commit retry.py --range 0 15 --mode text \
-  --link-from "$SPEC_RANGE" \
-  --reason 'Implement retry limit with MAX_RETRIES' \
-  --expected "$DEMO/expected-code-range.json" --json > "$DEMO/code-range.json"
-CODE_RANGE=$(json_field data.object.chain_root_commit_id < "$DEMO/code-range.json")
-LINK_ID=$(json_field data.link_records.0.link_id < "$DEMO/code-range.json")
-
-# OMD records the logical rename; move the working file separately.
-observe rename
-"$OMD_BIN" rename retry.py retry_limit.py \
-  --expected "$DEMO/expected-rename.json" --json > "$DEMO/rename.json"
-mv retry.py retry_limit.py
-
-"$OMD_BIN" list --json > "$DEMO/list.json"
-"$OMD_BIN" log "$CODE_RANGE" --json > "$DEMO/log.json"
-python3 - "$DEMO/list.json" "$SPEC_RANGE" "$CODE_RANGE" "$LINK_ID" <<'PY'
-import json,sys
-v=json.load(open(sys.argv[1]))
-spec,code,link=sys.argv[2:]
-objects=v["data"]["objects"]
-assert any(o["chain_root_commit_id"]==spec for o in objects)
-assert any(o["chain_root_commit_id"]==code and
-           o["project_relative_path"]=="retry_limit.py" for o in objects)
-assert any(x["link_id"]==link for x in v["data"]["links"])
-PY
-
-printf 'Retry at most 5 times.\n' > spec.md
-set +e
-"$OMD_BIN" verify --json > "$DEMO/verify-dirty.json"
-VERIFY_STATUS=$?
-set -e
-test "$VERIFY_STATUS" -eq 1
-python3 - "$DEMO/verify-dirty.json" "$SPEC_RANGE" <<'PY'
-import json,sys
-v=json.load(open(sys.argv[1]))
-assert v["data"]["ok"] is False
-assert "range:"+sys.argv[2] in v["data"]["dirty"]
-PY
-
-set +e
-"$OMD_BIN" check --json > "$DEMO/check.json"
-CHECK_STATUS=$?
-set -e
-test "$CHECK_STATUS" -eq 1
-printf 'spec_range=%s\ncode_range=%s\nlink_id=%s\n' \
-  "$SPEC_RANGE" "$CODE_RANGE" "$LINK_ID"
+```text
+spec.md:  Retry at most 3 times.
+retry.py: MAX_RETRIES = 3
 ```
-<!-- readme-workflow:end -->
 
-Ranges are zero-based and half-open: `[start, end)`. Text mode counts decoded Unicode scalar values; byte mode counts raw bytes. IDs in the script are chain-root commit IDs returned by OMD, not path-and-span labels. JSON v2 reports chain root, current tip, effective range commit, source version, location, and link identity separately.
+You might ask an agent:
+
+> Read the requirement and implementation. Link “at most 3 retries” to the code responsible for that limit, and explain why. Show me the selected fragments first; do not confirm entire files.
+
+Inspect the actual fragments and the reason for `requirement range → implementation range`: this code expresses the required limit. OMD records range identity, content versions, and a separate link. Placing files in one directory—or running init—does not establish that relationship.
+
+**2. When the requirement changes, follow the relationship to the code.**
+
+Change the requirement to 5 retries but leave the code alone. The actual result for this example is:
+
+```text
+verify: exit 1, ok: false
+dirty: range:<requirement range ID> — in-range edit …
+```
+
+This is an excerpt for readability; IDs differ between runs. It tells you the tracked requirement changed. Following the link leads to the range in `retry.py` that still says `MAX_RETRIES = 3`. You need not remember its location or ask the agent to guess the project's structure again.
+
+**3. A person decides the change; an agent implements and records its response.**
+
+> Accept the new limit of 5. Inspect the linked implementation, change the constant, run the relevant check, and record which requirement change this implementation revision handles, on which link, and why.
+
+The minimal example checks only that the constant is 5. A real project must also test its retry loop, error paths, and side effects. The agent uses fresh observation evidence to continue the existing ranges and explicitly records the link, change version, and adaptation reason. Review the implementation and evidence, not merely the agent's “done.”
+
+**4. What does a passing check mean?**
+
+After this response is recorded, the example's `verify` returns `ok: true`, with no dirty, locate, or outstanding-review items. Original range identity remains, and new versions and reasons are traceable. However, the current CLI may also pass after recording only the new requirement, before the implementation is updated. **A green check alone does not establish that code caught up.** Here, consistency was assessed by following the link, reading the code, running a check, and reviewing it—not by an OMD semantic proof.
+
+Want to try it? The [hands-on tutorial](docs/tutorials/retry.md) explains the purpose, commands, results, and decisions step by step. JSON and ID handling are real costs of the current CLI and are not omitted there; they should not be prerequisites for understanding the tool. Maintainer assertion scripts live separately under [regression examples](examples/regression/README.md).
 
 ## Manage files and directories
 

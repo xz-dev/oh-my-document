@@ -10,7 +10,15 @@ OMD（`omd`）把需求、设计、图表、代码和测试中的具体范围关
 
 文件可以留在原来的位置，关系由 OMD 维护。范围的位置变了，对象身份仍保持；内容变了，OMD 报告哪些范围和关联需要重新核对。人和 Agent 使用同一套 CLI 与检查规则。
 
-OMD 是第二层保障，不是语义证明器。有关联或检查通过，不等于实现一定正确。
+## 设计出发点：让 Agent 成为设计与实现之间的解释器
+
+OMD 首先是**面向 Agent 使用**设计的工具。它试图弥合人类的算法、业务与架构设计，到 Agent 编写的代码实现之间的裂缝：设计不该只留在聊天记录里，代码也不该成为只能靠重新猜测才能理解的产物。
+
+**架构与流程由人掌握，代码实现交给 AI。** 人明确目标、约束和关键决策，Agent 沿着需求、设计、实现与测试之间的关联落实细节；发生变化时，再沿这些关系定位、复核和说明处理。OMD 为这套协作保存具体范围、版本依据和理由，让设计意图与实现之间有可以返回检查的路径。
+
+反过来，它也帮助人借助 Agent **从头、结构化地理解一个项目**：先认识系统目标和组件，再深入流程、算法与代码片段，逐步建立并核对关联。不是让 Agent 一次性总结整个仓库，而是让人能够追问“为什么这样设计、在哪里实现、靠什么验证”，并掌握调整系统的依据。
+
+这一方向延续了 [《把 LLM 视作解释器——正确管理你的上下文》](https://xzos.net/blog/llm-as-interpreter-context-management/) 的思路：将上下文与工作流视为交给 Agent 执行的程序，通过明确设计、关联和验证，让它更稳定可靠地承担解释器的角色。**这是工程目标，不是确定性或语义等价的保证。** 人仍负责设计判断与验收；OMD 检查关联和变化记录，测试与审查验证实现，不能因有 link 或检查通过就断言业务正确。
 
 ## 安装
 
@@ -32,105 +40,47 @@ cargo install --path . --locked
 
 ## 跑一遍完整本地流程
 
-需要 Bash、Python 3，并保证 `omd` 在 `PATH` 中。下面的脚本使用隔离的 HOME、配置和缓存目录。首次初始化之后，每次写入前都从 `verify` 获取新的调用方观察凭据；后续使用的 ID 全部来自 OMD 实际返回的 JSON。
+### 从“最多重试 3 次”到“最多重试 5 次”
 
-<!-- readme-workflow:start -->
-```bash
-set -euo pipefail
-OMD_BIN=${OMD_BIN:-omd}
-DEMO=$(mktemp -d)
-cleanup() {
-  if [ "${KEEP_DEMO:-0}" = 1 ]; then
-    printf 'demo_dir=%s\n' "$DEMO"
-  else
-    rm -rf "$DEMO"
-  fi
-}
-trap cleanup EXIT
-export HOME="$DEMO/home"
-export OMD_CONFIG_PATH="$DEMO/config"
-export OMD_CACHE_PATH="$DEMO/cache"
-mkdir -p "$HOME" "$OMD_CONFIG_PATH" "$OMD_CACHE_PATH" "$DEMO/project"
-cd "$DEMO/project"
+先看你要完成什么，再决定是否手动操作。下面是协作示意，不是一段已经执行的 Agent 对话；对应 CLI 步骤已在隔离目录验证，见 [逐步教程](docs/tutorials/retry.zh-CN.md)。
 
-json_field() {
-  python3 -c 'import json,sys
-v=json.load(sys.stdin)
-for key in sys.argv[1].split("."):
-    v=v[int(key)] if isinstance(v,list) else v[key]
-print(json.dumps(v,separators=(",",":")) if isinstance(v,(dict,list)) else v)' "$1"
-}
-observe() {
-  local name=$1
-  "$OMD_BIN" verify --json > "$DEMO/observation-$name.json"
-  json_field data.expected < "$DEMO/observation-$name.json" > "$DEMO/expected-$name.json"
-}
+**1. 人明确设计，Agent 建立可检查的关系。**
 
-printf '最多重试 3 次。\n' > 需求.md
-printf 'MAX_RETRIES = 3\n' > retry.py
+两个片段分别是：
 
-"$OMD_BIN" init 需求.md --json > "$DEMO/init-spec.json"
-observe init-code
-"$OMD_BIN" init retry.py --expected "$DEMO/expected-init-code.json" --json \
-  > "$DEMO/init-code.json"
-
-observe spec-range
-"$OMD_BIN" commit commit 需求.md --range 0 9 --mode text \
-  --reason '约定最多重试 3 次' \
-  --expected "$DEMO/expected-spec-range.json" --json > "$DEMO/spec-range.json"
-SPEC_RANGE=$(json_field data.object.chain_root_commit_id < "$DEMO/spec-range.json")
-
-observe code-range
-"$OMD_BIN" commit commit retry.py --range 0 15 --mode text \
-  --link-from "$SPEC_RANGE" \
-  --reason '用 MAX_RETRIES 实现重试上限' \
-  --expected "$DEMO/expected-code-range.json" --json > "$DEMO/code-range.json"
-CODE_RANGE=$(json_field data.object.chain_root_commit_id < "$DEMO/code-range.json")
-LINK_ID=$(json_field data.link_records.0.link_id < "$DEMO/code-range.json")
-
-# OMD 记录逻辑改名；工作区文件需要另行移动。
-observe rename
-"$OMD_BIN" rename retry.py retry_limit.py \
-  --expected "$DEMO/expected-rename.json" --json > "$DEMO/rename.json"
-mv retry.py retry_limit.py
-
-"$OMD_BIN" list --json > "$DEMO/list.json"
-"$OMD_BIN" log "$CODE_RANGE" --json > "$DEMO/log.json"
-python3 - "$DEMO/list.json" "$SPEC_RANGE" "$CODE_RANGE" "$LINK_ID" <<'PY'
-import json,sys
-v=json.load(open(sys.argv[1]))
-spec,code,link=sys.argv[2:]
-objects=v["data"]["objects"]
-assert any(o["chain_root_commit_id"]==spec for o in objects)
-assert any(o["chain_root_commit_id"]==code and
-           o["project_relative_path"]=="retry_limit.py" for o in objects)
-assert any(x["link_id"]==link for x in v["data"]["links"])
-PY
-
-printf '最多重试 5 次。\n' > 需求.md
-set +e
-"$OMD_BIN" verify --json > "$DEMO/verify-dirty.json"
-VERIFY_STATUS=$?
-set -e
-test "$VERIFY_STATUS" -eq 1
-python3 - "$DEMO/verify-dirty.json" "$SPEC_RANGE" <<'PY'
-import json,sys
-v=json.load(open(sys.argv[1]))
-assert v["data"]["ok"] is False
-assert "range:"+sys.argv[2] in v["data"]["dirty"]
-PY
-
-set +e
-"$OMD_BIN" check --json > "$DEMO/check.json"
-CHECK_STATUS=$?
-set -e
-test "$CHECK_STATUS" -eq 1
-printf 'spec_range=%s\ncode_range=%s\nlink_id=%s\n' \
-  "$SPEC_RANGE" "$CODE_RANGE" "$LINK_ID"
+```text
+需求.md：最多重试 3 次。
+retry.py：MAX_RETRIES = 3
 ```
-<!-- readme-workflow:end -->
 
-范围使用从 0 开始、左闭右开的 `[start, end)`。text 模式按解码后的 Unicode scalar value 计数，byte 模式按原始字节计数。脚本中的 ID 是 OMD 实际返回的链根 commit ID，不是“路径加坐标”的标签。JSON v2 分别报告链根、当前 tip、有效范围 commit、来源版本、位置和 link 身份。
+你可以向 Agent 提出这样的任务：
+
+> 阅读需求和实现，把“最多重试 3 次”与负责上限的代码范围关联起来，说明理由。先给我看选中了什么，不要把整个文件都标成已确认。
+
+你要检查的是两个实际片段及关系理由：`需求范围 → 实现范围`，因为这段代码表达了需求中的重试上限。OMD 保存范围身份、内容版本和独立 link；仅把两个文件放在同一目录、或执行 init，都不会建立这条关系。
+
+**2. 需求变了，沿关系找到需要检查的代码。**
+
+把需求改成“最多重试 5 次”，暂时不改代码。运行检查时，这个例子的实际结果是：
+
+```text
+verify：exit 1，ok: false
+dirty：range:<需求范围 ID> — in-range edit …
+```
+
+这是为便于阅读而节选的结果，ID 随运行变化。它说明已跟踪需求变了；沿 link 查询，目标是 `retry.py` 中仍写着 `MAX_RETRIES = 3` 的范围。人不必记住实现在哪，也不必让 Agent 重新猜整个项目的结构。
+
+**3. 人决定怎么改，Agent 实现并留下处理依据。**
+
+> 接受上限改为 5。检查关联实现，把常量改为 5，运行相应检查，并记录这次实现修改处理了哪条关系上的哪次需求变化，以及理由。
+
+在这个最小例子中，检查只是确认常量值为 5；真实项目还要测试重试循环、错误路径和副作用。Agent 用新的观察凭据续改原范围，并明确记录 link、变化版本和适配理由。人复核实现及检查证据，而不是只看 Agent 说“完成”。
+
+**4. 检查通过意味着什么？**
+
+完成这次处理后，例子的 `verify` 返回 `ok: true`，没有 dirty、locate 或待处理项；原范围身份保留，新版本与处理理由可以追溯。但当前 CLI 在只记录新需求、尚未更新实现时也可能返回成功，**不能单凭绿色检查判断实现已跟上**。这里是否一致，是沿关系阅读代码、运行检查并复核得出的结论，不是 OMD 的语义证明。
+
+想亲手走一遍？[手动教程](docs/tutorials/retry.zh-CN.md) 按“目的 → 命令 → 看什么 → 下一步判断”解释范围、凭据和适配。JSON/ID 的处理是当前 CLI 的实际成本，教程没有省略；它不应该成为理解工具用途的前提。维护者的自动断言脚本另放在 [回归示例](examples/regression/README.md)。
 
 ## 纳管文件与目录
 
