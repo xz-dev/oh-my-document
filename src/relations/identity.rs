@@ -33,6 +33,10 @@ pub enum Kind {
     Range,
     /// Peer-store endpoint reference (cross-store link target).
     Peer,
+    /// Audit journal — append-only linear chain, own root.
+    Audit,
+    /// Note thread — append-only linear chain, own root.
+    Note,
 }
 
 /// A reference to a *node* (an object, not a commit on its chain).
@@ -100,6 +104,8 @@ pub fn kind_name(k: Kind) -> &'static str {
         Kind::File => "file",
         Kind::Range => "range",
         Kind::Peer => "peer",
+        Kind::Audit => "audit",
+        Kind::Note => "note",
     }
 }
 
@@ -108,6 +114,8 @@ pub fn parse_kind(s: &str) -> Option<Kind> {
         "file" => Some(Kind::File),
         "range" => Some(Kind::Range),
         "peer" => Some(Kind::Peer),
+        "audit" => Some(Kind::Audit),
+        "note" => Some(Kind::Note),
         _ => None,
     }
 }
@@ -440,6 +448,10 @@ pub fn authoritative_object(store: &Store, tip: &str) -> Result<AuthoritativeObj
         Kind::Range
     } else if matches!(root.kind, CommitKind::Init | CommitKind::Import) {
         Kind::File
+    } else if root.kind == CommitKind::AuditInit {
+        Kind::Audit
+    } else if root.kind == CommitKind::NoteInit {
+        Kind::Note
     } else {
         return Err(RefError::UnknownNode(root_commit_id.clone()));
     };
@@ -514,6 +526,8 @@ pub fn commit_to_node(store: &Store, commit_id: &str) -> Result<(String, String)
     let key = match kind {
         Kind::File => crate::relations::node::file_key(&root),
         Kind::Range => crate::relations::node::range_key(&root),
+        Kind::Audit => crate::relations::node::audit_key(&root),
+        Kind::Note => crate::relations::node::note_key(&root),
         Kind::Peer => unreachable!(),
     };
     Ok((key, root))

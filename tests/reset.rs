@@ -53,18 +53,19 @@ impl T {
         Self(r)
     }
     fn run(&self, args: &[&str]) -> (i32, String, String) {
+        let full = common::with_expected(
+            &omd(),
+            &self.0,
+            args,
+            Some(&self.0.join(".omd")),
+            Some(&self.0.join("home")),
+            Some(&self.0.join("config.toml")),
+            Some(&self.0.join("cache")),
+        );
         let o = Command::new(omd())
             .arg("--meta")
             .arg(self.0.join(".omd"))
-            .args(common::with_expected(
-                &omd(),
-                &self.0,
-                args,
-                Some(&self.0.join(".omd")),
-                Some(&self.0.join("home")),
-                Some(&self.0.join("config.toml")),
-                Some(&self.0.join("cache")),
-            ))
+            .args(&full)
             .current_dir(&self.0)
             .env("HOME", self.0.join("home"))
             .env("OMD_CONFIG_PATH", self.0.join("config.toml"))
@@ -122,6 +123,18 @@ impl T {
     }
     fn state(&self) -> String {
         std::fs::read_to_string(self.0.join(".omd/state.toml")).unwrap_or_default()
+    }
+    fn tips_map(&self) -> std::collections::BTreeMap<String, String> {
+        let value: toml::Value = toml::from_str(&self.state()).unwrap();
+        value
+            .get("tips")
+            .and_then(toml::Value::as_table)
+            .map(|tips| {
+                tips.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
     fn tip(&self, node: &str) -> String {
         let s = self.state();
@@ -285,11 +298,15 @@ fn file_reset_restores_saved_child_tip_after_later_revision() {
         saved_child_tip,
         "file reset must restore exact saved child tip"
     );
-    let (_, dangling, _) = t.run(&["list", "--dangling"]);
+    let (_, dangling, _) = t.run(&["list", "--dangling", "--json"]);
+    let page: serde_json::Value = serde_json::from_str(&dangling).unwrap();
     assert!(
-        dangling.contains(&later_child_tip),
+        page["data"]["dangling_count"].as_u64().unwrap() >= 1,
         "later child revision must dangle: {dangling}"
     );
+    let tips = t.tips_map();
+    let as_tip = tips.values().any(|v| v == &later_child_tip);
+    assert!(!as_tip, "later child tip must not be current");
 }
 
 #[test]
@@ -532,9 +549,17 @@ fn reset_moves_tip_to_landing_and_dangles_removed() {
     // The new tip is the reset marker; its previous is c1 — c2 is unreachable.
     let tip = t.tip("range:a.md@text:0-1");
     assert_eq!(t.prev(&tip), c1, "reset marker must chain onto landing c1");
-    // c2 must be dangling.
-    let (_, out, _) = t.run(&["list", "--dangling"]);
-    assert!(out.contains(&c2), "c2 must dangle: {out}");
+    // c2 must be dangling: count-based (list no longer dumps ids), and
+    // the tip map moved off it onto the reset marker whose prev is c1.
+    let (_, out, _) = t.run(&["list", "--dangling", "--json"]);
+    let page: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert!(
+        page["data"]["dangling_count"].as_u64().unwrap() >= 1,
+        "c2 must dangle: {out}"
+    );
+    let tips = t.tips_map();
+    let as_tip = tips.values().any(|v| v == &c2);
+    assert!(!as_tip, "c2 must not be a current tip");
 }
 
 #[test]

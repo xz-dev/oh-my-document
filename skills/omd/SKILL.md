@@ -74,7 +74,7 @@ PY
 
 新建范围不传 `--id`；续改传当前 `tip_commit_id`，不是始终使用链根。link 有独立 ID，后续适配按 link ID 和选定变化处理。同坐标不等于同一对象。组合可能产生 BEGIN/正文/link/END；有效正文与当前 tip 分开。
 
-完成条件：`list --json` 可查到真实范围与 link；`log <id>`/`tree` 可追溯。身份、位置、版本取结构化字段，不解析展示标签。
+完成条件：`omd links --json` 概要确认 link 存在（total 增加）；`omd links show <link-id>` 查单链完整投影（含端点解析路径与范围）；`log <id>`/`tree` 可追溯。身份、位置、版本取结构化字段，不解析展示标签。
 
 ## 修改后的复核
 
@@ -101,6 +101,10 @@ PY
 **difftastic 的边界**：它只对有语法树的代码文件（`.rs`/`.py`/`.json` 等）有效；`.md` 等文档走文本回退，纯空白也报 `changed` 留在 dirty——本仓库的文档范围不会因过滤而减载，这是预期行为不是 bug。
 
 完成条件：报告实际通过项、未覆盖范围、未处理责任及未执行验证；不为绿色结果降低规则或批量 clean。
+
+## 审计闭环
+
+发现问题后建立可追溯闭环，不靠口头记录：`omd audit add <seed> [--direction both|upstream|downstream] [--text]` 开 audit 链（默认 pending）；`audit show <id>` 沿种子涂色 link 图（both 分正反两图），逐边判 L0–L2；`audit pass|fail|pending` 追加结论 patch；`audit list --status/--start/--end/--touched-start/--touched-end` 过滤。正文可写 `audit:<commit-id>` wiki 引用钉住具体 commit；Link 端点可指向 audit/note 链，双引用不一致报 mismatch。仅结构性 broken exit 1。`commit unclean --reason "audit:<id>"` 造脏索引，修复 commit 回链闭环。详见 [capabilities](../../skills/omd/references/capabilities.md)。
 
 ## 在本仓库使用
 

@@ -12,10 +12,12 @@
 | --- | --- |
 | 修改后续改/适配/cosmetic 收尾 | 取得新观察，使用当前 tip 续改。`--adapt` 每项为 `{link_id, changes, reason}`；列明确切变化，不能处理一个 link 顺带清除同端点其他 link。`--difftastic` 过滤把 dirty 分桶后，`commit cosmetic <path>` 在锁内对凭据钉住的版本重分类并批量续改结构无变化的范围，证据落库；结构有变化或无法分类的仍走逐条续改。 |
 | clean / unclean | clean 是源端按 link/变化停止传播；unclean 是独立责任，不是缓存或正文未变就能忽略。明确选择并说明理由，不批量消除待办。 |
+| link 查询/健康检查 | `omd links` 概要（total/by_status/by_stratum），`links list` 分页明细（默认 20 上限 100，`--status/--node/--stratum` 过滤），`links show <id>` 单链完整投影。概要拒绝明细修饰参数；`--links node:<id>`/`status:<state>` 给 verify/check 嵌入一页明细。五态 + unchecked 分开计数。 |
 | tags / named rules / skip | tag 分类；规则表达 spec→code 等关系及 warn/fail。按内容覆盖核对，不以对象数替代。显式 skip 只跳检查，不确认内容。先与用户确定规则方向和严格程度。 |
 | rename / delete / remove / copy | 区分逻辑改名、工作区移动、tombstone、撤统计、新对象；不要把文件消失自动记成删除，不让新路径复用合并旧身份。 |
 | ATOMIC / reset | 组合逐步发布，不是整体事务。开放块仍有当前状态但闭合检查失败；保留真实成功成员。reset 遵守直接前驱/内部成员边界；文件恢复保存的子范围版本。真实 reset 前确认影响。 |
-| note / log / tree | note 是附加说明，不改原 commit hash；查询不修复 dangling，也不执行来源。历史可读不等于可作写入前驱。 |
+| note / log / tree | note 是附加说明，不改原 commit hash；查询不修复 dangling，也不执行来源。历史可读不等于可作写入前驱。note 自身是链式对象（`note:<init-cid>`），修订序按链不按墙钟；旧 `notes/<id>.toml` 平文件格式直接拒绝，不迁移。 |
+| audit | `omd audit add <seed> [--direction both|upstream|downstream] [--text]` 开一条 audit 链（默认 pending）；`audit show <id>` 按记录方向从种子走 link 图（both 时正反两个独立子图，不混），逐边 L0–L2、逐点活性；`audit list` 按 `--status pass|fail|pending`、`--start/--end`（audit 自身时间）、`--touched-start/--touched-end`（涂色端点版本时间）过滤并分页；`audit pass|fail|pending <id>` 追加结论 patch（append-only，不覆盖）。正文可写 `audit:<commit-id>` wiki 引用，解析钉住的 commit；Link 对象端点可指向 audit/note 链，双引用不一致报 mismatch。只有结构性 broken exit 1；fail/pending 是记录不是崩溃。`commit unclean --reason "audit:<id>"` 造脏索引，修复 commit 回链闭环。 |
 | 编码 / byte | 显式编码、记录视图及配置有优先级，历史不随配置重解码。保存原字节，BOM/CRLF 计数；byte 不解码。 |
 | command 来源 | 固定 executable + JSON 字符串数组；无隐式 shell/模板。init/replace 各自明确授权一次采集；verify/check 另需许可。只接受 exit 0 的完整 stdout，失败不能用部分输出或旧成功内容顶替；写入复用本次获准观察，不再执行。 |
 | Git 历史 / replace | 完整固定 Git commit + 提交内路径，只读本地对象，无 fetch。当前仍观察登记文件。replace 核对完整内容，改变所选来源版本的恢复 binding，不改变对象或当前观察定义；同 hash 不等于同版本。 |

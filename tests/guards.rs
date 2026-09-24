@@ -2418,7 +2418,16 @@ fn project_moved_locally_still_resolves() {
         String::from_utf8_lossy(&o.stderr)
     );
     let out = String::from_utf8_lossy(&o.stdout);
-    assert!(out.contains(&file_node), "node survives move: {out}");
+    assert!(
+        out.contains("object_count"),
+        "summary lists after move: {out}"
+    );
+    // Node survives the move: read state directly (list is summary-only).
+    let st_moved = std::fs::read_to_string(moved.join(".omd/state.toml")).unwrap();
+    assert!(
+        st_moved.contains(&format!("\"{file_node}\"")),
+        "node survives move"
+    );
     // Store identity and commit ids are unchanged across the move; project
     // identity is checked separately against manifest.toml below.
     let st = std::fs::read_to_string(moved.join(".omd/state.toml")).unwrap();
@@ -2500,17 +2509,16 @@ fn note_revisions_follow_publication_order() {
     let (_, o, _) = t.run(&["note", "list", &tip]);
     let j: serde_json::Value = serde_json::from_str(&o).unwrap_or_default();
     let notes = j["data"]["notes"].as_array().cloned().unwrap_or_default();
-    assert!(notes.len() >= 2, "two note revisions listed: {o}");
-    // seqs are unique and strictly increasing = publication order.
-    let seqs: Vec<u64> = notes.iter().filter_map(|n| n["seq"].as_u64()).collect();
-    assert!(
-        seqs.windows(2).all(|w| w[0] < w[1]),
-        "monotonic seqs: {seqs:?}"
-    );
-    // And the original precedes its revision in list order.
-    let texts: Vec<&str> = notes.iter().filter_map(|n| n["text"].as_str()).collect();
-    assert_eq!(texts[0], "first", "original precedes revision: {texts:?}");
-    assert_eq!(texts[1], "revised", "patch after original: {texts:?}");
+    // Chain model: each note listed once, effective kind/text from the tip.
+    assert_eq!(notes.len(), 1, "one note, tip projection: {o}");
+    assert_eq!(notes[0]["text"], "revised", "tip text wins: {o}");
+    assert_eq!(notes[0]["kind"], "patch", "effective kind is patch: {o}");
+    // Revision history walks the chain via log — two commits linked by
+    // previous_id (patch → init).
+    let (_, h, _) = t.run(&["log", &format!("note:{nid}")]);
+    let j: serde_json::Value = serde_json::from_str(&h).unwrap_or_default();
+    let chain = j["data"]["chain"].as_array().cloned().unwrap_or_default();
+    assert_eq!(chain.len(), 2, "init + patch on one chain: {h}");
 }
 
 // change-review #36: resetting the FILE restores its recorded child range
@@ -2557,8 +2565,16 @@ fn file_reset_restores_child_range_tips_e2e() {
         saved_child_tip,
         "child range restored to file snapshot"
     );
-    let (_, dangling, _) = t.run(&["list", "--dangling"]);
-    assert!(dangling.contains(&later_child_tip));
+    let (_, dangling, _) = t.run(&["list", "--dangling", "--json"]);
+    let dangling_page: serde_json::Value = serde_json::from_str(&dangling).unwrap();
+    let dangling_page = &dangling_page["data"];
+    assert!(
+        dangling_page["dangling_count"].as_u64().unwrap() >= 1,
+        "withdrawn later tip must count as dangling"
+    );
+    // The dangling ids themselves are no longer dumped; the count plus the
+    // tip map moving is the evidence.
+    assert_ne!(t.tip(&child), later_child_tip);
 }
 
 // change-review #40: reading a dangling commit does not repair it — after

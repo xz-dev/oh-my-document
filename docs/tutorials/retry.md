@@ -90,8 +90,8 @@ omd commit commit retry.py --range 0 15 --mode text \
 CODE_ID=$(jq -er '.data.object.chain_root_commit_id' code-range.json)
 CODE_TIP=$(jq -er '.data.object.tip_commit_id' code-range.json)
 LINK_ID=$(jq -er '.data.link_records[0].link_id' code-range.json)
-omd list --json > linked.json
-jq '.data.links[] | {link_id, from: .source.object.root_commit_id, to: .target.object.root_commit_id}' linked.json
+omd links --json > linked.json
+omd links show "$LINK_ID" --json | jq '.link | {link_id, from: .full.source.object.root_commit_id, to: .full.target.object.root_commit_id}'
 ```
 
 Check the output: one link goes from `SPEC_ID` to `CODE_ID`, representing:
@@ -111,12 +111,11 @@ observe
 
 Expect exit 1 and `ok: false`. The `dirty` object contains `range:<SPEC_ID>` with an `in-range edit` reason. **Tracked content changed and needs review; this is not a crash.**
 
-Follow the relationship instead of relying on a remembered filename:
+Follow the relationship instead of relying on a remembered filename. The link's full projection resolves each endpoint — the target's `resolved` projection shows its path and range:
 
 ```bash
-omd list --json > linked.json
-jq --arg link "$LINK_ID" '.data.links[] | select(.link_id == $link) | .target.object' linked.json
-jq --arg id "$CODE_ID" '.data.objects[] | select(.chain_root_commit_id == $id) | {project_relative_path, position}' linked.json
+omd links show "$LINK_ID" --json > linked.json
+jq '.link.full.target.resolved | {project_relative_path, position}' linked.json
 python3 -c 'from pathlib import Path; print(Path("retry.py").read_text(), end="")'
 ```
 

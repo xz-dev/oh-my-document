@@ -51,6 +51,16 @@ pub enum CommitKind {
     FileVerify,
     /// Reset marker (records requested/actual landing).
     Reset,
+    /// Audit chain root: first commit of an audit journal (payload carries
+    /// seed object/commit id, coloring direction, conclusion=pending).
+    AuditInit,
+    /// Audit conclusion patch: appends pass/fail/pending + markdown text.
+    AuditPatch,
+    /// Note chain root: first commit of a note thread (replaces flat
+    /// `notes/<id>.toml` records — old format is rejected, never migrated).
+    NoteInit,
+    /// Note revision: patch/delete appended to the note's chain.
+    NotePatch,
 }
 
 /// On-disk record. `payload_fields` is the closed per-kind operation map;
@@ -218,6 +228,12 @@ impl Commit {
             .into_iter()
             .collect(),
             AtomicBegin | AtomicEnd => ["path", "chain", "mount"].into_iter().collect(),
+            AuditInit => ["seed", "direction", "text", "conclusion"]
+                .into_iter()
+                .collect(),
+            AuditPatch => ["conclusion", "text"].into_iter().collect(),
+            NoteInit => ["target", "text"].into_iter().collect(),
+            NotePatch => ["kind", "target", "text"].into_iter().collect(),
             Link => [
                 "path",
                 "link_id",
@@ -260,6 +276,10 @@ impl Commit {
             Delete => &["source"],
             Tag => &["path", "tag"],
             Reset => &["requested", "actual"],
+            AuditInit => &["seed", "direction", "text", "conclusion"],
+            AuditPatch => &["conclusion"],
+            NoteInit => &["target", "text"],
+            NotePatch => &["kind", "target"],
             AtomicBegin | AtomicEnd => &[],
             Commit | Clean | Unclean | FileVerify | ScopeAdjust => &[],
         }
@@ -285,6 +305,10 @@ pub fn kind_name(k: CommitKind) -> &'static str {
         Tag => "tag",
         FileVerify => "file_verify",
         Reset => "reset",
+        AuditInit => "audit_init",
+        AuditPatch => "audit_patch",
+        NoteInit => "note_init",
+        NotePatch => "note_patch",
     }
 }
 

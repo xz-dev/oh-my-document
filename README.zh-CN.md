@@ -124,6 +124,7 @@ default_encoding = "windows-1252"
 - `--difftastic` 是对本次调用的**一次性**外部工具许可：壳调用 `difft` 二进制对旧/新完整内容做结构树比较，把被判定结构无变化的范围从 `dirty` 过滤到 `cosmetic` 桶。该参数不携带到下一次调用，读取/查询/重建永不触发；工具缺失或失败时相关范围保守留在 dirty，不静默归入 cosmetic。`commit cosmetic <path>` 对凭据钉住的版本重分类后批量续改收尾。
 - 跨 store 发布先保护被引用版本，再发布消费方。晚期 I/O 失败可能留下已成功发布的成员和开放块；JSON 会如实列出成功成员、失败步骤、边界和 operation ID，不假称整体回滚。
 - 不支持的旧 store，以及已移除的复合来源/坐标接口，会被明确拒绝，不自动迁移或重写。
+- audit 和 note 是 append-only 提交链（`audit:<init>` / `note:<init>`），不是平面记录：`omd audit add|show|list|pass|fail|pending` 从种子沿 link 图涂色遍历（正反两个方向分开报告），逐边判 L0–L2，结论以 patch 追加三态（pass/fail/pending）；正文 `audit:<commit-id>` wiki 引用和 Link 端点都钉住具体 commit。只有结构性 broken 才 exit 1——fail 和 pending 是记录不是崩溃。`commit unclean --reason "audit:<id>"` 开追踪修复环，修复 commit 通过 link 回链到钉住的 audit 完成闭环。
 
 ## 继续了解
 

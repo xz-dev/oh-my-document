@@ -26,9 +26,12 @@ fn needs_expected(args: &[&str]) -> bool {
         return false;
     };
     match args[index] {
-        "verify" | "check" | "log" | "tree" | "list" | "reindex" | "project" => false,
+        "verify" | "check" | "log" | "tree" | "list" | "links" | "reindex" | "project" => false,
         "init" | "copy" => false,
         "note" => args.get(index + 1).is_some_and(|action| *action != "list"),
+        "audit" => args
+            .get(index + 1)
+            .is_some_and(|action| !matches!(*action, "list" | "show")),
         "commit" => args.get(index + 1).is_none_or(|kind| *kind != "init"),
         _ => true,
     }

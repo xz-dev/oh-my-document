@@ -90,8 +90,8 @@ omd commit commit retry.py --range 0 15 --mode text \
 CODE_ID=$(jq -er '.data.object.chain_root_commit_id' code-range.json)
 CODE_TIP=$(jq -er '.data.object.tip_commit_id' code-range.json)
 LINK_ID=$(jq -er '.data.link_records[0].link_id' code-range.json)
-omd list --json > linked.json
-jq '.data.links[] | {link_id, from: .source.object.root_commit_id, to: .target.object.root_commit_id}' linked.json
+omd links --json > linked.json
+omd links show "$LINK_ID" --json | jq '.link | {link_id, from: .full.source.object.root_commit_id, to: .full.target.object.root_commit_id}'
 ```
 
 核对输出：一条 link 从 `SPEC_ID` 指向 `CODE_ID`，对应：
@@ -111,12 +111,11 @@ observe
 
 这次应看到 exit 1、`ok: false`，`dirty` 中有 `range:<SPEC_ID>`，原因包含 `in-range edit`。这是**已跟踪需求发生变化，需要复核**，不是程序崩溃。
 
-沿关系找实现，而不是凭记忆搜文件名：
+沿关系找实现，而不是凭记忆搜文件名。link 的完整投影会解析每个端点——目标的 `resolved` 投影直接给出路径与范围：
 
 ```bash
-omd list --json > linked.json
-jq --arg link "$LINK_ID" '.data.links[] | select(.link_id == $link) | .target.object' linked.json
-jq --arg id "$CODE_ID" '.data.objects[] | select(.chain_root_commit_id == $id) | {project_relative_path, position}' linked.json
+omd links show "$LINK_ID" --json > linked.json
+jq '.link.full.target.resolved | {project_relative_path, position}' linked.json
 python3 -c 'from pathlib import Path; print(Path("retry.py").read_text(), end="")'
 ```
 

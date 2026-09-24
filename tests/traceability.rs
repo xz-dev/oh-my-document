@@ -478,8 +478,14 @@ fn meta_discovery_from_subdirectory() {
         .output()
         .unwrap();
     let s = String::from_utf8_lossy(&o.stdout);
-    let file_node = t.file_node("a.md");
-    assert!(s.contains(&file_node), "ancestor .omd discovered: {s}");
+    // Discovery is proven by the counted object — `omd list` is counts-only,
+    // no per-object id dump anymore.
+    let page: serde_json::Value = serde_json::from_str(&s).unwrap();
+    assert_eq!(
+        page["data"]["object_count"].as_u64().unwrap_or(0),
+        1,
+        "ancestor .omd discovered: {s}"
+    );
 }
 
 #[test]

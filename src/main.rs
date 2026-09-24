@@ -258,6 +258,11 @@ struct Cli {
          num_args = 0..=1, require_equals = true)]
     difftastic: Option<bool>,
 
+    /// Embed paged link detail in verify/check JSON (`--links node:<id>` or
+    /// `--links status:<state>`). Default: counts only (`link_count`).
+    #[arg(long, global = true, value_name = "FILTER")]
+    links: Option<String>,
+
     /// Text encoding for this observation (`--encoding utf-16le`, etc.).
     /// Priority: flag > recorded > file config > project default > user
     /// default > UTF-8. A recorded encoding freezes that observation.
@@ -421,6 +426,11 @@ enum Cmd {
     Rename { source: String, target: String },
     /// `omd copy` — new initialization without prior association.
     Copy { source: String, target: String },
+    /// `omd audit` — audit journals: colored-map reviews pinned to commits.
+    Audit {
+        #[command(subcommand)]
+        action: AuditAction,
+    },
     /// `omd note` — append-only notes on a commit + reverse lookup.
     Note {
         /// `add|patch|delete|list`
@@ -495,6 +505,106 @@ enum Cmd {
     List {
         #[arg(long)]
         dangling: bool,
+    },
+    /// `omd links` — link query surface: summary first, filtered detail
+    /// on explicit request (`--status` / `--node` / `--id` / `--stratum`).
+    /// `omd links` — bounded link summary; `links list` paged detail; `links show <id>` one link.
+    Links {
+        #[command(subcommand)]
+        action: Option<LinksAction>,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuditAction {
+    /// `omd audit add <seed>` — open an audit journal over the link graph
+    /// reachable from <seed> (a commit or object id).
+    Add {
+        /// Seed commit id or object id the audit colors from.
+        seed: String,
+        /// Coloring direction: both (default), upstream, or downstream.
+        #[arg(long, default_value = "both")]
+        direction: String,
+        /// Markdown rationale / findings.
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// `omd audit list` — paged audit journals with status/time filters.
+    List {
+        /// Filter by conclusion: pass|fail|pending.
+        #[arg(long)]
+        status: Option<String>,
+        /// Audit start/commit-time window lower bound (RFC3339 or date).
+        #[arg(long)]
+        start: Option<String>,
+        /// Audit start/commit-time window upper bound.
+        #[arg(long)]
+        end: Option<String>,
+        /// Colored-region endpoint version-time window lower bound.
+        #[arg(long)]
+        touched_start: Option<String>,
+        /// Colored-region endpoint version-time window upper bound.
+        #[arg(long)]
+        touched_end: Option<String>,
+        /// Page size (default 20, capped at 100).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Hint cursor from a previous page.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
+    /// `omd audit show <audit-id>` — walk the colored map and report health.
+    Show {
+        /// The audit chain root (init commit id or audit:<id> key).
+        audit_id: String,
+    },
+    /// `omd audit pass <audit-id>` — append a pass conclusion.
+    Pass {
+        audit_id: String,
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// `omd audit fail <audit-id>` — append a fail conclusion.
+    Fail {
+        audit_id: String,
+        #[arg(long)]
+        text: Option<String>,
+    },
+    /// `omd audit pending <audit-id>` — append a pending conclusion.
+    Pending {
+        audit_id: String,
+        #[arg(long)]
+        text: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum LinksAction {
+    /// `omd links list` — paged link detail; unfiltered = enumerate all.
+    List {
+        /// Filter by health state (healthy/obliged/stale/withdrawn/broken).
+        #[arg(long)]
+        status: Option<String>,
+        /// Bidirectional node filter: source OR target equals this object id.
+        #[arg(long)]
+        node: Option<String>,
+        /// Filter by topological stratum number.
+        #[arg(long)]
+        stratum: Option<u64>,
+        /// Page size for detail items (default 20, capped at 100).
+        #[arg(long)]
+        limit: Option<usize>,
+        /// Hint cursor from a previous page: (filters, offset).
+        #[arg(long)]
+        cursor: Option<String>,
+        /// Full projection per item (default is brief: id/status/endpoints/stratum).
+        #[arg(long)]
+        full: bool,
+    },
+    /// `omd links show <link-id>` — single link, complete projection.
+    Show {
+        /// The link id.
+        link_id: String,
     },
 }
 
@@ -996,6 +1106,17 @@ fn resolve_range_endpoint(store: &Store, r: &str) -> Result<(String, String), Ap
             })?;
         return Ok((key, version));
     }
+    // `audit:<id>` / `note:<id>` — journal chain roots are first-class
+    // link endpoints (fix-commit → audit backlinks, audit-wiki edges).
+    for journal_kind in ["audit", "note"] {
+        if let Some(id) = r.strip_prefix(&format!("{journal_kind}:")) {
+            let key = resolve_node_by_id(store, id, journal_kind)?;
+            let version = store.state().tips.get(&key).cloned().ok_or_else(|| {
+                AppError::usage(format!("{journal_kind} node has no current version: {key}"))
+            })?;
+            return Ok((key, version));
+        }
+    }
     // `file@span` / `range:file@span` coordinate spellings are NOT legal
     // endpoints (spec: "不靠 path+range 选择对象"; "旧路径拼坐标端点接口
     // 不提供兼容解释"). Position is never an identity — the caller must
@@ -1008,24 +1129,28 @@ fn resolve_range_endpoint(store: &Store, r: &str) -> Result<(String, String), Ap
     // Bare commit id (64-hex) or unique prefix: find the chain containing it.
     if r.chars().all(|c| c.is_ascii_hexdigit()) && r.len() >= 8 {
         match omd::relations::identity::commit_to_node(store, r) {
-            Ok((key, _root)) if key.starts_with("range:") => {
+            Ok((key, _root))
+                if key.starts_with("range:") || omd::relations::node::is_journal_key(&key) =>
+            {
                 let selected = omd::relations::identity::resolve_commit_id(store, r)
                     .map_err(|e| AppError::usage(e.to_string()))?;
                 return Ok((key, selected));
             }
             Ok((key, _)) => {
                 return Err(AppError::usage(format!(
-                    "link endpoint resolves to a non-range node ({key}): {r}"
+                    "link endpoint resolves to a non-range/non-journal node ({key}): {r}"
                 )));
             }
             Err(_) => {}
         }
         // Also try as a node-id prefix across kinds.
-        if let Ok(k) = resolve_node_by_id(store, r, "range") {
-            let version = store.state().tips.get(&k).cloned().ok_or_else(|| {
-                AppError::usage(format!("range node has no current version: {k}"))
-            })?;
-            return Ok((k, version));
+        for kind in ["range", "audit", "note"] {
+            if let Ok(k) = resolve_node_by_id(store, r, kind) {
+                let version = store.state().tips.get(&k).cloned().ok_or_else(|| {
+                    AppError::usage(format!("{kind} node has no current version: {k}"))
+                })?;
+                return Ok((k, version));
+            }
         }
         return Err(AppError::usage(format!(
             "link endpoint does not resolve to a node: {r}"
@@ -1597,9 +1722,19 @@ fn commit_projection(
 }
 
 fn endpoint_projection(store: &Store, node: &str, selected: &str) -> serde_json::Value {
+    let object = object_ref_value(store, node);
+    // Resolved view: object id + pinned version + where it lives
+    // (project_relative_path/position). Peer endpoints stay opaque —
+    // resolution is local-only.
+    let resolved = if node.starts_with("peer:") {
+        serde_json::Value::Null
+    } else {
+        object_projection(store, node, selected, false).unwrap_or(serde_json::Value::Null)
+    };
     serde_json::json!({
-        "object": object_ref_value(store, node),
+        "object": object,
         "selected_version_commit_id": selected,
+        "resolved": resolved,
     })
 }
 
@@ -1612,22 +1747,959 @@ fn link_projection(store: &Store, link: &omd::records::store::Link) -> serde_jso
     })
 }
 
-fn current_objects(store: &Store) -> Result<Vec<serde_json::Value>, AppError> {
-    store
-        .state()
-        .tips
-        .iter()
-        .map(|(node, tip)| object_projection(store, node, tip, true))
-        .collect()
+/// Parsed `omd links` request after CLI assembly.
+#[derive(Debug, Default)]
+struct LinksQuery {
+    status: Option<String>,
+    node: Option<String>,
+    id: Option<String>,
+    stratum: Option<u64>,
+    limit: Option<usize>,
+    cursor: Option<String>,
+    full: bool,
+    /// `links list` vs bare `links` — detail enumeration vs bounded summary.
+    /// The verify/check `--links` embed sets this true (it wants detail).
+    enumerate: bool,
 }
 
-fn current_links(store: &Store) -> Vec<serde_json::Value> {
-    store
-        .state()
-        .links
+const LINKS_DEFAULT_LIMIT: usize = 20;
+const LINKS_MAX_LIMIT: usize = 100;
+
+/// Cursor encodes (offset) as decimal — filters are re-applied from the
+/// fresh CLI args on replay, so the token stays a hint, not a credential.
+fn cursor_offset(token: &str) -> Option<usize> {
+    token.parse::<usize>().ok()
+}
+
+/// Parsed `--links <FILTER>` value: `node:<id>` or `status:<state>`.
+#[derive(Debug)]
+struct LinkDetailFilter {
+    node: Option<String>,
+    status: Option<String>,
+}
+
+fn link_detail_filter(cli: &Cli) -> Option<LinkDetailFilter> {
+    let raw = cli.links.as_deref()?;
+    let mut filter = LinkDetailFilter {
+        node: None,
+        status: None,
+    };
+    for part in raw.split(',') {
+        if let Some(node) = part.strip_prefix("node:") {
+            filter.node = Some(node.to_string());
+        } else if let Some(status) = part.strip_prefix("status:") {
+            filter.status = Some(status.to_string());
+        } else {
+            return None;
+        }
+    }
+    Some(filter)
+}
+
+/// Shared filtered-detail page used by both `omd links` and the verify/check
+/// Notes live on chain objects (`note:<root>`). The pre-chain flat format
+/// `notes/<id>.toml` is rejected on sight — never read, never converted,
+/// never silently ignored. Callers must rebuild old notes as chain commits.
+fn reject_flat_notes(root: &Path) -> Result<(), AppError> {
+    let dir = root.join("notes");
+    if let Ok(rd) = std::fs::read_dir(&dir) {
+        for entry in rd.flatten() {
+            let p = entry.path();
+            if p.extension().is_some_and(|e| e == "toml") {
+                return Err(AppError::usage(format!(
+                    "old flat note format is not supported: {} — rebuild this note as a note:<root> chain commit",
+                    p.display()
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Project note chains into the note list for `commit_id`. Each note is one
+/// `note:<init-cid>` chain; the effective state is the tip's `kind` —
+/// `delete` means the note is gone (listed as deleted, not hidden). Order
+/// follows the chain (publication), never the wall clock.
+fn list_note_chains(store: &Store, commit_id: &str) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    for (key, tip) in &store.state().tips {
+        if !omd::relations::node::is_note_key(key) {
+            continue;
+        }
+        // Walk the chain: init carries the target; the tip's kind is the
+        // effective state (patch > init > delete).
+        let Ok(tip_commit) = store.read_commit(tip) else {
+            continue;
+        };
+        let init_id = key.trim_start_matches("note:");
+        let Ok(init) = store.read_commit(init_id) else {
+            continue;
+        };
+        let target = init
+            .payload
+            .get("target")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if target != commit_id {
+            continue;
+        }
+        let kind = tip_commit
+            .payload
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("add");
+        let text = tip_commit
+            .payload
+            .get("text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        out.push(serde_json::json!({
+            "id": init_id,
+            "commit_id": target,
+            "kind": kind,
+            "text": text,
+            "timestamp": tip_commit.timestamp,
+            "tip": tip,
+        }));
+    }
+    // Revision order follows the chain (publication), never the wall clock.
+    // Chain position is derivable without a sequence index: sort by init
+    // commit id falls back to id order when chains were created together;
+    // more precisely, earlier inits have shallower reachable-depth from
+    // any common ancestor — but since each note is an independent root,
+    // publication order is best approximated by init timestamp *as recorded
+    // in the commit*, which is the store's own sequence marker. Where the
+    // clock lies, the recorded timestamp is still the authoritative claim.
+    out.sort_by(|a, b| {
+        a["timestamp"]
+            .as_str()
+            .cmp(&b["timestamp"].as_str())
+            .then_with(|| a["id"].as_str().cmp(&b["id"].as_str()))
+    });
+    out
+}
+
+/// `omd audit` — journal lifecycle: add/list/show/pass/fail/pending.
+fn cmd_audit(
+    context: &omd::sources::projects::ProjectContext,
+    action: &AuditAction,
+    expected: &Expected,
+) -> Result<serde_json::Value, AppError> {
+    match action {
+        AuditAction::Add {
+            seed,
+            direction,
+            text,
+        } => {
+            if !["both", "upstream", "downstream"].contains(&direction.as_str()) {
+                return Err(AppError::usage(format!(
+                    "direction must be both|upstream|downstream, got {direction}"
+                )));
+            }
+            let mut store = open_context_store(context)?;
+            store.lock()?;
+            store.require_identity()?;
+            store.check_expected(expected)?;
+            // The seed must resolve to something real — a commit id on any
+            // chain, or an object key. No silent audits of nothing.
+            let resolved = resolve_audit_seed(&store, seed)?;
+            let mut payload = serde_json::Map::new();
+            payload.insert("seed".into(), resolved.clone().into());
+            payload.insert("direction".into(), direction.clone().into());
+            payload.insert("text".into(), text.clone().unwrap_or_default().into());
+            payload.insert("conclusion".into(), "pending".into());
+            let cid = pipeline::commit_journal(
+                &mut store,
+                &mut NoProbe,
+                &OsRng,
+                &SystemClock,
+                "audit:pending",
+                CommitKind::AuditInit,
+                payload,
+                expected,
+            )
+            .map_err(|e| AppError::usage(e.to_string()))?;
+            Ok(serde_json::json!({
+                "ok": true,
+                "audit": cid,
+                "seed": resolved,
+                "direction": direction,
+                "conclusion": "pending",
+            }))
+        }
+        AuditAction::Pass { audit_id, text } => {
+            audit_conclusion(context, audit_id, "pass", text, expected)
+        }
+        AuditAction::Fail { audit_id, text } => {
+            audit_conclusion(context, audit_id, "fail", text, expected)
+        }
+        AuditAction::Pending { audit_id, text } => {
+            audit_conclusion(context, audit_id, "pending", text, expected)
+        }
+        AuditAction::Show { audit_id } => audit_show(context, audit_id),
+        AuditAction::List {
+            status,
+            start,
+            end,
+            touched_start,
+            touched_end,
+            limit,
+            cursor,
+        } => audit_list(
+            context,
+            status.as_deref(),
+            start.as_deref(),
+            end.as_deref(),
+            touched_start.as_deref(),
+            touched_end.as_deref(),
+            *limit,
+            cursor.as_deref(),
+        ),
+    }
+}
+
+/// Append a conclusion patch (pass|fail|pending) to an audit chain.
+fn audit_conclusion(
+    context: &omd::sources::projects::ProjectContext,
+    audit_id: &str,
+    conclusion: &str,
+    text: &Option<String>,
+    expected: &Expected,
+) -> Result<serde_json::Value, AppError> {
+    let mut store = open_context_store(context)?;
+    store.lock()?;
+    store.require_identity()?;
+    store.check_expected(expected)?;
+    let key = audit_key_of(&store, audit_id)?;
+    let mut payload = serde_json::Map::new();
+    payload.insert("conclusion".into(), conclusion.into());
+    payload.insert("text".into(), text.clone().unwrap_or_default().into());
+    let cid = pipeline::commit_journal(
+        &mut store,
+        &mut NoProbe,
+        &OsRng,
+        &SystemClock,
+        &key,
+        CommitKind::AuditPatch,
+        payload,
+        expected,
+    )
+    .map_err(|e| AppError::usage(e.to_string()))?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "audit": key.trim_start_matches("audit:"),
+        "patch": cid,
+        "conclusion": conclusion,
+    }))
+}
+
+/// The seed may be a full/prefix commit id on any chain, or an object key.
+/// Resolve to the concrete commit id the audit pins.
+fn resolve_audit_seed(store: &Store, seed: &str) -> Result<String, AppError> {
+    if omd::relations::node::is_journal_key(seed)
+        || seed.starts_with("file:")
+        || seed.starts_with("range:")
+        || seed.starts_with("peer:")
+    {
+        // Object key → pin its current tip commit.
+        let tip = store
+            .state()
+            .tips
+            .get(seed)
+            .ok_or_else(|| AppError::usage(format!("audit seed has no tip: {seed}")))?;
+        return Ok(tip.clone());
+    }
+    omd::relations::identity::resolve_commit_id(store, seed)
+        .map_err(|e| AppError::usage(format!("audit seed: {e}")))
+}
+
+/// Accept an audit chain root id or the `audit:<id>` key.
+fn audit_key_of(store: &Store, audit_id: &str) -> Result<String, AppError> {
+    let key = if audit_id.starts_with("audit:") {
+        audit_id.to_string()
+    } else {
+        format!("audit:{audit_id}")
+    };
+    if !store.state().tips.contains_key(&key) {
+        return Err(AppError::usage(format!("unknown audit: {audit_id}")));
+    }
+    Ok(key)
+}
+
+/// `omd audit show` — walk the colored map from the audit's seed along its
+/// recorded direction, judge every edge (L0–L2) and every endpoint's
+/// liveness, and attach the evidence. Pure read — writes nothing back.
+fn audit_show(
+    context: &omd::sources::projects::ProjectContext,
+    audit_id: &str,
+) -> Result<serde_json::Value, AppError> {
+    let store = open_context_store(context)?;
+    let key = audit_key_of(&store, audit_id)?;
+    let init_id = key.trim_start_matches("audit:");
+    let init = store
+        .read_commit(init_id)
+        .map_err(|e| AppError::usage(format!("audit init unreadable: {e}")))?;
+    let seed = init
+        .payload
+        .get("seed")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+    let direction = init
+        .payload
+        .get("direction")
+        .and_then(|v| v.as_str())
+        .unwrap_or("both")
+        .to_string();
+
+    // Colored map: BFS from the seed's node through links. `both` walks
+    // downstream (source→target) and upstream (target→source) as two
+    // separate maps — they answer different questions and must not merge.
+    let seed_node = omd::relations::identity::commit_to_node(&store, &seed)
+        .map(|(k, _)| k)
+        .unwrap_or_else(|_| seed.clone());
+    let links: Vec<&omd::records::store::Link> = store.state().links.values().collect();
+    let walk = |downstream: bool| {
+        // A file seed colors its mounted range children too — link
+        // endpoints name ranges, not the parent file node.
+        let mut seen_nodes = std::collections::BTreeSet::from([seed_node.clone()]);
+        if let Some(children) = store.state().mounts.get(&seed_node) {
+            for c in children {
+                seen_nodes.insert(c.clone());
+            }
+        }
+        let mut seen_links = std::collections::BTreeSet::new();
+        let mut frontier: Vec<String> = seen_nodes.iter().cloned().collect();
+        while let Some(node) = frontier.pop() {
+            for link in &links {
+                let (from, to) = if downstream {
+                    (&link.source, &link.target)
+                } else {
+                    (&link.target, &link.source)
+                };
+                if from == &node && seen_links.insert(link.link_id.clone()) {
+                    if seen_nodes.insert(to.clone()) {
+                        frontier.push(to.clone());
+                    }
+                }
+            }
+        }
+        (seen_nodes, seen_links)
+    };
+
+    let mut sections = serde_json::Map::new();
+    // `downstream` = follow arrows source→target (what the seed points at).
+    // `upstream` = walk backwards target→source (what points at the seed).
+    // The recorded direction gates which map runs — labels are honest.
+    for (name, downstream) in [("downstream", true), ("upstream", false)] {
+        if !(direction == "both"
+            || (downstream && direction == "downstream")
+            || (!downstream && direction == "upstream"))
+        {
+            continue;
+        }
+        let (nodes, link_ids) = walk(downstream);
+        let mut edges = Vec::new();
+        let mut worst = "healthy";
+        for lid in &link_ids {
+            let link = links.iter().find(|l| &l.link_id == lid).unwrap();
+            let detail = omd::relations::linkhealth::judge_link(
+                link,
+                |ep| {
+                    omd::relations::linkhealth::endpoint_alive(
+                        &store,
+                        ep,
+                        if ep == link.source {
+                            &link.source_version
+                        } else {
+                            &link.target_version
+                        },
+                    )
+                },
+                |ep| omd::relations::linkhealth::endpoint_dirty(&store, ep),
+                store
+                    .state()
+                    .link_pending
+                    .get(lid)
+                    .map(|s| s.len())
+                    .unwrap_or(0),
+            );
+            if detail.health.as_str() == "broken" {
+                worst = "broken";
+            } else if detail.health.as_str() == "obliged" && worst != "broken" {
+                worst = "obliged";
+            } else if detail.health.as_str() == "stale" && !["broken", "obliged"].contains(&worst) {
+                worst = "stale";
+            } else if detail.health.as_str() == "withdrawn"
+                && !["broken", "obliged", "stale"].contains(&worst)
+            {
+                worst = "withdrawn";
+            }
+            edges.push(serde_json::json!({
+                "link_id": link.link_id,
+                "source": link.source,
+                "target": link.target,
+                "status": detail.health.as_str(),
+                "failing_stratum": detail.failing_stratum,
+                "reason": detail.reason,
+            }));
+        }
+        sections.insert(
+            name.into(),
+            serde_json::json!({
+                "nodes": nodes,
+                "edge_count": edges.len(),
+                "worst": worst,
+                "edges": edges,
+            }),
+        );
+    }
+
+    // Current conclusion = the newest chain commit carrying `conclusion`.
+    // A Reset marker tip has none — walk previous_id to the landing point
+    // so "reset to a2(fail)" reads fail, not a phantom pending.
+    let tip = store.state().tips[&key].clone();
+    let mut cursor = tip.clone();
+    let (mut conclusion, mut text) = (String::from("pending"), String::new());
+    let mut guard = 0usize;
+    while !cursor.is_empty() && guard < 100_000 {
+        let Ok(c) = store.read_commit(&cursor) else {
+            break;
+        };
+        if let Some(v) = c.payload.get("conclusion").and_then(|v| v.as_str()) {
+            conclusion = v.to_string();
+            text = c
+                .payload
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            break;
+        }
+        cursor = c.previous_id;
+        guard += 1;
+    }
+
+    // Dual-reference checks — the audit's own references (wiki tokens in
+    // text) plus any link objects pointing at this audit, cross-checked
+    // for consistency where both mechanisms name the same relation.
+    let references = audit_reference_report(&store, init_id, &text);
+    // Only link-object failures make an audit structurally broken — wiki
+    // tokens are reviewer's notes, not wiring. A wrong token is honest
+    // annotation debt, reported as `dot_error` without exit 1.
+    let broken = sections
         .values()
-        .map(|link| link_projection(store, link))
-        .collect()
+        .any(|s| s["worst"].as_str() == Some("broken"));
+    Ok(serde_json::json!({
+        "ok": !broken,
+        "audit": init_id,
+        "seed": seed,
+        "direction": direction,
+        "conclusion": conclusion,
+        "text": text,
+        "sections": sections,
+        "references": references,
+        "broken": broken,
+    }))
+}
+
+/// Resolve `audit:<commit-id>` tokens inside audit text plus Link objects
+/// naming this audit. Returns a per-reference verdict list:
+/// - `resolved`   payload token points at a real commit on some audit chain
+/// - `link_ok`    a Link object's endpoint names this audit
+/// - `dot_error`  token names a commit that is not on any audit chain
+/// - `mismatch`   a relation expressed by BOTH mechanisms disagrees
+fn audit_reference_report(store: &Store, audit_id: &str, text: &str) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    // Payload tokens: every `audit:<hex>` substring is a wiki edge attempt.
+    let mut rest = text;
+    while let Some(i) = rest.find("audit:") {
+        let after = &rest[i + 6..];
+        let hex: String = after
+            .chars()
+            .take_while(|c| c.is_ascii_hexdigit())
+            .collect();
+        if hex.len() >= 8 {
+            // A wiki token resolves iff the pinned commit sits on an audit
+            // chain (root or mid-chain — it pins a specific commit, and a
+            // later patch on the chain must not re-point it). A commit that
+            // resolves to a non-audit chain, or nothing at all, is a dot
+            // error — the reference claims an audit point that isn't one.
+            let verdict = match omd::relations::identity::commit_to_node(store, &hex) {
+                Ok((key, _)) if key.starts_with("audit:") => "resolved",
+                _ => "dot_error",
+            };
+            out.push(serde_json::json!({
+                "kind": "wiki",
+                "reference": format!("audit:{hex}"),
+                "status": verdict,
+            }));
+        }
+        rest = &after[hex.len()..];
+    }
+    // Link objects naming this audit as an endpoint.
+    for link in store.state().links.values() {
+        for (end, pinned) in [
+            (&link.source, &link.source_version),
+            (&link.target, &link.target_version),
+        ] {
+            if end.trim_start_matches("audit:") == audit_id {
+                out.push(serde_json::json!({
+                    "kind": "link",
+                    "link_id": link.link_id,
+                    "endpoint": end,
+                    "pinned": pinned,
+                    "status": "link_ok",
+                }));
+            }
+        }
+    }
+    // Cross-consistency: a relation expressed by both mechanisms must name
+    // the same audit commit. Collect mismatch entries first so the borrow
+    // on `out` ends before we push.
+    let this_key = format!("audit:{audit_id}");
+    let mut mismatches = Vec::new();
+    for r in out.iter() {
+        if r["kind"] != "wiki" {
+            continue;
+        }
+        let refid = r["reference"].as_str().unwrap_or_default().to_string();
+        for link in store.state().links.values() {
+            let other_end = if link.source == this_key {
+                Some((&link.target, &link.target_version))
+            } else if link.target == this_key {
+                Some((&link.source, &link.source_version))
+            } else {
+                None
+            };
+            if let Some((end, pinned)) = other_end
+                && end.trim_start_matches("audit:") == refid.trim_start_matches("audit:")
+                && pinned != refid.trim_start_matches("audit:")
+            {
+                mismatches.push(serde_json::json!({
+                    "kind": "crosscheck",
+                    "reference": refid,
+                    "link_id": link.link_id,
+                    "link_pins": pinned,
+                    "status": "mismatch",
+                }));
+            }
+        }
+    }
+    out.extend(mismatches);
+    out
+}
+
+/// `omd audit list` — paged journals, filtered by status and time windows.
+#[allow(clippy::too_many_arguments)]
+fn audit_list(
+    context: &omd::sources::projects::ProjectContext,
+    status: Option<&str>,
+    start: Option<&str>,
+    end: Option<&str>,
+    touched_start: Option<&str>,
+    touched_end: Option<&str>,
+    limit: Option<usize>,
+    cursor: Option<&str>,
+) -> Result<serde_json::Value, AppError> {
+    let store = open_context_store(context)?;
+    let mut rows = Vec::new();
+    for (key, tip) in &store.state().tips {
+        if !omd::relations::node::is_audit_key(key) {
+            continue;
+        }
+        let init_id = key.trim_start_matches("audit:").to_string();
+        let Ok(init) = store.read_commit(&init_id) else {
+            continue;
+        };
+        let Ok(tipc) = store.read_commit(tip) else {
+            continue;
+        };
+        // Effective conclusion = newest chain commit carrying `conclusion`
+        // (a Reset marker tip has none — walk to the landing commit).
+        let mut cursor = tip.clone();
+        let mut conclusion = String::from("pending");
+        let mut guard = 0usize;
+        while !cursor.is_empty() && guard < 100_000 {
+            let Ok(c) = store.read_commit(&cursor) else {
+                break;
+            };
+            if let Some(v) = c.payload.get("conclusion").and_then(|v| v.as_str()) {
+                conclusion = v.to_string();
+                break;
+            }
+            cursor = c.previous_id;
+            guard += 1;
+        }
+        if let Some(want) = status
+            && conclusion != want
+        {
+            continue;
+        }
+        // Audit's own time window: init timestamp (open) and tip timestamp
+        // (latest conclusion) both qualify as "the audit's times".
+        let times = [init.timestamp.as_str(), tipc.timestamp.as_str()];
+        if let Some(s) = start
+            && times.iter().all(|t| *t < s)
+        {
+            continue;
+        }
+        if let Some(e) = end
+            && times.iter().all(|t| *t > e)
+        {
+            continue;
+        }
+        let seed = init
+            .payload
+            .get("seed")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        // Touched window: any link-endpoint pinned version's commit time in
+        // the audit's colored region inside the window qualifies. Computed
+        // lazily only when the filter is active — timestamps are a read
+        // projection, never written.
+        if touched_start.is_some() || touched_end.is_some() {
+            let seed_node = omd::relations::identity::commit_to_node(&store, &seed)
+                .map(|(k, _)| k)
+                .unwrap_or_else(|_| seed.clone());
+            // Colored region honors the audit's recorded direction — an
+            // upstream-only audit's map must not cover downstream edges.
+            let direction = init
+                .payload
+                .get("direction")
+                .and_then(|v| v.as_str())
+                .unwrap_or("both");
+            let mut nodes = std::collections::BTreeSet::from([seed_node.clone()]);
+            // A file seed colors its mounted range children too — link
+            // endpoints name ranges, not the parent file.
+            if let Some(children) = store.state().mounts.get(&seed_node) {
+                for c in children {
+                    nodes.insert(c.clone());
+                }
+            }
+            let mut frontier: Vec<String> = nodes.iter().cloned().collect();
+            while let Some(n) = frontier.pop() {
+                for link in store.state().links.values() {
+                    let steps: &[(&String, &String)] = match direction {
+                        "upstream" => &[(&link.target, &link.source)],
+                        "downstream" => &[(&link.source, &link.target)],
+                        _ => &[(&link.source, &link.target), (&link.target, &link.source)],
+                    };
+                    for (a, b) in steps {
+                        if *a == &n && nodes.insert((*b).clone()) {
+                            frontier.push((*b).clone());
+                        }
+                    }
+                }
+            }
+            let mut hit = false;
+            for link in store.state().links.values() {
+                if !(nodes.contains(&link.source) || nodes.contains(&link.target)) {
+                    continue;
+                }
+                for pinned in [&link.source_version, &link.target_version] {
+                    if let Ok(c) = store.read_commit(pinned) {
+                        let t = c.timestamp.as_str();
+                        let after = touched_start.map(|s| t >= s).unwrap_or(true);
+                        let before = touched_end.map(|e| t <= e).unwrap_or(true);
+                        if after && before {
+                            hit = true;
+                        }
+                    }
+                }
+            }
+            if !hit {
+                continue;
+            }
+        }
+        rows.push(serde_json::json!({
+            "audit": init_id,
+            "seed": seed,
+            "direction": init.payload.get("direction").and_then(|v| v.as_str()).unwrap_or("both"),
+            "conclusion": conclusion,
+            "opened": init.timestamp,
+            "updated": tipc.timestamp,
+            "tip": tip,
+        }));
+    }
+    rows.sort_by(|a, b| a["audit"].as_str().cmp(&b["audit"].as_str()));
+    let total = rows.len();
+    let lim = limit.unwrap_or(LINKS_DEFAULT_LIMIT).min(LINKS_MAX_LIMIT);
+    let capped = limit.unwrap_or(LINKS_DEFAULT_LIMIT) > LINKS_MAX_LIMIT;
+    let offset = cursor.and_then(cursor_offset).unwrap_or(0);
+    let page: Vec<_> = rows.into_iter().skip(offset).take(lim).collect();
+    let has_more = offset + page.len() < total;
+    let mut out = serde_json::json!({
+        "ok": true,
+        "total": total,
+        "limit": lim,
+        "offset": offset,
+        "has_more": has_more,
+        "next": if has_more { serde_json::json!((offset + page.len()).to_string()) } else { serde_json::Value::Null },
+        "items": page,
+    });
+    if capped {
+        out.as_object_mut().unwrap().insert(
+            "note".into(),
+            serde_json::json!(format!("limit capped at {LINKS_MAX_LIMIT}")),
+        );
+    }
+    Ok(out)
+}
+
+/// `--links` embed. Reuses the same judging and paging code path.
+fn links_detail_page(
+    store: &Store,
+    filter: &LinkDetailFilter,
+) -> Result<serde_json::Value, AppError> {
+    links_report(
+        store,
+        &LinksQuery {
+            status: filter.status.clone(),
+            node: filter.node.clone(),
+            id: None,
+            stratum: None,
+            limit: Some(LINKS_DEFAULT_LIMIT),
+            cursor: None,
+            full: false,
+            enumerate: true,
+        },
+    )
+}
+
+/// The `omd links` query surface: summary by default, filtered detail on
+/// explicit request. L0–L2 health judgment never reads source content.
+fn cmd_links(
+    context: &omd::sources::projects::ProjectContext,
+    query: LinksQuery,
+) -> Result<serde_json::Value, AppError> {
+    let store = open_context_store(context)?;
+    links_report(&store, &query)
+}
+
+/// Core links report over an open store — shared by the `omd links` verb
+/// and the verify/check `--links` embed.
+fn links_report(store: &Store, query: &LinksQuery) -> Result<serde_json::Value, AppError> {
+    let state = store.state();
+    let links: Vec<&omd::records::store::Link> = state.links.values().collect();
+
+    // Derived strata + health for every current link (state-only reads).
+    let strata = omd::relations::linkhealth::link_strata(
+        &links.iter().map(|l| (*l).clone()).collect::<Vec<_>>(),
+    );
+    let pending_of = |id: &str| state.link_pending.get(id).map(|s| s.len()).unwrap_or(0);
+    let judged: Vec<(
+        &omd::records::store::Link,
+        omd::relations::linkhealth::HealthDetail,
+    )> = links
+        .iter()
+        .map(|link| {
+            let detail = omd::relations::linkhealth::judge_link(
+                link,
+                |ep| {
+                    omd::relations::linkhealth::endpoint_alive(
+                        &store,
+                        ep,
+                        &if ep == link.source {
+                            &link.source_version
+                        } else {
+                            &link.target_version
+                        },
+                    )
+                },
+                |ep| omd::relations::linkhealth::endpoint_dirty(&store, ep),
+                pending_of(&link.link_id),
+            );
+            (*link, detail)
+        })
+        .collect();
+
+    // Command endpoints that were not run this call: unchecked count only.
+    let unchecked = judged
+        .iter()
+        .filter(|(link, _)| endpoint_is_unrun_command(&store, link))
+        .count();
+
+    let by_status: serde_json::Map<String, serde_json::Value> = {
+        let mut counts = serde_json::Map::new();
+        for state_name in ["healthy", "obliged", "stale", "withdrawn", "broken"] {
+            counts.insert(
+                state_name.into(),
+                judged
+                    .iter()
+                    .filter(|(_, d)| d.health.as_str() == state_name)
+                    .count()
+                    .into(),
+            );
+        }
+        counts.insert("unchecked".into(), unchecked.into());
+        counts
+    };
+    let by_stratum: serde_json::Map<String, serde_json::Value> = {
+        let mut counts: std::collections::BTreeMap<u64, u64> = Default::default();
+        for (link, _) in &judged {
+            *counts
+                .entry(*strata.get(&link.source).unwrap_or(&0))
+                .or_default() += 1;
+        }
+        counts
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v.into()))
+            .collect()
+    };
+
+    // Single-link mode: full detail, no other links.
+    if let Some(id) = &query.id {
+        let entry = judged.iter().find(|(link, _)| &link.link_id == id);
+        let Some((link, detail)) = entry else {
+            return Err(AppError::new(
+                ErrorKind::Usage,
+                format!("no link with id {id}"),
+            ));
+        };
+        return Ok(serde_json::json!({
+            "ok": true,
+            "link": link_detail(&store, link, detail, &strata, true),
+        }));
+    }
+
+    // Summary mode (bare `omd links`) vs. detail mode (`omd links list`):
+    // the caller distinguishes them — a bare summary query has no action
+    // fields at all (status/node/stratum/limit/cursor/full all absent and
+    // `enumerate` false).
+    if !query.enumerate {
+        // Summary only — bounded, independent of store size.
+        return Ok(serde_json::json!({
+            "ok": true,
+            "total": judged.len(),
+            "by_status": by_status,
+            "by_stratum": by_stratum,
+        }));
+    }
+
+    // Detail list with paging — unfiltered enumerate-all is the spec'd
+    // default for `links list` (cursor traversal reaches the full set).
+    let status_match = |d: &omd::relations::linkhealth::HealthDetail| {
+        query
+            .status
+            .as_deref()
+            .map(|s| d.health.as_str() == s)
+            .unwrap_or(true)
+    };
+    let node_match = |link: &omd::records::store::Link| {
+        query
+            .node
+            .as_deref()
+            .map(|n| link.source == n || link.target == n)
+            .unwrap_or(true)
+    };
+    let stratum_match = |link: &omd::records::store::Link| {
+        query
+            .stratum
+            .map(|want| strata.get(&link.source) == Some(&want))
+            .unwrap_or(true)
+    };
+    let filtered: Vec<_> = judged
+        .iter()
+        .filter(|(link, detail)| status_match(detail) && node_match(link) && stratum_match(link))
+        .collect();
+
+    let total = filtered.len();
+    let limit = query
+        .limit
+        .unwrap_or(LINKS_DEFAULT_LIMIT)
+        .min(LINKS_MAX_LIMIT);
+    let capped = query.limit.unwrap_or(LINKS_DEFAULT_LIMIT) > LINKS_MAX_LIMIT;
+    let offset = query.cursor.as_deref().and_then(cursor_offset).unwrap_or(0);
+    let page: Vec<_> = filtered.iter().skip(offset).take(limit).collect();
+    let has_more = offset + page.len() < total;
+    let mut out = serde_json::json!({
+        "ok": true,
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "has_more": has_more,
+        "next": if has_more { serde_json::json!((offset + page.len()).to_string()) } else { serde_json::Value::Null },
+        "items": page
+            .iter()
+            .map(|(link, detail)| link_detail(&store, link, detail, &strata, query.full))
+            .collect::<Vec<_>>(),
+    });
+    if capped {
+        out.as_object_mut().unwrap().insert(
+            "note".into(),
+            serde_json::json!(format!("limit capped at {LINKS_MAX_LIMIT}")),
+        );
+    }
+    Ok(out)
+}
+
+/// Is an endpoint a command source this call did not run? (L1.5 read-only
+/// check on the acquisition kind — never executes anything.)
+fn endpoint_is_unrun_command(store: &Store, link: &omd::records::store::Link) -> bool {
+    for (endpoint, pinned) in [
+        (&link.source, &link.source_version),
+        (&link.target, &link.target_version),
+    ] {
+        if endpoint.starts_with("peer:") {
+            continue;
+        }
+        // The pinned version names the version the link was created against;
+        // its acquisition kind decides judgeability.
+        let Ok(commit) = store.read_commit(pinned) else {
+            continue;
+        };
+        if commit.content_ref == "empty" {
+            continue;
+        }
+        if let Ok(version) = store.read_version(commit.content_ref.as_str())
+            && matches!(
+                version.acquisition,
+                omd::sources::reference::SourceDescriptor::Command { .. }
+            )
+        {
+            return true;
+        }
+    }
+    false
+}
+
+fn link_detail(
+    store: &Store,
+    link: &omd::records::store::Link,
+    detail: &omd::relations::linkhealth::HealthDetail,
+    strata: &std::collections::BTreeMap<String, u64>,
+    full: bool,
+) -> serde_json::Value {
+    let base = serde_json::json!({
+        "link_id": link.link_id,
+        "status": detail.health.as_str(),
+        "source": link.source,
+        "target": link.target,
+        "stratum": strata.get(&link.source).copied().unwrap_or(0),
+    });
+    if !full {
+        return base;
+    }
+    let mut value = base;
+    value
+        .as_object_mut()
+        .unwrap()
+        .insert("full".into(), link_projection(store, link));
+    value.as_object_mut().unwrap().insert(
+        "failing_stratum".into(),
+        detail.failing_stratum.map(i64::from).into(),
+    );
+    value.as_object_mut().unwrap().insert(
+        "reason".into(),
+        detail
+            .reason
+            .clone()
+            .map(serde_json::Value::String)
+            .unwrap_or(serde_json::Value::Null),
+    );
+    value
 }
 
 fn successful_member(kind: &str, id: impl Into<String>) -> serde_json::Value {
@@ -2573,6 +3645,29 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                 payload.insert("mount".into(), file_node.clone().into());
             }
             if let Some(r) = reason {
+                // `audit:<id>` tokens in an unclean reason must resolve — a
+                // dangling ref silently breaks the finding→fix backtrace.
+                if kind == CommitKind::Unclean {
+                    let mut rest = r.as_str();
+                    while let Some(i) = rest.find("audit:") {
+                        let after = &rest[i + 6..];
+                        let hex: String = after
+                            .chars()
+                            .take_while(|c| c.is_ascii_hexdigit())
+                            .collect();
+                        if hex.len() >= 8 {
+                            let ok = omd::relations::identity::commit_to_node(&store, &hex)
+                                .map(|(k, _)| k.starts_with("audit:"))
+                                .unwrap_or(false);
+                            if !ok {
+                                return Err(AppError::usage(format!(
+                                    "unclean reason cites unknown audit commit: audit:{hex}"
+                                )));
+                            }
+                        }
+                        rest = &after[hex.len()..];
+                    }
+                }
                 payload.insert("reason".into(), r.clone().into());
             }
             if let Some(r) = requested_range {
@@ -2846,7 +3941,11 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                         .map_err(|e| AppError::usage(format!("--reset-target: {e}")))?;
                     let (reset_node, _) = omd::relations::identity::commit_to_node(&store, &target)
                         .map_err(|e| AppError::usage(format!("--reset-target: {e}")))?;
-                    let belongs_to_file = if omd::relations::node::is_range_key(&reset_node) {
+                    let belongs_to_file = if omd::relations::node::is_journal_key(&reset_node) {
+                        // Journal chains (audit:/note:) are reset by their own
+                        // commit ids — the file argument is irrelevant to them.
+                        true
+                    } else if omd::relations::node::is_range_key(&reset_node) {
                         omd::relations::node::parent_of(store.state(), &reset_node)
                             == Some(file_node.as_str())
                     } else {
@@ -3404,14 +4503,20 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                 .as_object_mut()
                 .unwrap()
                 .insert("expected".into(), serde_json::to_value(expected).unwrap());
+            // Flood fix: counts by default; explicit --links filter pages
+            // detail through the shared links query surface.
             value
                 .as_object_mut()
                 .unwrap()
-                .insert("objects".into(), current_objects(&store)?.into());
+                .insert("link_count".into(), store.state().links.len().into());
             value
                 .as_object_mut()
                 .unwrap()
-                .insert("links".into(), current_links(&store).into());
+                .insert("object_count".into(), store.state().tips.len().into());
+            if let Some(filter) = link_detail_filter(cli) {
+                let page = links_detail_page(&store, &filter)?;
+                value.as_object_mut().unwrap().insert("links".into(), page);
+            }
             Ok(value)
         }
         Cmd::Check { path } => {
@@ -3614,8 +4719,14 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                 }));
             }
             report.insert("rules".into(), rules_out.into());
-            report.insert("objects".into(), current_objects(&store)?.into());
-            report.insert("links".into(), current_links(&store).into());
+            // Flood fix: counts by default; explicit --links filter pages
+            // detail through the shared links query surface.
+            report.insert("link_count".into(), store.state().links.len().into());
+            report.insert("object_count".into(), store.state().tips.len().into());
+            if let Some(filter) = link_detail_filter(cli) {
+                let page = links_detail_page(&store, &filter)?;
+                report.insert("links".into(), page);
+            }
             if !capture.cosmetic.is_empty() {
                 report.insert(
                     "cosmetic".into(),
@@ -3698,40 +4809,64 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
             // Seq is max-of-notes+1 — two concurrent writers must serialize
             // or they'd compute the same seq. Lock around the read+append.
             store.lock()?;
+            // Flat-file note format is rejected, never migrated: any
+            // notes/<id>.toml present means this store carries the old
+            // shape and the caller must rebuild notes as chain commits.
+            reject_flat_notes(&root)?;
             if action != "list" {
                 store.require_identity()?;
                 store.check_expected(&expected)?;
             }
             match action.as_str() {
-                "add" | "patch" | "delete" => {
-                    // Publication order is monotonic, never the clock — the
-                    // next seq is the max already-published seq + 1 (the
-                    // store publication counter counts commits, not notes).
-                    let seq = omd::records::notes::list_for(&root, commit_id)
-                        .iter()
-                        .map(|n| n.seq)
-                        .max()
-                        .unwrap_or(0)
-                        + 1;
-                    let mut idb = [0u8; 16];
-                    omd::testing::Rng::fill(&OsRng, &mut idb);
-                    let note = omd::records::notes::Note {
-                        id: hex::encode(idb),
-                        timestamp: omd::records::commit::Commit::format_timestamp(
-                            omd::testing::Clock::now(&SystemClock).0,
-                        ),
-                        commit_id: commit_id.clone(),
-                        kind: action.clone(),
-                        target_note_id: target.clone().unwrap_or_default(),
-                        text: text.clone().unwrap_or_default(),
-                        seq,
+                "add" => {
+                    let mut payload = serde_json::Map::new();
+                    payload.insert("target".into(), commit_id.clone().into());
+                    payload.insert("text".into(), text.clone().unwrap_or_default().into());
+                    let cid = pipeline::commit_journal(
+                        &mut store,
+                        &mut NoProbe,
+                        &OsRng,
+                        &SystemClock,
+                        "note:pending",
+                        CommitKind::NoteInit,
+                        payload,
+                        &expected,
+                    )
+                    .map_err(|e| AppError::usage(e.to_string()))?;
+                    Ok(serde_json::json!({ "ok": true, "note": cid, "kind": "add" }))
+                }
+                "patch" | "delete" => {
+                    // The note's chain root is its first commit id —
+                    // `--target` names it (note:<init-cid> or bare init cid).
+                    let target_id = target.clone().ok_or_else(|| {
+                        AppError::usage(format!(
+                            "note {action} requires --target <note-init-commit-id>"
+                        ))
+                    })?;
+                    let chain_key = if target_id.starts_with("note:") {
+                        target_id.clone()
+                    } else {
+                        format!("note:{target_id}")
                     };
-                    let nid = omd::records::notes::append(&root, &note)
-                        .map_err(|e| AppError::io(e.to_string()))?;
-                    Ok(serde_json::json!({ "ok": true, "note": nid, "kind": action }))
+                    let mut payload = serde_json::Map::new();
+                    payload.insert("kind".into(), action.clone().into());
+                    payload.insert("target".into(), commit_id.clone().into());
+                    payload.insert("text".into(), text.clone().unwrap_or_default().into());
+                    let cid = pipeline::commit_journal(
+                        &mut store,
+                        &mut NoProbe,
+                        &OsRng,
+                        &SystemClock,
+                        &chain_key,
+                        CommitKind::NotePatch,
+                        payload,
+                        &expected,
+                    )
+                    .map_err(|e| AppError::usage(e.to_string()))?;
+                    Ok(serde_json::json!({ "ok": true, "note": cid, "kind": action }))
                 }
                 "list" => {
-                    let notes = omd::records::notes::list_for(&root, commit_id);
+                    let notes = list_note_chains(&store, commit_id);
                     Ok(serde_json::json!({ "ok": true, "commit_id": commit_id, "notes": notes }))
                 }
                 other => Err(AppError::usage(format!("unknown note action: {other}"))),
@@ -4363,13 +5498,18 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                     keep.insert(link.created_by.clone());
                 }
                 // Notes referencing a commit keep it (evidence of record).
-                if let Ok(rd) = std::fs::read_dir(root.join("notes")) {
-                    for e in rd.flatten() {
-                        if let Ok(txt) = std::fs::read_to_string(e.path())
-                            && let Ok(n) = toml::from_str::<omd::records::notes::Note>(&txt)
-                        {
-                            keep.insert(n.commit_id.clone());
-                        }
+                // Chain notes: the init commit's `target` payload names the
+                // annotated commit; the note's own chain is already kept by
+                // the reachable set (its key is in tips).
+                for key in store.state().tips.keys() {
+                    if !omd::relations::node::is_note_key(key) {
+                        continue;
+                    }
+                    let init_id = key.trim_start_matches("note:");
+                    if let Ok(init) = store.read_commit(init_id)
+                        && let Some(target) = init.payload.get("target").and_then(|v| v.as_str())
+                    {
+                        keep.insert(target.to_string());
                     }
                 }
                 // Every protected commit keeps its immutable ancestry and
@@ -4420,16 +5560,8 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
                     for id in &collected {
                         let _ = std::fs::remove_file(root.join(format!("commits/{id}.toml")));
                     }
-                    if let Ok(entries) = std::fs::read_dir(root.join("notes")) {
-                        for entry in entries.flatten() {
-                            if let Ok(text) = std::fs::read_to_string(entry.path())
-                                && let Ok(note) = toml::from_str::<omd::records::notes::Note>(&text)
-                                && collected_set.contains(&note.commit_id)
-                            {
-                                let _ = std::fs::remove_file(entry.path());
-                            }
-                        }
-                    }
+                    // Chain notes live in commits/ — collected note commits
+                    // are removed by the same loop; no separate note dir.
                 }
             }
             // Report WHY each target is retained — the offline consumer's
@@ -4529,30 +5661,75 @@ fn run(cli: &Cli) -> Result<serde_json::Value, AppError> {
         }
         Cmd::List { dangling } => {
             let store = open_context_store(&context)?;
-            let objects = current_objects(&store)?;
-            let links = current_links(&store);
+            // Flood fix: counts + paged detail, never a full dump.
+            let mut out = serde_json::json!({
+                "ok": true,
+                "object_count": store.state().tips.len(),
+                "link_count": store.state().links.len(),
+                "open_block_count": store
+                    .state()
+                    .open_blocks
+                    .iter()
+                    .filter(|(_, v)| !v.is_empty())
+                    .count(),
+            });
             if *dangling {
                 let dangling = dangling_ids(&store, &root);
-                let records: Result<Vec<_>, _> = dangling
-                    .iter()
-                    .map(|commit_id| commit_projection(&store, commit_id, false))
-                    .collect();
-                Ok(serde_json::json!({
-                    "ok": true,
-                    "dangling": dangling,
-                    "records": records?,
-                    "objects": objects,
-                    "links": links,
-                }))
-            } else {
-                Ok(serde_json::json!({
-                    "ok": true,
-                    "tips": store.state().tips,
-                    "objects": objects,
-                    "links": links,
-                }))
+                out.as_object_mut()
+                    .unwrap()
+                    .insert("dangling_count".into(), dangling.len().into());
             }
+            Ok(out)
         }
+        Cmd::Audit { action } => cmd_audit(&context, action, &expected),
+        Cmd::Links { action } => match action {
+            None => cmd_links(
+                &context,
+                LinksQuery {
+                    status: None,
+                    node: None,
+                    id: None,
+                    stratum: None,
+                    limit: None,
+                    cursor: None,
+                    full: false,
+                    enumerate: false,
+                },
+            ),
+            Some(LinksAction::List {
+                status,
+                node,
+                stratum,
+                limit,
+                cursor,
+                full,
+            }) => cmd_links(
+                &context,
+                LinksQuery {
+                    status: status.clone(),
+                    node: node.clone(),
+                    id: None,
+                    stratum: *stratum,
+                    limit: *limit,
+                    cursor: cursor.clone(),
+                    full: *full,
+                    enumerate: true,
+                },
+            ),
+            Some(LinksAction::Show { link_id }) => cmd_links(
+                &context,
+                LinksQuery {
+                    status: None,
+                    node: None,
+                    id: Some(link_id.clone()),
+                    stratum: None,
+                    limit: None,
+                    cursor: None,
+                    full: true,
+                    enumerate: true,
+                },
+            ),
+        },
     }
 }
 

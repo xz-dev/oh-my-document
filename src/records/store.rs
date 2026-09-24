@@ -1074,7 +1074,7 @@ impl Store {
             let (kind, indexed_root) = node
                 .split_once(':')
                 .ok_or_else(|| StoreError::Record(format!("invalid object key in tips: {node}")))?;
-            if !matches!(kind, "file" | "range") || indexed_root.is_empty() {
+            if !matches!(kind, "file" | "range" | "audit" | "note") || indexed_root.is_empty() {
                 return Err(StoreError::Record(format!(
                     "invalid object key in tips: {node}"
                 )));
@@ -1123,6 +1123,18 @@ impl Store {
                         )));
                     }
                     None => {}
+                }
+            } else if matches!(kind, "audit" | "note") {
+                // Journal objects are roots — never mounted, never located.
+                if self.state.locations.contains_key(node) {
+                    return Err(StoreError::Record(format!(
+                        "journal object has file location entry: {node}"
+                    )));
+                }
+                if projected_ranges.contains(node) {
+                    return Err(StoreError::Record(format!(
+                        "journal object is mounted as a range: {node}"
+                    )));
                 }
             } else {
                 if self.state.locations.contains_key(node) {

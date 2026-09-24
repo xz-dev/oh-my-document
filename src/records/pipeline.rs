@@ -105,6 +105,10 @@ fn published_node_key(locator: &str, is_first: bool, commit_id: &str) -> String 
         crate::relations::node::file_key(commit_id)
     } else if is_first && locator == "range:pending" {
         crate::relations::node::range_key(commit_id)
+    } else if is_first && locator == "audit:pending" {
+        crate::relations::node::audit_key(commit_id)
+    } else if is_first && locator == "note:pending" {
+        crate::relations::node::note_key(commit_id)
     } else {
         locator.to_string()
     }
@@ -773,14 +777,15 @@ pub fn commit_link(
     reason: &str,
     expected: &Expected,
 ) -> Result<String, PipelineError> {
-    // Local link creation accepts local range nodes only. Cross-store
-    // endpoints must pass through commit_xlink, which validates store scope
-    // and target existence before publication.
-    if !crate::relations::node::is_range_key(source)
-        || !crate::relations::node::is_range_key(target)
-    {
+    // Local link endpoints: range objects, plus journal objects (audit/note
+    // chain roots) — the fix-commit→audit backlink and audit-wiki edges need
+    // them. Cross-store endpoints still go through commit_xlink.
+    let endpoint_ok = |k: &str| {
+        crate::relations::node::is_range_key(k) || crate::relations::node::is_journal_key(k)
+    };
+    if !endpoint_ok(source) || !endpoint_ok(target) {
         return Err(PipelineError::Commit(
-            "local links connect local ranges; use a cross-store link entry for peer endpoints"
+            "local links connect local ranges or journal objects; use a cross-store link entry for peer endpoints"
                 .into(),
         ));
     }
@@ -869,6 +874,108 @@ pub fn commit_link(
     new_state.link_pending.entry(link_id.clone()).or_default();
     store.publish(probe, &commit, &cid, None, None, new_state)?;
     Ok(link_id)
+}
+
+/// Append a commit to an audit/note journal chain — the shared linear-tree
+/// publish for `audit:<root>` / `note:<root>` objects. Journals observe no
+/// source content (content_ref stays "empty"); their entire state is the
+/// commit chain itself plus the tips map. `node_locator` for a first commit
+/// is the sentinel `audit:pending`/`note:pending` — the published key
+/// becomes `<kind>:<first-commit-id>` (self-referential root, same shape as
+/// `range:pending` → `range:<cid>`). Later commits pass the real key and
+/// chain onto the current tip via `previous_id`.
+#[allow(clippy::too_many_arguments)]
+pub fn commit_journal(
+    store: &mut Store,
+    probe: &mut dyn PublishProbe,
+    rng: &dyn Rng,
+    clock: &dyn Clock,
+    node_locator: &str,
+    kind: CommitKind,
+    payload: serde_json::Map<String, serde_json::Value>,
+    expected: &Expected,
+) -> Result<String, PipelineError> {
+    use crate::relations::node;
+    let is_journal_kind = matches!(
+        kind,
+        CommitKind::AuditInit
+            | CommitKind::AuditPatch
+            | CommitKind::NoteInit
+            | CommitKind::NotePatch
+    );
+    if !is_journal_kind {
+        return Err(PipelineError::Commit(format!(
+            "commit_journal only accepts journal kinds, got {}",
+            crate::records::commit::kind_name(kind)
+        )));
+    }
+    // Sentinel discipline: init goes to `audit:pending`/`note:pending`;
+    // patches must name the real published key. Mismatched sentinel/kind
+    // is a usage error, not a silent publish to a stray node.
+    let first = matches!(kind, CommitKind::AuditInit | CommitKind::NoteInit);
+    let sentinel_ok = match kind {
+        CommitKind::AuditInit => node_locator == "audit:pending",
+        CommitKind::NoteInit => node_locator == "note:pending",
+        _ => node::is_journal_key(node_locator),
+    };
+    if !sentinel_ok {
+        return Err(PipelineError::Commit(format!(
+            "journal locator {node_locator} does not match kind {}",
+            crate::records::commit::kind_name(kind)
+        )));
+    }
+    store.lock()?;
+    store.require_write_authority()?;
+    store.check_expected(expected)?;
+    let is_first = !store.state().tips.contains_key(node_locator);
+    if first != is_first && !first {
+        // A patch against a key with no tip is an unknown journal —
+        // fail loudly instead of starting a second root.
+        return Err(PipelineError::Commit(format!(
+            "journal node does not exist: {node_locator}"
+        )));
+    }
+
+    let empty_obs = Observation {
+        bytes: Vec::new(),
+        text: false,
+        encoding: None,
+    };
+    let version = make_version(
+        rng,
+        &empty_obs,
+        Acquisition::File {
+            project: "root".into(),
+            path: "".into(),
+        },
+    );
+    let prev = if first {
+        String::new()
+    } else {
+        store.state().tips[node_locator].clone()
+    };
+    let commit = {
+        let mut c = make_commit(rng, clock, kind, &prev, &version, payload);
+        // Journal commits consume no source bytes — content_ref is "empty";
+        // a phantom version id would point at a record never written.
+        c.content_ref = "empty".into();
+        c
+    };
+    commit
+        .validate(is_first)
+        .map_err(|e| PipelineError::Commit(e.to_string()))?;
+    let cid = commit
+        .derive_id(b"")
+        .map_err(|e| PipelineError::Commit(e.to_string()))?
+        .to_hex();
+
+    let published_key = published_node_key(node_locator, is_first, &cid);
+    let mut new_state: State = store.state().clone();
+    new_state.publication += 1;
+    new_state.tips.insert(published_key, cid.clone());
+    new_state.retained.push(cid.clone());
+    store.publish(probe, &commit, &cid, None, None, new_state)?;
+    Ok(cid)
 }
 
 /// Result of the cross-store protection-before-publication protocol.

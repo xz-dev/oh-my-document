@@ -102,6 +102,33 @@ pub fn is_peer_key(key: &str) -> bool {
     key.starts_with("peer:")
 }
 
+/// Key for an audit object rooted at `root_commit_id`.
+pub fn audit_key(root_commit_id: &str) -> String {
+    format!("audit:{root_commit_id}")
+}
+
+/// Key for a note object rooted at `root_commit_id`.
+pub fn note_key(root_commit_id: &str) -> String {
+    format!("note:{root_commit_id}")
+}
+
+/// Does `key` name an audit object?
+pub fn is_audit_key(key: &str) -> bool {
+    key.starts_with("audit:")
+}
+
+/// Does `key` name a note object?
+pub fn is_note_key(key: &str) -> bool {
+    key.starts_with("note:")
+}
+
+/// Does `key` name an append-only journal object (audit or note)?
+/// These chains share the range/file commit machinery but are linear
+/// roots — never mounted under a file.
+pub fn is_journal_key(key: &str) -> bool {
+    is_audit_key(key) || is_note_key(key)
+}
+
 /// The node a range mounts under — looked up in the mount tree, never
 /// parsed out of the key (the key carries no location).
 pub fn parent_of<'a>(state: &'a State, key: &str) -> Option<&'a str> {

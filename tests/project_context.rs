@@ -759,9 +759,19 @@ fn explicit_nested_root_uses_its_own_metadata_for_reads_and_writes() {
     );
     assert_ok(&list);
     let value: serde_json::Value = serde_json::from_slice(&list.stdout).unwrap();
-    let tips = value["data"]["tips"].to_string();
-    assert!(tips.contains(&child_commit), "child tips missing: {tips}");
-    assert!(!tips.contains(&parent_commit), "parent tips leaked: {tips}");
+    // list is a bounded summary now; assert separation through the state
+    // tips map + the object count, which reads only the selected store.
+    let data = &value["data"];
+    assert_eq!(
+        data["object_count"],
+        serde_json::json!(2),
+        "child store only: init + range"
+    );
+    let st = std::fs::read_to_string(child_meta.join("state.toml")).unwrap();
+    assert!(st.contains(&child_commit), "child tips missing");
+    assert!(!st.contains(&parent_commit), "parent tips leaked");
+    let parent_st = std::fs::read_to_string(parent_meta.join("state.toml")).unwrap();
+    assert!(!parent_st.contains(&child_commit), "child leaked up");
 
     std::fs::write(child.join("c.md"), "child-only\n").unwrap();
     let parent_before = snapshot(&parent_meta);

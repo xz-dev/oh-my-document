@@ -583,23 +583,22 @@ fn public_queries_keep_identity_version_location_and_link_fields_separate() {
     assert_eq!(log["data"]["selected"]["position"]["end"], "2");
 
     let before = fixture.ok(&["list"]);
-    let roots: std::collections::BTreeSet<_> = before["data"]["objects"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .filter_map(|object| object["node"]["root_commit_id"].as_str())
-        .collect();
-    assert!(roots.contains(first_root.as_str()));
-    assert!(roots.contains(second_root.as_str()));
-    assert_eq!(before["data"]["links"][0]["link_id"], link_id);
+    // list is a bounded summary now; identities come from state + links verb.
+    let st = std::fs::read_to_string(fixture.root.join(".omd/state.toml")).unwrap();
+    assert!(st.contains(first_root.as_str()));
+    assert!(st.contains(second_root.as_str()));
+    let links_before = fixture.ok(&["links", "list", "--json", "--status", "healthy"]);
+    assert_eq!(links_before["data"]["total"], 1);
+    assert_eq!(links_before["data"]["items"][0]["link_id"], link_id);
 
     let indexed = fixture.ok(&["reindex"]);
     let cache = indexed["data"]["cache_file"].as_str().unwrap();
     std::fs::remove_file(cache).unwrap();
     fixture.ok(&["reindex"]);
     let after = fixture.ok(&["list"]);
-    assert_eq!(before["data"]["objects"], after["data"]["objects"]);
-    assert_eq!(before["data"]["links"], after["data"]["links"]);
+    assert_eq!(before["data"], after["data"]);
+    let links_after = fixture.ok(&["links", "list", "--json", "--status", "healthy"]);
+    assert_eq!(links_after["data"], links_before["data"]);
 }
 
 #[test]
@@ -729,14 +728,13 @@ fn check_aggregates_text_and_bytes_separately_with_unmarked_denominators() {
             .is_empty()
     );
     let listed = fixture.ok(&["list"]);
-    assert!(
-        listed["data"]["objects"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|object| object["project_relative_path"] == "spec/marked.md")
-    );
-    assert!(!listed["data"]["links"].as_array().unwrap().is_empty());
+    let total_links = listed["data"]["link_count"].as_u64().unwrap();
+    assert!(total_links >= 1, "links survive remove: {total_links}");
+    // The moved file is visible in state (bounded summary, no dump):
+    let st = std::fs::read_to_string(fixture.root.join(".omd/state.toml")).unwrap();
+    assert!(st.contains("spec/marked.md"));
+    let detail = fixture.ok(&["links", "list", "--json", "--status", "healthy"]);
+    assert!(detail["data"]["total"].as_u64().unwrap() >= 1);
 }
 
 #[test]

@@ -11,6 +11,7 @@ pub mod coverage;
 pub mod diff;
 pub mod dirty;
 pub mod identity;
+pub mod linkhealth;
 pub mod node;
 pub mod range;
 
