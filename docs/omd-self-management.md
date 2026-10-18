@@ -58,3 +58,10 @@ store：`807eb8461236449b83038cb47c18e3af`。
 真实使用已覆盖初始化、文件/目录统计、范围/link、查询以及检测真实规格移动。适配/clean/unclean、来源替换、跨项目、reset/GC/activate 尚未在本仓库实际运行；不为演练制造破坏。Skill 的其他分支明确区分契约与实践。
 
 仓库内 skill 尚未全局安装。未提交推送、安装 hook、同步主规格或归档 change。
+
+## 2026-10-18 audit-ledger / link-query 新增文件纳管
+
+- 新增 import（Import 类型对象，无范围确认）：`src/relations/linkhealth.rs` (chain_root `02147d2b…`)、`tests/audit.rs` (`94fd7c60…`)、`tests/journal.rs` (`99056d39…`)。
+- 串行写入，每次用新观察凭据；三次 verify 均 exit 0、dirty 空。
+- 假设记录：导入仅作统计纳入，未新建 link/范围 —— 等所有者选定真实范围再标。
+- `.omd/notes/` 空，旧平文件格式无迁移需求。
