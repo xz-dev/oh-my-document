@@ -1,0 +1,12 @@
+salt = "xYAVKeTzbddxPpBI"
+previous_id = ""
+timestamp = "2026-10-18T16:10:41.929553661Z"
+schema = "omd.commit/3"
+kind = "import"
+content_ref = "empty"
+
+[payload]
+exclude = []
+include = []
+path = "src/relations/linkhealth.rs"
+scope = []

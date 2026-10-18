@@ -1,0 +1,16 @@
+format = "omd.version/2"
+id = [60, 39, 71, 226, 48, 201, 186, 93, 6, 179, 107, 229, 75, 12, 146, 196]
+len = 26230
+sha256 = "0514ce250dedcd7fe74e31d2caa3b614dab344100796df2cdcba98741dda452e"
+encoding = "utf-8"
+content_file = "content/0514ce250dedcd7fe74e31d2caa3b614dab344100796df2cdcba98741dda452e"
+
+[acquisition]
+type = "file"
+project = "root"
+path = "tests/query_coverage.rs"
+
+[recovery]
+type = "file"
+project = "root"
+path = "tests/query_coverage.rs"

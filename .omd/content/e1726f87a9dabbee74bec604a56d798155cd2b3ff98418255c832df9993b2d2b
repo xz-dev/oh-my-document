@@ -1,0 +1,151 @@
+# oh-my-document
+
+[English](README.md) | **简体中文**
+
+**把系统连起来，而不只是把文件放在一起。**
+
+需求里写着“最多重试 3 次”，后来改成了 5 次。负责重试的代码呢？谁还记得它在哪儿，又有没有一起改？设计图中的逻辑、验证重试次数的测试，又和哪一处实现对应？
+
+OMD（`omd`）把需求、设计、图表、代码和测试中的具体范围关联起来，让人和 Agent 能沿着关联理解系统、找到变化影响的地方，并记录复核与处理的理由。文档与文档、代码与代码、不同语言或项目的实现也能关联，不限于“文档对应代码”，更不只是提醒更新文档。
+
+文件可以留在原来的位置，关系由 OMD 维护。范围的位置变了，对象身份仍保持；内容变了，OMD 报告哪些范围和关联需要重新核对。人和 Agent 使用同一套 CLI 与检查规则。
+
+## 设计出发点：让 Agent 成为设计与实现之间的解释器
+
+OMD 首先是**面向 Agent 使用**设计的工具。它试图弥合人类的算法、业务与架构设计，到 Agent 编写的代码实现之间的裂缝：设计不该只留在聊天记录里，代码也不该成为只能靠重新猜测才能理解的产物。
+
+**架构与流程由人掌握，代码实现交给 AI。** 人明确目标、约束和关键决策，Agent 沿着需求、设计、实现与测试之间的关联落实细节；发生变化时，再沿这些关系定位、复核和说明处理。OMD 为这套协作保存具体范围、版本依据和理由，让设计意图与实现之间有可以返回检查的路径。
+
+反过来，它也帮助人借助 Agent **从头、结构化地理解一个项目**：先认识系统目标和组件，再深入流程、算法与代码片段，逐步建立并核对关联。不是让 Agent 一次性总结整个仓库，而是让人能够追问“为什么这样设计、在哪里实现、靠什么验证”，并掌握调整系统的依据。
+
+这一方向延续了 [《把 LLM 视作解释器——正确管理你的上下文》](https://xzos.net/blog/llm-as-interpreter-context-management/) 的思路：将上下文与工作流视为交给 Agent 执行的程序，通过明确设计、关联和验证，让它更稳定可靠地承担解释器的角色。**这是工程目标，不是确定性或语义等价的保证。** 人仍负责设计判断与验收；OMD 检查关联和变化记录，测试与审查验证实现，不能因有 link 或检查通过就断言业务正确。
+
+## 安装
+
+先安装 [Rust 与 Cargo](https://rustup.rs/)，再直接从仓库安装：
+
+```bash
+cargo install --git https://github.com/xz-dev/oh-my-document.git --locked
+```
+
+也可以先克隆再从工作副本安装：
+
+```bash
+git clone https://github.com/xz-dev/oh-my-document.git
+cd oh-my-document
+cargo install --path . --locked
+```
+
+运行 `omd --help` 查看命令。目前开发与验证集中在 Linux；现有证据不代表 Windows、macOS 已完成验证。
+
+## 跑一遍完整本地流程
+
+### 从“最多重试 3 次”到“最多重试 5 次”
+
+先看你要完成什么，再决定是否手动操作。下面是协作示意，不是一段已经执行的 Agent 对话；对应 CLI 步骤已在隔离目录验证，见 [逐步教程](docs/tutorials/retry.zh-CN.md)。
+
+**1. 人明确设计，Agent 建立可检查的关系。**
+
+两个片段分别是：
+
+```text
+需求.md：最多重试 3 次。
+retry.py：MAX_RETRIES = 3
+```
+
+你可以向 Agent 提出这样的任务：
+
+> 阅读需求和实现，把“最多重试 3 次”与负责上限的代码范围关联起来，说明理由。先给我看选中了什么，不要把整个文件都标成已确认。
+
+你要检查的是两个实际片段及关系理由：`需求范围 → 实现范围`，因为这段代码表达了需求中的重试上限。OMD 保存范围身份、内容版本和独立 link；仅把两个文件放在同一目录、或执行 init，都不会建立这条关系。
+
+**2. 需求变了，沿关系找到需要检查的代码。**
+
+把需求改成“最多重试 5 次”，暂时不改代码。运行检查时，这个例子的实际结果是：
+
+```text
+verify：exit 1，ok: false
+dirty：range:<需求范围 ID> — in-range edit …
+```
+
+这是为便于阅读而节选的结果，ID 随运行变化。它说明已跟踪需求变了；沿 link 查询，目标是 `retry.py` 中仍写着 `MAX_RETRIES = 3` 的范围。人不必记住实现在哪，也不必让 Agent 重新猜整个项目的结构。
+
+**3. 人决定怎么改，Agent 实现并留下处理依据。**
+
+> 接受上限改为 5。检查关联实现，把常量改为 5，运行相应检查，并记录这次实现修改处理了哪条关系上的哪次需求变化，以及理由。
+
+在这个最小例子中，检查只是确认常量值为 5；真实项目还要测试重试循环、错误路径和副作用。Agent 用新的观察凭据续改原范围，并明确记录 link、变化版本和适配理由。人复核实现及检查证据，而不是只看 Agent 说“完成”。
+
+**4. 检查通过意味着什么？**
+
+完成这次处理后，例子的 `verify` 返回 `ok: true`，没有 dirty、locate 或待处理项；原范围身份保留，新版本与处理理由可以追溯。但当前 CLI 在只记录新需求、尚未更新实现时也可能返回成功，**不能单凭绿色检查判断实现已跟上**。这里是否一致，是沿关系阅读代码、运行检查并复核得出的结论，不是 OMD 的语义证明。
+
+想亲手走一遍？[手动教程](docs/tutorials/retry.zh-CN.md) 按“目的 → 命令 → 看什么 → 下一步判断”解释范围、凭据和适配。JSON/ID 的处理是当前 CLI 的实际成本，教程没有省略；它不应该成为理解工具用途的前提。维护者的自动断言脚本另放在 [回归示例](examples/regression/README.md)。
+
+## 纳管文件与目录
+
+`omd import README.md` 只把该文件纳入统计；`omd import docs` 递归纳管目录并持续发现新成员。import 与 init 独立，两者都不确认正文范围；remove 撤销统计，不删除来源或正文历史。已有 store 的每次写入仍需新的 `--expected` 凭据。
+
+文件清单与 tag 覆盖使用最新有效 import 条件。缺失文件或遍历不完整使 check 失败；未配置规则时，check 成功不等于覆盖完整。使用当前构建：旧二进制会拒绝同路径统计/正文双对象的存储。
+
+操作入口：[OMD skill](skills/omd/SKILL.md)；实际进度与限制：[自管理记录](docs/omd-self-management.md)。
+
+## 来源字段
+
+来源类型与坐标单位分开表达：
+
+- **file 是默认来源。** `omd init docs/spec.md` 观察该项目相对路径。恢复内容位于另一个已登记项目时，使用 `--source-project` 与 `--source-path`。
+- **command 必须显式且参数保持字面值。** 使用 `--source-type command --executable <程序> --args-json '<JSON 字符串数组>'`。OMD 不增加隐式 shell；只有进程 exit 0 后的完整 stdout 才是成功内容。`list`、`log`、`tree` 和缓存重建不会执行命令，后续 `verify`/`check` 也需要显式许可。
+- **Git 历史必须精确且已在本地。** 使用 `--source-type git --source-project <alias> --git-commit <完整对象 ID> --git-path <该提交内路径>`。不接受浮动 ref，不自动 clone/fetch，也不把 HEAD 当成当前文件内容。
+- `--mode text|byte` 只选择坐标单位，不选择来源。路径中的 `@`、`#`、`%`、空格、平台允许的冒号和 Unicode 都保持字面含义。
+
+## 配置先行初始化
+
+真正的新项目可以在第一次显式 `init` 前只包含 `.omd/omd.toml`，例如先设置编码：
+
+```toml
+format = "omd.encoding/1"
+default_encoding = "windows-1252"
+```
+
+首次初始化会保留配置原字节，并使用该文本视图。已有、损坏、显式外置或已经绑定的元数据不能借此覆盖初始化。读取配置不会执行来源命令，也不会自动授予普通写入资格。
+
+## 本机映射、移动与副本
+
+`omd project register <alias> <project-root> <metadata-dir>` 把本机位置写入 `projects.toml`；共享历史保存逻辑 project/store 身份与项目相对路径。登记和移动映射也是写操作，需要先由 `verify` 得到新的 `--expected` 调用方凭据。
+
+显式移动同一个权威 store 后，可以保留原 store ID。复制元数据并把副本作为另一处可写权威则不同：原始副本默认只读，必须显式运行 `omd activate`，取得新 store ID，并补齐必要 peer 保护。其他位置原本指向旧 store 的外部引用不会自动改指副本。OMD 不负责同步或合并两份可写历史。
+
+## 运行边界
+
+- 权威结构化文本、不可变记录和必要内容默认保存在 `.omd/`；`OMD_CACHE_PATH` 下的查询索引可以删除重建。
+- `OMD_CONFIG_PATH`、`OMD_CACHE_PATH` 优先于平台/XDG 后备路径。`--root`、`--meta`、`--project`、`--store` 用于明确选择上下文；显式错误不会悄悄回退。
+- 写入必须携带新的调用方依据。publication、来源、登记、映射或 peer 依据过期时直接失败，不自动读取新值后重试。
+- `--difftastic` 是对本次调用的**一次性**外部工具许可：壳调用 `difft` 二进制对旧/新完整内容做结构树比较，把被判定结构无变化的范围从 `dirty` 过滤到 `cosmetic` 桶。该参数不携带到下一次调用，读取/查询/重建永不触发；工具缺失或失败时相关范围保守留在 dirty，不静默归入 cosmetic。`commit cosmetic <path>` 对凭据钉住的版本重分类后批量续改收尾。
+- 跨 store 发布先保护被引用版本，再发布消费方。晚期 I/O 失败可能留下已成功发布的成员和开放块；JSON 会如实列出成功成员、失败步骤、边界和 operation ID，不假称整体回滚。
+- 不支持的旧 store，以及已移除的复合来源/坐标接口，会被明确拒绝，不自动迁移或重写。
+- audit 和 note 是 append-only 提交链（`audit:<init>` / `note:<init>`），不是平面记录：`omd audit add|show|list|pass|fail|pending` 从种子沿 link 图涂色遍历（正反两个方向分开报告），逐边判 L0–L2，结论以 patch 追加三态（pass/fail/pending）；正文 `audit:<commit-id>` wiki 引用和 Link 端点都钉住具体 commit。只有结构性 broken 才 exit 1——fail 和 pending 是记录不是崩溃。`commit unclean --reason "audit:<id>"` 开追踪修复环，修复 commit 通过 link 回链到钉住的 audit 完成闭环。
+
+## 继续了解
+
+- [需求与设计历史](docs/requirements.md)
+- [来源与坐标](docs/source-model.md)
+- [存储与路径](docs/storage.md)
+- [实施交接](docs/handoff.md)
+- [规格与任务证据](spec-traceability.md)
+
+Rust 核心和 CLI 已经存在，但整个 change 是否接受仍需独立审查。已有仓库内 OMD skill 首版，尚未全局安装或完成全部功能实践；可选 Lean 工作流尚未交付或验证。OMD 不承诺证明语义等价、判断文档充分，或已经覆盖所有平台。
+
+## 参与开发
+
+在仓库中运行：
+
+```bash
+cargo fmt --check
+cargo build --locked --bin omd
+cargo test --locked
+```
+
+## 许可证
+
+许可证待定，目前尚未提供开源许可。

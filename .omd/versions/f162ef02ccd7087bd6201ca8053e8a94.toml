@@ -1,0 +1,16 @@
+format = "omd.version/2"
+id = [241, 98, 239, 2, 204, 215, 8, 123, 214, 32, 28, 168, 5, 62, 138, 148]
+len = 76503
+sha256 = "a59c5fe148f7ffb3cd19e37db9fb19d4c73f58a7fa34a9508eaba2e687cc3172"
+encoding = "utf-8"
+content_file = "content/a59c5fe148f7ffb3cd19e37db9fb19d4c73f58a7fa34a9508eaba2e687cc3172"
+
+[acquisition]
+type = "file"
+project = "root"
+path = "src/records/store.rs"
+
+[recovery]
+type = "file"
+project = "root"
+path = "src/records/store.rs"
