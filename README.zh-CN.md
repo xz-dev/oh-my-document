@@ -38,6 +38,16 @@ cargo install --path . --locked
 
 运行 `omd --help` 查看命令。目前开发与验证集中在 Linux；现有证据不代表 Windows、macOS 已完成验证。
 
+### 安装 Agent skill
+
+OMD 工作流 skill 位于仓库 [`skills/omd/`](skills/omd/SKILL.md)。支持 [skills](https://skills.sh) CLI 的 Agent 可一条命令全局安装，之后每个会话都能加载：
+
+```bash
+npx skills add xz-dev/oh-my-document -g
+```
+
+该命令会把仓库中的 `skills/omd/` 复制到全局 skill 目录；上游更新后重跑一次即可同步。不支持 skills CLI 的 Agent 可以直接读 [`skills/omd/SKILL.md`](skills/omd/SKILL.md)。
+
 ## 跑一遍完整本地流程
 
 ### 从“最多重试 3 次”到“最多重试 5 次”
@@ -134,7 +144,7 @@ default_encoding = "windows-1252"
 - [实施交接](docs/handoff.md)
 - [规格与任务证据](spec-traceability.md)
 
-Rust 核心和 CLI 已经存在，但整个 change 是否接受仍需独立审查。已有仓库内 OMD skill 首版，尚未全局安装或完成全部功能实践；可选 Lean 工作流尚未交付或验证。OMD 不承诺证明语义等价、判断文档充分，或已经覆盖所有平台。
+Rust 核心和 CLI 已经存在，但整个 change 是否接受仍需独立审查。OMD skill 可通过 `npx skills add xz-dev/oh-my-document -g` 全局安装；仓库内并非所有工作流都已实践。可选 Lean 工作流尚未交付或验证。OMD 不承诺证明语义等价、判断文档充分，或已经覆盖所有平台。
 
 ## 参与开发
 

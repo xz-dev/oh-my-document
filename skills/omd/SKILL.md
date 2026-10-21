@@ -108,4 +108,4 @@ PY
 
 ## 在本仓库使用
 
-本仓库实践与范围入口见 [自管理记录](../../docs/omd-self-management.md)。项目特定 ID 存放在那里及 `.omd/`，不复制到通用操作模板。此 skill 是仓库内首版，尚未全局安装；让其他 Agent 使用时显式提供本文件或按宿主支持的 skill 安装方式加载。
+本仓库实践与范围入口见 [自管理记录](../../docs/omd-self-management.md)。项目特定 ID 存放在那里及 `.omd/`，不复制到通用操作模板。此 skill 可通过 skills CLI 全局安装：`npx skills add xz-dev/oh-my-document -g`；不支持该 CLI 的宿主可直接提供本文件加载。

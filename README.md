@@ -38,6 +38,16 @@ cargo install --path . --locked
 
 Run `omd --help`. Current development and verification focus on Linux; Windows and macOS are not claimed by the present test evidence.
 
+### Install the agent skill
+
+The OMD workflow skill lives in [`skills/omd/`](skills/omd/SKILL.md). Agents that support the [skills](https://skills.sh) CLI can install it globally so every session can load it:
+
+```bash
+npx skills add xz-dev/oh-my-document -g
+```
+
+This copies `skills/omd/` from the repository into your global skill directory; rerun the command after upstream updates. Agents without the skills CLI can read [`skills/omd/SKILL.md`](skills/omd/SKILL.md) directly.
+
 ## Run a complete local workflow
 
 ### From “at most 3 retries” to “at most 5”
@@ -134,7 +144,7 @@ Moving one authoritative store can keep its store ID after explicit remapping. C
 - [Implementation handoff](docs/handoff.md)
 - [Spec-to-task evidence](spec-traceability.md)
 
-Current Rust core and CLI exist, but overall change acceptance still depends on independent review. An initial repository-local OMD skill is available; it is not globally installed and not every workflow has been exercised. The optional Lean workflow has not been delivered or validated. OMD does not claim semantic equivalence, document sufficiency, or all-platform support.
+Current Rust core and CLI exist, but overall change acceptance still depends on independent review. The OMD skill can be installed globally with `npx skills add xz-dev/oh-my-document -g`; not every workflow has been exercised in this repository. The optional Lean workflow has not been delivered or validated. OMD does not claim semantic equivalence, document sufficiency, or all-platform support.
 
 ## Contributing
 
